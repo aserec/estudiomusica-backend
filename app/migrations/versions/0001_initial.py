@@ -5,8 +5,9 @@ Revises:
 Create Date: 2026-10-25
 
 No se instala pgcrypto: en Postgres >= 13 ``gen_random_uuid()`` es nativa.
-El mixin no crea tablas; las issues de negocio añadirán
-``BEFORE UPDATE ... EXECUTE FUNCTION set_updated_at()`` en cada tabla.
+``PersistentModel`` monta ``BEFORE UPDATE ... set_updated_at()`` al crear
+cada tabla. Las migraciones de negocio pueden usar
+``updated_at_trigger_sql`` / ``attach_updated_at_trigger``.
 """
 
 from collections.abc import Sequence
@@ -22,7 +23,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.execute(
         """
-        CREATE OR REPLACE FUNCTION set_updated_at()
+        CREATE FUNCTION set_updated_at()
         RETURNS trigger
         LANGUAGE plpgsql
         AS $$
@@ -36,4 +37,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
+    op.execute("DROP FUNCTION IF EXISTS set_updated_at()")

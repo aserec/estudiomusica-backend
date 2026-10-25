@@ -1,7 +1,7 @@
 """Configuración async de Alembic.
 
 El DSN sale de ``sqlalchemy.url`` (alembic.ini o ``set_main_option``)
-si está definido; si no, de ``Settings.database_url``.
+si está definido; si no, de ``Settings.resolved_database_url()``.
 """
 
 import asyncio
@@ -28,7 +28,7 @@ def get_database_url() -> str:
     if configured:
         return configured
     get_settings.cache_clear()
-    return get_settings().database_url
+    return get_settings().resolved_database_url()
 
 
 def run_migrations_offline() -> None:
