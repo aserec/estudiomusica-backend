@@ -1,5 +1,6 @@
 import asyncio
 import time
+from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient

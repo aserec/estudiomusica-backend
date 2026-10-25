@@ -62,9 +62,18 @@ def test_alembic_upgrade_head_and_downgrade_base(
 
     command.upgrade(config, "head")
     assert _scalar(url, "SELECT version_num FROM alembic_version") == "0001_initial"
+    assert (
+        _scalar(url, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
+        == "set_updated_at"
+    )
+    assert _scalar(url, "SELECT gen_random_uuid() IS NOT NULL") is True
 
     command.downgrade(config, "base")
     assert _scalar(url, "SELECT version_num FROM alembic_version") is None
+    assert (
+        _scalar(url, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
+        is None
+    )
 
     command.upgrade(config, "head")
     assert _scalar(url, "SELECT version_num FROM alembic_version") == "0001_initial"

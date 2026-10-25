@@ -25,8 +25,13 @@ class PersistentMixin:
     """Convención de columnas para entidades persistidas.
 
     - ``id``: UUID (texto UUID en JSON; tipo UUID en Postgres).
-    - ``created_at`` / ``updated_at``: timestamps con zona horaria.
-    - ``deleted_at``: borrado lógico (NULL = vigente).
+    - ``created_at`` / ``updated_at``: ``clock_timestamp()``, no ``now()``.
+      ``now()`` es la hora de inicio de transacción y el SQL crudo no
+      actualiza ``updated_at``. Las tablas de negocio deben montar
+      ``BEFORE UPDATE ... EXECUTE FUNCTION set_updated_at()``.
+    - ``deleted_at``: borrado lógico (NULL = vigente). Sin índice genérico:
+      un B-tree sobre toda la columna no ayuda a listar vigentes. Quien
+      filtre ``deleted_at IS NULL`` debe añadir un índice parcial.
 
     Las issues de negocio heredan ``PersistentModel``. No filtra solas las
     filas borradas: eso es responsabilidad de cada repositorio.
@@ -40,19 +45,18 @@ class PersistentMixin:
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
+        server_default=func.clock_timestamp(),
+        onupdate=func.clock_timestamp(),
         nullable=False,
     )
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
-        index=True,
     )
 
 

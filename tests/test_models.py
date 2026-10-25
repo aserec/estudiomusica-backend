@@ -1,10 +1,12 @@
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import String, Table, inspect, select
+import pytest
+from sqlalchemy import String, Table, inspect, select, text
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models import PersistentModel
@@ -22,6 +24,11 @@ def _column_names(sync_conn: Connection) -> list[str]:
     return [col["name"] for col in inspect(sync_conn).get_columns("mixin_probes")]
 
 
+def _create_probe_table(sync_conn: Connection) -> None:
+    MixinProbe.__table__.create(sync_conn, checkfirst=True)
+
+
+@pytest.mark.db
 async def test_persistent_mixin_columns_and_defaults(db_session: AsyncSession) -> None:
     connection = await db_session.connection()
     probe_table = MixinProbe.__table__
@@ -53,6 +60,7 @@ async def test_persistent_mixin_columns_and_defaults(db_session: AsyncSession) -
     assert found.label == "alpha"
 
 
+@pytest.mark.db
 async def test_persistent_mixin_soft_delete(db_session: AsyncSession) -> None:
     connection = await db_session.connection()
     probe_table = MixinProbe.__table__
@@ -68,6 +76,70 @@ async def test_persistent_mixin_soft_delete(db_session: AsyncSession) -> None:
     await db_session.refresh(probe)
 
     assert probe.deleted_at is not None
+
+
+@pytest.mark.db
+async def test_updated_at_advances_across_separate_commits(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: str,
+    migrated_test_database: None,
+) -> None:
+    """El trigger usa clock_timestamp(); now() no avanzaría en la misma transacción."""
+
+    from app.config import get_settings
+    from app.db import dispose_engine
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres)
+    get_settings.cache_clear()
+    engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(_create_probe_table)
+            await connection.execute(
+                text(
+                    "DROP TRIGGER IF EXISTS mixin_probes_set_updated_at "
+                    "ON mixin_probes"
+                )
+            )
+            await connection.execute(
+                text(
+                    "CREATE TRIGGER mixin_probes_set_updated_at "
+                    "BEFORE UPDATE ON mixin_probes "
+                    "FOR EACH ROW EXECUTE FUNCTION set_updated_at()"
+                )
+            )
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            probe = MixinProbe(label="first")
+            session.add(probe)
+            await session.commit()
+            await session.refresh(probe)
+            first_updated = probe.updated_at
+            probe_id = probe.id
+
+        await asyncio.sleep(0.02)
+
+        async with factory() as session:
+            await session.execute(
+                text("UPDATE mixin_probes SET label = :label WHERE id = :id"),
+                {"label": "second", "id": probe_id},
+            )
+            await session.commit()
+
+        async with factory() as session:
+            found = await session.get(MixinProbe, probe_id)
+            assert found is not None
+            assert found.label == "second"
+            assert found.updated_at > first_updated
+    finally:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_conn: MixinProbe.__table__.drop(sync_conn, checkfirst=True)
+            )
+        await engine.dispose()
+        await dispose_engine()
+        get_settings.cache_clear()
 
 
 def test_suite_does_not_create_dot_data_store() -> None:

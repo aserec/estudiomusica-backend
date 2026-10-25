@@ -103,7 +103,7 @@ Para revertirlas del todo:
 uv run alembic downgrade base
 ```
 
-Las revisiones viven en `alembic/versions/`. La inicial solo instala `pgcrypto` (`gen_random_uuid`); las tablas de negocio irán en issues posteriores. Nueva revisión, cuando exista un modelo:
+Las revisiones viven en `alembic/versions/`. La inicial crea `set_updated_at()` (`clock_timestamp()`). No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. Las tablas de negocio irán en issues posteriores y deben montar `BEFORE UPDATE ... EXECUTE FUNCTION set_updated_at()`. Nueva revisión, cuando exista un modelo:
 
 ```bash
 uv run alembic revision -m "descripcion" --autogenerate
