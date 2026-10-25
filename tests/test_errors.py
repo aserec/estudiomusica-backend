@@ -1,8 +1,7 @@
-import re
+import logging
 
+import pytest
 from fastapi.testclient import TestClient
-
-SAFE_FIELD = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 
 
 def test_pydantic_validation_returns_400_validation_fields(
@@ -87,23 +86,34 @@ def test_malformed_json_fields_are_body_not_index(client: TestClient) -> None:
     assert response.json() == {"error": "validation", "fields": ["body"]}
 
 
-def test_client_supplied_field_names_are_sanitized(probe_client: TestClient) -> None:
+def test_client_supplied_field_names_are_replaced_by_parent(
+    probe_client: TestClient,
+) -> None:
     response = probe_client.post(
         "/api/v1/_test/loose",
-        json={"<script>": "nope", "a;b": "nope", "ok_field": "nope"},
+        json={"secretKey": "nope", "__proto__": "nope", "ok_field": "nope"},
     )
 
     assert response.status_code == 400
-    body = response.json()
-    assert body["error"] == "validation"
-    fields = body.get("fields")
-    if fields is not None:
-        assert "ok_field" in fields or "okField" in fields
-        for name in fields:
-            assert SAFE_FIELD.match(name)
-            assert len(name) <= 64
-            assert "<script>" not in name
-            assert ";" not in name
+    assert response.json() == {"error": "validation", "fields": ["body"]}
+    assert "secretKey" not in response.text
+    assert "__proto__" not in response.text
+    assert "ok_field" not in response.text
+    assert "okField" not in response.text
+
+
+def test_declared_model_fields_keep_camel_case_alias(client: TestClient) -> None:
+    response = client.post("/api/v1/examples", json={"displayName": ""})
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "validation", "fields": ["displayName"]}
+
+
+def test_http_418_uses_http_status_slug(probe_client: TestClient) -> None:
+    response = probe_client.get("/api/v1/_test/http-418")
+
+    assert response.status_code == 418
+    assert response.json() == {"error": "im_a_teapot"}
 
 
 def test_domain_validation_stays_400_not_422(probe_client: TestClient) -> None:
@@ -121,6 +131,29 @@ def test_unhandled_error_is_500_without_message(client: TestClient) -> None:
     assert response.json() == {"error": "internal_error"}
     assert "secret-leak" not in response.text
     assert response.headers["x-api-version"] == "v1"
+    assert b": " not in response.content
+
+
+def test_500_logs_traceback(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.ERROR, logger="app.middleware"):
+        response = client.get("/api/v1/_test/boom")
+
+    assert response.status_code == 500
+    assert "RuntimeError" in caplog.text
+    assert "secret-leak" in caplog.text
+
+
+def test_mid_stream_exception_is_reraised(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    with (
+        caplog.at_level(logging.ERROR, logger="app.middleware"),
+        pytest.raises(RuntimeError, match="mid-stream"),
+    ):
+        client.get("/api/v1/_test/stream-boom")
+    assert "mid-stream" in caplog.text
 
 
 def test_production_500_has_no_message(production_client: TestClient) -> None:
