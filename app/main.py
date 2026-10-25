@@ -18,7 +18,13 @@ from app.middleware import (
     BodySizeLimitMiddleware,
     RejectedPreflightMiddleware,
 )
-from app.routers import auth_router, examples_router, health_router
+from app.routers import (
+    admin_roles_router,
+    auth_router,
+    courses_router,
+    examples_router,
+    health_router,
+)
 from app.schemas.errors import ErrorResponse
 
 logger = logging.getLogger(__name__)
@@ -37,6 +43,8 @@ Backend FastAPI de EstudioMusica.
 - CORS: orígenes en `CORS_ORIGINS` (por defecto el Next.js local).
 - Postgres: `GET /api/v1/health/db` → `{"db":"ok"}` o `503` `{"db":"down"}`.
 - Auth: `POST /api/v1/auth/signup|login|logout` y `GET /api/v1/auth/me`.
+- Roles: `GET|PATCH|DELETE /api/v1/admin/system-roles` y
+  `GET /api/v1/courses/{course_id}/me/permissions`.
 """
 
 OPENAPI_TAGS = [
@@ -50,6 +58,20 @@ OPENAPI_TAGS = [
         "name": "auth",
         "description": (
             "Registro, login, logout y sesión. Cookie HttpOnly + JWT HS256."
+        ),
+    },
+    {
+        "name": "admin",
+        "description": (
+            "Roles de sistema. Requiere `site:manage-admins`. "
+            "PATCH parcial de name/active/sortOrder (excepción al PUT de #91)."
+        ),
+    },
+    {
+        "name": "courses",
+        "description": (
+            "Permisos del usuario actual en un curso. "
+            "La matrícula se asigna en #403; aquí solo se lee."
         ),
     },
     {
@@ -142,6 +164,8 @@ def create_app() -> FastAPI:
     api_router = APIRouter(prefix="/api/v1")
     api_router.include_router(health_router)
     api_router.include_router(auth_router)
+    api_router.include_router(admin_roles_router)
+    api_router.include_router(courses_router)
     if settings.example_routes_enabled():
         api_router.include_router(examples_router)
     application.include_router(api_router)

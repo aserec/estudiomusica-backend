@@ -23,7 +23,9 @@ from app.exceptions import (
     Validation,
 )
 from app.models import AuthSession, User
+from app.models.user import SystemRole
 from app.schemas.auth import LogInRequest, PublicUser, SignUpRequest
+from app.services.roles import assert_role_assignable
 
 _FIRST_NAME_MAX = 80
 _LAST_NAME_MAX = 80
@@ -81,12 +83,19 @@ async def register_user(
         raise EmailTaken()
 
     first_name, last_name = split_display_name(body.name)
+    role_id = (
+        SystemRole.ADMIN
+        if email in settings.bootstrap_admin_email_set()
+        else SystemRole.ALUMNO
+    )
+    await assert_role_assignable(session, role_id)
     user = User(
         first_name=first_name,
         last_name=last_name,
         email=email,
         password_hash=await hash_password(body.password, settings),
-        is_admin=email in settings.bootstrap_admin_email_set(),
+        system_role_id=role_id,
+        is_admin=role_id == SystemRole.ADMIN,
         email_notifications_enabled=True,
     )
     try:

@@ -11,10 +11,16 @@ from app.schemas.errors import ErrorResponse
 from app.schemas.examples import ExampleCreate, ExampleItem
 from app.schemas.health import DatabaseHealthResponse, HealthResponse
 from app.schemas.pagination import Paginated, PaginationQuery
+from app.schemas.roles import (
+    CoursePermissionsResponse,
+    SystemRoleResponse,
+    SystemRoleUpdate,
+)
 
 __all__ = [
     "AuthMeResponse",
     "AuthSessionResponse",
+    "CoursePermissionsResponse",
     "DatabaseHealthResponse",
     "ErrorResponse",
     "ExampleCreate",
@@ -25,4 +31,6 @@ __all__ = [
     "PaginationQuery",
     "PublicUser",
     "SignUpRequest",
+    "SystemRoleResponse",
+    "SystemRoleUpdate",
 ]
