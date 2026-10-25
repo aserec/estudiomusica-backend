@@ -8,6 +8,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine.url import make_url
 
 _DEFAULT_DEV_PASSWORD = "estudiomusica"
+_DEFAULT_DEV_USER = "estudiomusica"
+_DATABASE_NAME_QUERY_KEYS = ("database", "dbname")
 DEFAULT_DEV_AUTH_SECRET = "dev-insecure-auth-secret-change-me"
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -124,9 +126,28 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @staticmethod
+    def _query_value(parsed: object, *keys: str) -> str | None:
+        query = getattr(parsed, "query", {}) or {}
+        lowered = {str(key).lower(): value for key, value in query.items()}
+        for key in keys:
+            value = lowered.get(key)
+            if value is None:
+                continue
+            if isinstance(value, list | tuple):
+                return str(value[0]) if value else None
+            return str(value)
+        return None
+
     @model_validator(mode="after")
     def reject_default_database_credentials(self) -> Self:
-        """Las credenciales de desarrollo no valen fuera de development."""
+        """Las credenciales de desarrollo no valen fuera de development.
+
+        asyncpg acepta ``password``, ``user``, ``database`` y ``dbname``
+        en la query; se aplican como override del DSN antes de validar.
+        Un ``*_test`` en el path se admite con credenciales no por defecto
+        (fixture ``production_client``). El override por query no.
+        """
 
         if self.app_env == "development":
             return self
@@ -134,10 +155,19 @@ class Settings(BaseSettings):
             parsed = make_url(self.resolved_database_url())
         except Exception:
             raise ValueError("DATABASE_URL no es un DSN válido") from None
-        if parsed.password == _DEFAULT_DEV_PASSWORD:
+        query_password = self._query_value(parsed, "password")
+        query_user = self._query_value(parsed, "user")
+        query_database = self._query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
+        password = query_password or parsed.password
+        if password == _DEFAULT_DEV_PASSWORD or query_user == _DEFAULT_DEV_USER:
             raise ValueError(
-                "DATABASE_URL no puede usar la contraseña por defecto "
-                "de desarrollo fuera de APP_ENV=development"
+                "DATABASE_URL no puede usar la contraseña o el usuario "
+                "por defecto de desarrollo fuera de APP_ENV=development"
+            )
+        if query_database and query_database.endswith("_test"):
+            raise ValueError(
+                "DATABASE_URL no puede apuntar a una base *_test "
+                "fuera de APP_ENV=development"
             )
         return self
 

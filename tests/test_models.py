@@ -9,6 +9,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.db import RedactedDsn
 from app.models import PersistentModel, updated_at_trigger_name
 
 
@@ -139,7 +140,7 @@ async def test_updated_at_advances_twice_in_the_same_transaction(
 @pytest.mark.db
 async def test_updated_at_advances_across_separate_commits(
     monkeypatch: pytest.MonkeyPatch,
-    require_postgres: str,
+    require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
     """El trigger usa clock_timestamp(); now() no avanzaría en la misma transacción."""
@@ -147,9 +148,9 @@ async def test_updated_at_advances_across_separate_commits(
     from app.config import get_settings
     from app.db import dispose_engine
 
-    monkeypatch.setenv("DATABASE_URL", require_postgres)
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
-    engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = MixinProbe.__table__
     assert isinstance(probe_table, Table)
     try:

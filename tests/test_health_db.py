@@ -1,6 +1,9 @@
 import asyncio
+import socket
+import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 from fastapi.testclient import TestClient
@@ -123,43 +126,77 @@ def test_health_db_returns_503_if_probe_hangs(
     assert elapsed < 2.0
 
 
-class _HangingClose:
-    async def execute(self, *_args: object, **_kwargs: object) -> None:
-        return None
+def test_health_db_does_not_await_graceful_close() -> None:
+    import inspect
 
-    async def close(self) -> None:
-        await asyncio.Event().wait()
+    source = inspect.getsource(health_service.check_database)
+    assert "connection.close()" not in source
+    assert "_abandon_health_connection" in source
 
 
-class _HangingCloseEngine:
-    async def connect(self) -> _HangingClose:
-        return _HangingClose()
+@contextmanager
+def _silent_tcp_server() -> Iterator[int]:
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(8)
+    port = int(server.getsockname()[1])
+    stop = threading.Event()
+
+    def serve() -> None:
+        server.settimeout(0.2)
+        held: list[socket.socket] = []
+        try:
+            while not stop.is_set():
+                try:
+                    conn, _addr = server.accept()
+                except TimeoutError:
+                    continue
+                held.append(conn)
+        finally:
+            for conn in held:
+                conn.close()
+            server.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield port
+    finally:
+        stop.set()
+        thread.join(timeout=2)
 
 
 @pytest.fixture
-def hang_close_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+def silent_tcp_health_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     from tests.conftest import _build_client
 
-    monkeypatch.setattr(health_service, "get_engine", lambda: _HangingCloseEngine())
-    yield from _build_client(
-        monkeypatch,
-        APP_ENV="development",
-        EXPOSE_ERRORS="false",
-        ENABLE_EXAMPLE_ROUTES="true",
-        DB_HEALTH_TIMEOUT="0.3",
-    )
+    with _silent_tcp_server() as port:
+        yield from _build_client(
+            monkeypatch,
+            APP_ENV="development",
+            EXPOSE_ERRORS="false",
+            ENABLE_EXAMPLE_ROUTES="true",
+            DB_HEALTH_TIMEOUT="0.4",
+            DB_CONNECT_TIMEOUT="2",
+            DATABASE_URL=(
+                f"postgresql+asyncpg://leaky_user:{SECRET_PASSWORD}"
+                f"@127.0.0.1:{port}/silent_test"
+            ),
+        )
 
 
-def test_health_db_returns_503_if_close_hangs(
-    hang_close_client: TestClient,
+def test_health_db_silent_tcp_server_stays_within_timeout(
+    silent_tcp_health_client: TestClient,
 ) -> None:
     started = time.monotonic()
-    response = hang_close_client.get("/api/v1/health/db")
+    response = silent_tcp_health_client.get("/api/v1/health/db")
     elapsed = time.monotonic() - started
 
     assert response.status_code == 503
     assert response.json() == {"db": "down"}
-    assert elapsed < 2.0
+    assert SECRET_PASSWORD not in response.text
+    assert elapsed < 1.5
 
 
 def test_health_db_ok_body_has_only_db_key(

@@ -8,7 +8,7 @@ from sqlalchemy import String, Table, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db import clear_engine, get_session, get_session_factory
+from app.db import RedactedDsn, clear_engine, get_session, get_session_factory
 from app.models import PersistentModel
 
 
@@ -83,16 +83,16 @@ async def test_get_session_override_runs_select(session_client: Any) -> None:
 @pytest.mark.db
 async def test_get_session_commits_persistently(
     monkeypatch: pytest.MonkeyPatch,
-    require_postgres: str,
+    require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
     from app.config import get_settings
     from app.db import dispose_engine
 
-    monkeypatch.setenv("DATABASE_URL", require_postgres)
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     try:
@@ -125,16 +125,16 @@ async def test_get_session_commits_persistently(
 @pytest.mark.db
 async def test_get_session_rollbacks_persistently(
     monkeypatch: pytest.MonkeyPatch,
-    require_postgres: str,
+    require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
     from app.config import get_settings
     from app.db import dispose_engine
 
-    monkeypatch.setenv("DATABASE_URL", require_postgres)
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     try:
@@ -184,55 +184,81 @@ async def test_db_session_does_not_expire_on_commit(
     assert probe.label == "still-loaded"
 
 
-@pytest.mark.db
-async def test_join_transaction_rollback_discards_committed_rows(
-    require_postgres: str,
-    migrated_test_database: None,
-) -> None:
-    from sqlalchemy.ext.asyncio import AsyncSession as SASession
+_DB_SESSION_LEAK_LABEL = "db-session-must-not-leak"
 
-    engine = create_async_engine(require_postgres, pool_pre_ping=True)
+
+@pytest.mark.db
+async def test_db_session_commit_is_not_visible_outside_the_fixture(
+    db_session: AsyncSession,
+    require_postgres: RedactedDsn,
+) -> None:
+    """El fixture real envuelve el commit en una transacción que se revierte."""
+
+    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
-        )
-        await connection.execute(
-            text("DELETE FROM session_probes WHERE label = 'must-not-leak'")
-        )
     try:
-        async with engine.connect() as connection:
-            transaction = await connection.begin()
-            session = SASession(
-                bind=connection,
-                expire_on_commit=False,
-                join_transaction_mode="create_savepoint",
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
             )
-            try:
-                session.add(SessionProbe(label="must-not-leak"))
-                await session.commit()
-                found = await session.scalar(
-                    text(
-                        "SELECT label FROM session_probes WHERE label = 'must-not-leak'"
-                    )
-                )
-                assert found == "must-not-leak"
-            finally:
-                await session.close()
-                await transaction.rollback()
+            await connection.execute(
+                text("DELETE FROM session_probes WHERE label = :label"),
+                {"label": _DB_SESSION_LEAK_LABEL},
+            )
+
+        db_session.add(SessionProbe(label=_DB_SESSION_LEAK_LABEL))
+        await db_session.commit()
+        found = await db_session.scalar(
+            text("SELECT label FROM session_probes WHERE label = :label"),
+            {"label": _DB_SESSION_LEAK_LABEL},
+        )
+        assert found == _DB_SESSION_LEAK_LABEL
 
         async with engine.connect() as connection:
             leftover = await connection.scalar(
-                text("SELECT label FROM session_probes WHERE label = 'must-not-leak'")
+                text("SELECT label FROM session_probes WHERE label = :label"),
+                {"label": _DB_SESSION_LEAK_LABEL},
             )
             assert leftover is None
     finally:
-        async with engine.begin() as connection:
-            await connection.run_sync(
-                lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
-            )
         await engine.dispose()
+
+
+@pytest.mark.db
+async def test_db_session_commit_does_not_leave_rows_for_the_next_test(
+    db_session: AsyncSession,
+) -> None:
+    connection = await db_session.connection()
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
+    await connection.run_sync(
+        lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
+    )
+    db_session.add(SessionProbe(label=_DB_SESSION_LEAK_LABEL))
+    await db_session.commit()
+    found = await db_session.scalar(
+        text("SELECT label FROM session_probes WHERE label = :label"),
+        {"label": _DB_SESSION_LEAK_LABEL},
+    )
+    assert found == _DB_SESSION_LEAK_LABEL
+
+
+@pytest.mark.db
+async def test_db_session_next_test_does_not_see_previous_commit(
+    db_session: AsyncSession,
+) -> None:
+    connection = await db_session.connection()
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
+    await connection.run_sync(
+        lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
+    )
+    leftover = await db_session.scalar(
+        text("SELECT label FROM session_probes WHERE label = :label"),
+        {"label": _DB_SESSION_LEAK_LABEL},
+    )
+    assert leftover is None
 
 
 def test_clear_engine_disposes_sync_engine(monkeypatch: pytest.MonkeyPatch) -> None:

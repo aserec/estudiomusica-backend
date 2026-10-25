@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import CITEXT
 
-from app.models import updated_at_trigger_name, updated_at_trigger_sql
+from app.migrations.ops import op_create_updated_at_trigger, op_drop_updated_at_trigger
 
 revision: str = "0002_auth_users"
 down_revision: str | None = "0001_initial"
@@ -106,16 +106,13 @@ def upgrade() -> None:
     op.create_index(
         "ix_auth_sessions_user_id", "auth_sessions", ["user_id"], unique=False
     )
-    op.execute(updated_at_trigger_sql("users"))
-    op.execute(updated_at_trigger_sql("auth_sessions"))
+    op_create_updated_at_trigger("users")
+    op_create_updated_at_trigger("auth_sessions")
 
 
 def downgrade() -> None:
-    op.execute(
-        f"DROP TRIGGER IF EXISTS {updated_at_trigger_name('auth_sessions')} "
-        "ON auth_sessions"
-    )
-    op.execute(f"DROP TRIGGER IF EXISTS {updated_at_trigger_name('users')} ON users")
+    op_drop_updated_at_trigger("auth_sessions")
+    op_drop_updated_at_trigger("users")
     op.drop_index(
         "ix_auth_sessions_user_id",
         table_name="auth_sessions",

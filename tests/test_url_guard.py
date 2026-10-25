@@ -1,6 +1,13 @@
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from tests.conftest import (
+    ROOT,
+    alembic_config,
     derive_alembic_database_url,
     require_test_database_url,
     resolve_alembic_database_url,
@@ -79,6 +86,42 @@ def test_resolve_alembic_database_url_derives_from_test(
     assert url.endswith("/app_alembic_test")
 
 
+def test_make_alembic_config_works_without_repo_ini(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from alembic.script import ScriptDirectory
+
+    from app.migrations.config import make_alembic_config
+
+    monkeypatch.chdir(tmp_path)
+    assert not (tmp_path / "alembic.ini").exists()
+    url = (
+        "postgresql+asyncpg://estudiomusica:p%40ss%25w0rd"
+        "@127.0.0.1:5432/estudiomusica_test"
+    )
+    config = make_alembic_config(url)
+    assert config.get_main_option("script_location") == "app:migrations"
+    assert config.get_main_option("sqlalchemy.url") == url
+    assert ScriptDirectory.from_config(config).get_heads() == ["0002_auth_users"]
+
+
+def test_packaged_alembic_ini_is_importable() -> None:
+    from importlib.resources import files
+
+    assert files("app").joinpath("alembic.ini").is_file()
+
+
+def test_alembic_config_escapes_percent_in_password() -> None:
+    """set_main_option interpola '%'; hay que pasar '%%' para no romper el DSN."""
+
+    url = (
+        "postgresql+asyncpg://estudiomusica:p%40ss%25w0rd"
+        "@127.0.0.1:5432/estudiomusica_test"
+    )
+    config = alembic_config(url)
+    assert config.get_main_option("sqlalchemy.url") == url
+
+
 def test_resolve_alembic_database_url_rejects_explicit_dev(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -86,3 +129,32 @@ def test_resolve_alembic_database_url_rejects_explicit_dev(
     with pytest.raises(pytest.UsageError, match="ALEMBIC_TEST_DATABASE_URL") as caught:
         resolve_alembic_database_url()
     assert _SECRET not in str(caught.value)
+
+
+def test_autouse_guard_aborts_session_on_dev_database() -> None:
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env["TEST_DATABASE_URL"] = (
+        f"postgresql+asyncpg://estudiomusica:{_SECRET}@127.0.0.1:5432/estudiomusica"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--tb=short",
+            "-p",
+            "no:cacheprovider",
+            "tests/test_health.py::test_api_health_returns_ok",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 2
+    assert _SECRET not in output
+    assert "_test" in output

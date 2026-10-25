@@ -25,6 +25,30 @@ def redact_database_url(url: str) -> str:
         return "<dsn-redactado>"
 
 
+class RedactedDsn:
+    """DSN cuyo ``str``/``repr`` nunca incluye la contraseña.
+
+    pytest imprime argumentos y locales de fixtures (``-l`` / ``--showlocals``).
+    Guardar el DSN crudo en una variable o en la firma del fixture filtra
+    la contraseña. Este objeto solo la entrega con ``secret()``.
+    """
+
+    __slots__ = ("_secret",)
+
+    def __init__(self, url: str) -> None:
+        object.__setattr__(self, "_secret", url)
+
+    def secret(self) -> str:
+        value: str = object.__getattribute__(self, "_secret")
+        return value
+
+    def __str__(self) -> str:
+        return redact_database_url(self.secret())
+
+    def __repr__(self) -> str:
+        return f"RedactedDsn({str(self)!r})"
+
+
 def get_engine() -> AsyncEngine:
     """Devuelve el motor async, creándolo la primera vez que se pide."""
 

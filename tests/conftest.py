@@ -16,7 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from app.db import get_session, redact_database_url
+from app.db import RedactedDsn, get_session, redact_database_url
 from app.exceptions import Validation
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,10 +124,13 @@ def resolve_alembic_database_url() -> str:
     return require_test_database_url(raw, env_name="ALEMBIC_TEST_DATABASE_URL")
 
 
-def alembic_config(database_url: str) -> Config:
-    config = Config(str(ROOT / "alembic.ini"))
-    config.set_main_option("sqlalchemy.url", database_url)
-    return config
+def alembic_config(database_url: str | RedactedDsn) -> Config:
+    from app.migrations.config import make_alembic_config
+
+    raw = (
+        database_url.secret() if isinstance(database_url, RedactedDsn) else database_url
+    )
+    return make_alembic_config(raw)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -306,38 +309,47 @@ def probe_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     )
 
 
-def production_settings_env(database_url: str, **overrides: str) -> dict[str, str]:
+def production_settings_env(
+    database_url: str | RedactedDsn, **overrides: str
+) -> dict[str, str]:
     """Variables de production reutilizables (auth, roles, health)."""
 
+    raw = (
+        database_url.secret() if isinstance(database_url, RedactedDsn) else database_url
+    )
     env = {
         "APP_ENV": "production",
         "EXPOSE_ERRORS": "false",
         "ENABLE_EXAMPLE_ROUTES": "false",
         "AUTH_SECRET": PRODUCTION_AUTH_SECRET,
-        "DATABASE_URL": database_url,
+        "DATABASE_URL": raw,
     }
     env.update(overrides)
     return env
 
 
-def production_database_url(test_url: str) -> str:
+def production_database_url(test_url: str | RedactedDsn) -> RedactedDsn:
     """DSN de la base ``*_test`` con rol de production, sin password por defecto."""
 
-    parsed = make_url(require_test_database_url(test_url))
-    return parsed.set(
-        username=PRODUCTION_TEST_USER,
-        password=PRODUCTION_TEST_PASSWORD,
-    ).render_as_string(hide_password=False)
+    raw = test_url.secret() if isinstance(test_url, RedactedDsn) else test_url
+    parsed = make_url(require_test_database_url(raw))
+    return RedactedDsn(
+        parsed.set(
+            username=PRODUCTION_TEST_USER,
+            password=PRODUCTION_TEST_PASSWORD,
+        ).render_as_string(hide_password=False)
+    )
 
 
-def ensure_production_test_role(admin_url: str) -> str:
+def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
     """Crea el rol de tests de production y devuelve el DSN reescrito."""
 
-    prod_url = production_database_url(admin_url)
+    admin = admin_url if isinstance(admin_url, RedactedDsn) else RedactedDsn(admin_url)
+    prod_dsn = production_database_url(admin)
 
     async def create_role() -> None:
         engine = create_async_engine(
-            admin_url,
+            admin.secret(),
             isolation_level="AUTOCOMMIT",
             connect_args={
                 "timeout": _PING_CONNECT_TIMEOUT,
@@ -369,21 +381,20 @@ def ensure_production_test_role(admin_url: str) -> str:
 
     try:
         asyncio.run(create_role())
-        _ping_postgres(prod_url)
+        _ping_postgres(prod_dsn)
     except ConnectionError:
         raise
     except Exception as exc:
-        redacted = redact_database_url(admin_url)
         if _is_connection_error(exc):
             raise ConnectionError(
                 "No se pudo crear el rol de production-tests "
-                f"({type(exc).__name__}). {redacted}"
+                f"({type(exc).__name__}). {admin}"
             ) from None
         raise RuntimeError(
             "No se pudo crear el rol de production-tests "
-            f"({type(exc).__name__}). {redacted}"
+            f"({type(exc).__name__}). {admin}"
         ) from None
-    return prod_url
+    return prod_dsn
 
 
 @pytest.fixture
@@ -401,14 +412,14 @@ def offline_production_client(
 @pytest.fixture
 def production_client(
     monkeypatch: pytest.MonkeyPatch,
-    production_test_database_url: str,
+    production_test_database_url: RedactedDsn,
     migrated_test_database: None,
 ) -> Iterator[TestClient]:
     """Cliente production contra la base ``*_test``, sin credenciales por defecto.
 
     ``APP_ENV=production``, ``AUTH_SECRET`` fuerte y DSN de ``estudiomusica_test``
-    (o ``TEST_DATABASE_URL``) con el rol ``em_prod_tests``. Reutilizable para
-    flujos que deben verse como production (auth, roles).
+    (o ``TEST_DATABASE_URL``) con el rol ``em_prod_tests``. El DSN viaja como
+    ``RedactedDsn`` para no filtrar la contraseña con ``--showlocals``.
     """
 
     yield from _build_client(
@@ -465,7 +476,7 @@ def tight_pagination_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCli
 
 @pytest.fixture
 def db_client(
-    monkeypatch: pytest.MonkeyPatch, require_postgres: str
+    monkeypatch: pytest.MonkeyPatch, require_postgres: RedactedDsn
 ) -> Iterator[TestClient]:
     """Cliente HTTP apuntando a la BD de test (docker-compose)."""
 
@@ -474,7 +485,7 @@ def db_client(
         APP_ENV="development",
         EXPOSE_ERRORS="false",
         ENABLE_EXAMPLE_ROUTES="true",
-        DATABASE_URL=require_postgres,
+        DATABASE_URL=require_postgres.secret(),
     )
 
 
@@ -515,12 +526,22 @@ def down_db_expose_errors_client(
     )
 
 
+_PYDANTIC_TRUE = frozenset({"1", "true", "t", "yes", "y", "on"})
+_PYDANTIC_FALSE = frozenset({"0", "false", "f", "no", "n", "off", ""})
+
+
 def _postgres_required() -> bool:
-    return os.environ.get("REQUIRE_POSTGRES", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    """Los mismos booleanos que Pydantic; un valor desconocido aborta."""
+
+    raw = os.environ.get("REQUIRE_POSTGRES", "").strip().lower()
+    if raw in _PYDANTIC_TRUE:
+        return True
+    if raw in _PYDANTIC_FALSE:
+        return False
+    raise pytest.UsageError(
+        "REQUIRE_POSTGRES no es un booleano válido "
+        f"(true/false, 1/0, yes/no, on/off, y/n, t/f). Recibido: {raw!r}"
+    )
 
 
 class _MissingDatabase(RuntimeError):
@@ -529,8 +550,8 @@ class _MissingDatabase(RuntimeError):
 
 def _skip_or_fail_postgres(message: str) -> None:
     if _postgres_required():
-        pytest.fail(message)
-    pytest.skip(message)
+        raise pytest.fail.Exception(message) from None
+    raise pytest.skip.Exception(message) from None
 
 
 def _is_connection_error(exc: BaseException) -> bool:
@@ -562,18 +583,24 @@ def _is_connection_error(exc: BaseException) -> bool:
     return False
 
 
-def ensure_database_exists(url: str) -> None:
+def _as_redacted_dsn(database_url: str | RedactedDsn) -> RedactedDsn:
+    if isinstance(database_url, RedactedDsn):
+        return database_url
+    return RedactedDsn(database_url)
+
+
+def ensure_database_exists(database_url: str | RedactedDsn) -> None:
     """Crea la base conectando a la BD de mantenimiento ``postgres``."""
 
-    parsed = make_url(url)
+    dsn = _as_redacted_dsn(database_url)
+    parsed = make_url(dsn.secret())
     db_name = parsed.database
     if db_name is None:
-        raise RuntimeError("DSN sin nombre de base")
+        raise RuntimeError(f"DSN sin nombre de base. {dsn}") from None
 
     async def create_if_missing() -> None:
-        admin = parsed.set(database="postgres")
         engine = create_async_engine(
-            admin.render_as_string(hide_password=False),
+            parsed.set(database="postgres").render_as_string(hide_password=False),
             isolation_level="AUTOCOMMIT",
             connect_args={
                 "timeout": _PING_CONNECT_TIMEOUT,
@@ -595,20 +622,21 @@ def ensure_database_exists(url: str) -> None:
     try:
         asyncio.run(create_if_missing())
     except Exception as exc:
-        redacted = redact_database_url(url)
         if _is_connection_error(exc):
             raise ConnectionError(
-                f"No se pudo crear la base de test ({type(exc).__name__}). {redacted}"
+                f"No se pudo crear la base de test ({type(exc).__name__}). {dsn}"
             ) from None
         raise RuntimeError(
-            f"No se pudo crear la base de test ({type(exc).__name__}). {redacted}"
+            f"No se pudo crear la base de test ({type(exc).__name__}). {dsn}"
         ) from None
 
 
-def _ping_postgres(url: str) -> None:
+def _ping_postgres(database_url: str | RedactedDsn) -> None:
+    dsn = _as_redacted_dsn(database_url)
+
     async def ping() -> None:
         engine = create_async_engine(
-            url,
+            dsn.secret(),
             pool_pre_ping=False,
             connect_args={
                 "timeout": _PING_CONNECT_TIMEOUT,
@@ -625,43 +653,61 @@ def _ping_postgres(url: str) -> None:
     try:
         asyncio.run(ping())
     except Exception as exc:
-        redacted = redact_database_url(url)
         detail = str(exc).lower()
         if _is_connection_error(exc):
             raise ConnectionError(
-                f"Postgres de test no está disponible ({type(exc).__name__}). "
-                f"{redacted}"
+                f"Postgres de test no está disponible ({type(exc).__name__}). {dsn}"
             ) from None
         if "does not exist" in detail and "database" in detail:
             raise _MissingDatabase(
-                f"La base de test no existe ({type(exc).__name__}). {redacted}"
+                f"La base de test no existe ({type(exc).__name__}). {dsn}"
             ) from None
         raise RuntimeError(
-            f"Postgres de test rechazó la conexión ({type(exc).__name__}). {redacted}"
+            f"Postgres de test rechazó la conexión ({type(exc).__name__}). {dsn}"
         ) from None
 
 
+def apply_test_migrations(database_url: str | RedactedDsn) -> None:
+    """Aplica ``alembic upgrade head``. Un fallo de migración es error, no skip."""
+
+    from app.config import get_settings
+
+    dsn = _as_redacted_dsn(database_url)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("DATABASE_URL", dsn.secret())
+        get_settings.cache_clear()
+        try:
+            command.upgrade(alembic_config(dsn), "head")
+        except Exception as exc:
+            get_settings.cache_clear()
+            raise RuntimeError(
+                "No se pudieron aplicar las migraciones de test "
+                f"({type(exc).__name__}). {dsn}"
+            ) from None
+        get_settings.cache_clear()
+
+
 @pytest.fixture(scope="session")
-def require_postgres() -> str:
+def require_postgres() -> RedactedDsn:
     """Salta o falla si Postgres no responde. Nunca imprime la contraseña."""
 
-    url = resolve_test_database_url()
+    dsn = RedactedDsn(resolve_test_database_url())
     try:
-        _ping_postgres(url)
+        _ping_postgres(dsn)
     except ConnectionError, _MissingDatabase:
         try:
-            ensure_database_exists(url)
-            _ping_postgres(url)
+            ensure_database_exists(dsn)
+            _ping_postgres(dsn)
         except ConnectionError as exc:
             _skip_or_fail_postgres(
                 "Postgres de test no está disponible. "
                 f"En local: docker compose up -d. {exc}"
             )
-    return url
+    return dsn
 
 
 @pytest.fixture(scope="session")
-def production_test_database_url(require_postgres: str) -> str:
+def production_test_database_url(require_postgres: RedactedDsn) -> RedactedDsn:
     """DSN de la base ``*_test`` con rol de production (sin password por defecto)."""
 
     try:
@@ -675,25 +721,13 @@ def production_test_database_url(require_postgres: str) -> str:
 
 
 @pytest.fixture(scope="session")
-def migrated_test_database(require_postgres: str) -> Iterator[None]:
+def migrated_test_database(require_postgres: RedactedDsn) -> Iterator[None]:
     """Aplica las migraciones en la BD de test. Un fallo de migración es error."""
 
+    apply_test_migrations(require_postgres)
+    yield
     from app.config import get_settings
 
-    url = require_postgres
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setenv("DATABASE_URL", url)
-        get_settings.cache_clear()
-        try:
-            command.upgrade(alembic_config(url), "head")
-        except Exception as exc:
-            get_settings.cache_clear()
-            raise RuntimeError(
-                "No se pudieron aplicar las migraciones de test "
-                f"({type(exc).__name__}). {redact_database_url(url)}"
-            ) from None
-        get_settings.cache_clear()
-    yield
     get_settings.cache_clear()
 
 
@@ -708,11 +742,11 @@ async def db_session(
     from app.db import dispose_engine
     from app.main import get_app
 
-    url = resolve_test_database_url()
-    monkeypatch.setenv("DATABASE_URL", url)
+    dsn = RedactedDsn(resolve_test_database_url())
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
     get_settings.cache_clear()
     get_app.cache_clear()
-    engine = create_async_engine(url, pool_pre_ping=True)
+    engine = create_async_engine(dsn.secret(), pool_pre_ping=True)
     try:
         async with engine.connect() as connection:
             transaction = await connection.begin()
@@ -744,7 +778,7 @@ async def db_session(
 async def session_client(
     monkeypatch: pytest.MonkeyPatch,
     db_session: AsyncSession,
-    require_postgres: str,
+    require_postgres: RedactedDsn,
 ) -> AsyncIterator[Any]:
     """Cliente HTTP en el mismo loop, con get_session ligado a db_session."""
 
@@ -756,7 +790,7 @@ async def session_client(
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("EXPOSE_ERRORS", "false")
     monkeypatch.setenv("ENABLE_EXAMPLE_ROUTES", "true")
-    monkeypatch.setenv("DATABASE_URL", require_postgres)
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     application = create_app()
     _mount_probes(application)

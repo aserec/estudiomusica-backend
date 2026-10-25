@@ -104,7 +104,7 @@ postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
 docker compose up -d
 ```
 
-Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings rechaza la contraseña por defecto del compose (en cualquier DSN). Los tests de production usan la base `*_test` con un rol distinto, sin esa contraseña. Espera a que el healthcheck esté sano:
+Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings rechaza la contraseña o el usuario por defecto, también si vienen en la query (`password`, `user`). Un `*_test` por query (`database`, `dbname`) tampoco vale; el path `*_test` sí, si las credenciales no son las de desarrollo (fixture `production_client`). Los errores de validación no muestran el DSN (`hide_input_in_errors`). Espera a que el healthcheck esté sano:
 
 ```bash
 docker compose ps
@@ -122,13 +122,19 @@ Para revertirlas del todo:
 uv run alembic downgrade base
 ```
 
-Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations` en `alembic.ini`). Van en el wheel con el paquete `app`. La inicial crea `set_updated_at()` (`clock_timestamp()`). No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. `PersistentModel` monta el trigger al crear la tabla; las migraciones pueden usar `updated_at_trigger_sql`. Nueva revisión, cuando exista un modelo:
+Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations`). Van en el wheel con el paquete `app`. El `alembic.ini` de la raíz **no** viaja en el wheel: desde el paquete instalado usa el helper programático (también hay `app/alembic.ini`):
+
+```bash
+python -c "from alembic import command; from app.migrations.config import make_alembic_config; command.upgrade(make_alembic_config(), 'head')"
+```
+
+La inicial crea `set_updated_at()` (`clock_timestamp()`). No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. `PersistentModel` monta el trigger en las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. Nueva revisión, cuando exista un modelo:
 
 ```bash
 uv run alembic revision -m "descripcion" --autogenerate
 ```
 
-Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` (evento `after_create`; las migraciones usan `updated_at_trigger_sql`). No hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext`, `users` y `auth_sessions` y monta ese trigger en ambas.
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. No hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext`, `users` y `auth_sessions` y monta ese trigger en ambas.
 
 `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
@@ -150,7 +156,7 @@ export TEST_DATABASE_URL=postgresql+asyncpg://estudiomusica:estudiomusica@127.0.
 uv run pytest
 ```
 
-`uv run pytest` sin Postgres en marcha **salta** los tests de BD solo si el error es de conexión (refused, host desconocido, timeout). Un fallo de autenticación o una migración rota **falla**. En CI: `REQUIRE_POSTGRES=1 uv run pytest` convierte el skip en fallo. Los mensajes no incluyen la contraseña. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
+`uv run pytest` sin Postgres en marcha **salta** los tests de BD solo si el error es de conexión (refused, host desconocido, timeout). Un fallo de autenticación o una migración rota **falla**. En CI: `REQUIRE_POSTGRES=1 uv run pytest` (también `true`/`yes`/`on`, como Pydantic) convierte el skip en fallo; un valor desconocido aborta. Los mensajes y `--showlocals` no incluyen la contraseña. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
 
 ## Tests, lint y types
 
@@ -253,16 +259,17 @@ app/
   errors.py          # Sobre de error y handlers (validación, HTTP)
   exceptions.py      # AccessDenied, NotFound, Validation, PayloadTooLarge
   config/            # Ajustes por variables de entorno (pydantic-settings)
-  routers/           # Rutas HTTP (health, auth y examples)
+  routers/           # Rutas HTTP (health, health/db, auth y examples)
   schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth)
   services/          # Lógica de aplicación (salud, auth, examples)
   auth/              # Hash argon2, JWT HS256 y cookie de sesión
   models/            # PersistentModel, User y AuthSession
-  migrations/        # Alembic (env.py async + versions/); script_location app:migrations
+  migrations/        # Alembic (env.py async + versions/ + config programático)
+  alembic.ini        # Copia empaquetada (el de la raíz no va en el wheel)
 docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
 tests/               # Tests de pytest (convenciones + BD aislada)
 docker-compose.yml   # Postgres 17 en 127.0.0.1:5432 (sin container_name fijo)
-alembic.ini          # Configuración de Alembic
+alembic.ini          # CLI `uv run alembic` desde el repo
 .env.example         # Plantilla de variables de entorno
 pyproject.toml       # Dependencias, ruff, pytest y mypy
 uv.lock              # Lockfile reproducible de uv
