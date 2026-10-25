@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     auth_argon2_time_cost: int = Field(default=3, ge=1)
     auth_argon2_memory_cost: int = Field(default=65_536, ge=8_192)
     auth_argon2_parallelism: int = Field(default=4, ge=1)
+    assistant_media_and_sm3_visible: bool = Field(
+        default=False,
+        description=(
+            "TODO(#306): visibilidad de multimedia y SM3 para el profesor "
+            "adjunto. Pendiente de decisión; el flag queda configurable."
+        ),
+    )
 
     def cors_origin_list(self) -> list[str]:
         return [
