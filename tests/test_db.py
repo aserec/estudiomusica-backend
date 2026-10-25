@@ -1,15 +1,25 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import String, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import clear_engine, get_session, get_session_factory
 from app.models import PersistentModel
+
+
+async def _finish(agen: AsyncIterator[object]) -> None:
+    """Reanuda el generador después del yield para que haga commit."""
+
+    try:
+        await anext(agen)
+    except StopAsyncIteration:
+        return
+    raise AssertionError("get_session produjo una segunda sesión")
 
 
 class SessionProbe(PersistentModel):
@@ -36,7 +46,7 @@ async def test_get_session_commits_on_success(
     agen = get_session()
     yielded = await anext(agen)
     assert yielded is session
-    await agen.aclose()
+    await _finish(agen)
     session.commit.assert_awaited_once()
     session.rollback.assert_not_awaited()
 
@@ -63,10 +73,8 @@ async def test_get_session_rollbacks_on_error(
 
 
 @pytest.mark.db
-def test_get_session_override_runs_select(
-    session_client: TestClient,
-) -> None:
-    response = session_client.get("/api/v1/_test/session")
+async def test_get_session_override_runs_select(session_client: Any) -> None:
+    response = await session_client.get("/api/v1/_test/session")
 
     assert response.status_code == 200
     assert response.json() == {"session": "ok"}
@@ -96,7 +104,7 @@ async def test_get_session_commits_persistently(
         agen = get_session()
         session = await anext(agen)
         session.add(SessionProbe(label="committed"))
-        await agen.aclose()
+        await _finish(agen)
 
         factory = get_session_factory()
         async with factory() as other:

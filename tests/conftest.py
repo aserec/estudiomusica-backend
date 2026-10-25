@@ -2,6 +2,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from alembic import command
@@ -453,8 +454,9 @@ def migrated_test_database(require_postgres: str) -> Iterator[None]:
                 "En local: docker compose up -d && uv run alembic upgrade head. "
                 f"{redact_database_url(url)}"
             )
-        yield
         get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -484,11 +486,12 @@ async def db_session(
         async def _override_session() -> AsyncIterator[AsyncSession]:
             yield session
 
-        get_app().dependency_overrides[get_session] = _override_session
+        application = get_app()
+        application.dependency_overrides[get_session] = _override_session
         try:
             yield session
         finally:
-            get_app().dependency_overrides.pop(get_session, None)
+            application.dependency_overrides.pop(get_session, None)
             await session.close()
             await transaction.rollback()
     await engine.dispose()
@@ -498,24 +501,23 @@ async def db_session(
 
 
 @pytest.fixture
-def session_client(
+async def session_client(
     monkeypatch: pytest.MonkeyPatch,
     db_session: AsyncSession,
     require_postgres: str,
-) -> Iterator[TestClient]:
-    """Cliente HTTP con get_session ligado a la transacción de db_session."""
+) -> AsyncIterator[Any]:
+    """Cliente HTTP en el mismo loop, con get_session ligado a db_session."""
+
+    from httpx2 import ASGITransport, AsyncClient
 
     from app.config import get_settings
-    from app.db import clear_engine
-    from app.main import create_app, get_app
+    from app.main import create_app
 
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("EXPOSE_ERRORS", "false")
     monkeypatch.setenv("ENABLE_EXAMPLE_ROUTES", "true")
     monkeypatch.setenv("DATABASE_URL", require_postgres)
     get_settings.cache_clear()
-    get_app.cache_clear()
-    clear_engine()
     application = create_app()
     _mount_probes(application)
 
@@ -523,11 +525,8 @@ def session_client(
         yield db_session
 
     application.dependency_overrides[get_session] = _override_session
-    try:
-        with TestClient(application) as test_client:
-            yield test_client
-    finally:
-        application.dependency_overrides.pop(get_session, None)
-        get_settings.cache_clear()
-        get_app.cache_clear()
-        clear_engine()
+    transport = ASGITransport(app=application)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+    application.dependency_overrides.pop(get_session, None)
+    get_settings.cache_clear()

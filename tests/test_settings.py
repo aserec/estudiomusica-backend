@@ -81,16 +81,36 @@ def test_database_url_defaults_to_docker_compose(
     assert settings.database_url.endswith("/estudiomusica")
 
 
-def test_default_database_credentials_rejected_outside_development() -> None:
-    with pytest.raises(ValidationError, match="credenciales"):
-        Settings(app_env="production", _env_file=None)
-    with pytest.raises(ValidationError, match="credenciales"):
-        Settings(app_env="staging", _env_file=None)
+_DEFAULT_DEV_DSN = (
+    "postgresql+asyncpg://estudiomusica:estudiomusica"
+    "@127.0.0.1:5432/estudiomusica"
+)
 
 
-def test_default_database_credentials_allowed_in_development() -> None:
-    settings = Settings(app_env="development", _env_file=None)
+def test_default_database_credentials_rejected_outside_development(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", _DEFAULT_DEV_DSN)
+    monkeypatch.setenv("APP_ENV", "production")
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="credenciales"):
+        Settings()
+    monkeypatch.setenv("APP_ENV", "staging")
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="credenciales"):
+        Settings()
+    get_settings.cache_clear()
+
+
+def test_default_database_credentials_allowed_in_development(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", _DEFAULT_DEV_DSN)
+    monkeypatch.setenv("APP_ENV", "development")
+    get_settings.cache_clear()
+    settings = Settings()
     assert settings.database_url.endswith("/estudiomusica")
+    get_settings.cache_clear()
 
 
 def test_production_accepts_non_default_database_url() -> None:
