@@ -292,7 +292,7 @@ async def test_me_rejects_expired_or_tampered_token(session_client: Any) -> None
     token = created.cookies["session"]
     tampered = token[:-2] + ("A" if token[-1] != "A" else "B")
     expired = encode_session_token(
-        secret=get_settings().auth_secret,
+        secret=get_settings().resolved_auth_secret(),
         user_id=uuid.uuid4(),
         session_id=uuid.uuid4(),
         issued_at=datetime.now(UTC) - timedelta(hours=2),
@@ -307,7 +307,7 @@ async def test_me_rejects_expired_or_tampered_token(session_client: Any) -> None
         assert response.status_code == 401
         assert response.json() == {"error": "unauthorized"}
         assert bad not in response.text
-        assert get_settings().auth_secret not in response.text
+        assert get_settings().resolved_auth_secret() not in response.text
 
 
 async def test_logout_revokes_session_and_clears_cookie(session_client: Any) -> None:
@@ -383,7 +383,7 @@ async def test_failed_login_does_not_log_secrets(
         )
     assert response.status_code == 401
     assert "secret-pass" not in caplog.text
-    assert get_settings().auth_secret not in caplog.text
+    assert get_settings().resolved_auth_secret() not in caplog.text
 
 
 def test_production_cookie_sets_secure() -> None:

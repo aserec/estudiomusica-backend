@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from pydantic import ValidationError
 
@@ -176,23 +178,29 @@ def test_default_auth_secret_rejected_outside_development(
     monkeypatch.setenv("AUTH_SECRET", _DEFAULT_DEV_AUTH_SECRET)
     monkeypatch.setenv("APP_ENV", "production")
     get_settings.cache_clear()
-    with pytest.raises(ValidationError, match="AUTH_SECRET"):
+    with pytest.raises(ValidationError, match="AUTH_SECRET") as caught:
         Settings()
+    assert _DEFAULT_DEV_AUTH_SECRET not in str(caught.value)
+    assert _DEFAULT_DEV_AUTH_SECRET not in repr(caught.value)
     monkeypatch.setenv("APP_ENV", "staging")
     get_settings.cache_clear()
-    with pytest.raises(ValidationError, match="AUTH_SECRET"):
+    with pytest.raises(ValidationError, match="AUTH_SECRET") as caught:
         Settings()
+    assert _DEFAULT_DEV_AUTH_SECRET not in str(caught.value)
     get_settings.cache_clear()
 
 
 def test_short_auth_secret_rejected_outside_development() -> None:
-    with pytest.raises(ValidationError, match="32"):
+    leaked = "too-short-to-be-safe"
+    with pytest.raises(ValidationError, match="32") as caught:
         Settings(
             app_env="production",
             database_url="postgresql+asyncpg://app:s3cret@db.example:5432/app",
-            auth_secret="too-short-to-be-safe",
+            auth_secret=leaked,
             _env_file=None,
         )
+    assert leaked not in str(caught.value)
+    assert leaked not in repr(caught.value)
 
 
 def test_default_auth_secret_allowed_in_development(
@@ -202,7 +210,7 @@ def test_default_auth_secret_allowed_in_development(
     monkeypatch.setenv("APP_ENV", "development")
     get_settings.cache_clear()
     settings = Settings()
-    assert settings.auth_secret == _DEFAULT_DEV_AUTH_SECRET
+    assert settings.resolved_auth_secret() == _DEFAULT_DEV_AUTH_SECRET
     assert settings.auth_cookie_secure() is False
     get_settings.cache_clear()
 
@@ -215,6 +223,26 @@ def test_production_auth_cookie_is_secure() -> None:
         _env_file=None,
     )
     assert settings.auth_cookie_secure() is True
+
+
+def test_auth_secret_is_hidden_in_settings_repr() -> None:
+    leaked = "super-secret-value-that-must-not-leak-32"
+    settings = Settings(auth_secret=leaked, _env_file=None)
+    assert leaked not in repr(settings)
+    assert leaked not in str(settings)
+
+
+def test_invalid_auth_secret_is_not_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AUTH_SECRET", _DEFAULT_DEV_AUTH_SECRET)
+    get_settings.cache_clear()
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(ValidationError):
+            Settings()
+    assert _DEFAULT_DEV_AUTH_SECRET not in caplog.text
+    get_settings.cache_clear()
 
 
 def test_bootstrap_admin_email_set_normalizes() -> None:
