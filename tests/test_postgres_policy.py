@@ -1,6 +1,9 @@
 import asyncio
 import errno
+import os
 import socket
+import subprocess
+import sys
 import time
 
 import pytest
@@ -8,6 +11,7 @@ import pytest
 from app.db import RedactedDsn
 from tests.conftest import (
     _PING_TOTAL_TIMEOUT,
+    ROOT,
     _is_connection_error,
     _ping_postgres,
     _postgres_required,
@@ -64,6 +68,33 @@ def test_postgres_required_truthy(monkeypatch: pytest.MonkeyPatch, value: str) -
 def test_postgres_required_falsy(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("REQUIRE_POSTGRES", value)
     assert _postgres_required() is False
+
+
+def test_unknown_require_postgres_aborts_even_when_postgres_is_up() -> None:
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env["REQUIRE_POSTGRES"] = "maybe"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--tb=short",
+            "-p",
+            "no:cacheprovider",
+            "tests/test_health.py::test_api_health_returns_ok",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 2
+    assert "REQUIRE_POSTGRES" in output
+    assert "maybe" in output
 
 
 def test_postgres_required_unknown_value_aborts(

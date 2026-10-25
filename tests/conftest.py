@@ -148,6 +148,16 @@ def probe_file_path(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
 
 
 @pytest.fixture(scope="session", autouse=True)
+def validate_require_postgres() -> None:
+    """Un REQUIRE_POSTGRES desconocido aborta siempre, también con PG arriba."""
+
+    try:
+        _postgres_required()
+    except pytest.UsageError as exc:
+        pytest.exit(str(exc), returncode=2)
+
+
+@pytest.fixture(scope="session", autouse=True)
 def isolate_settings_env(reject_non_test_database: None) -> Iterator[None]:
     """Fija todas las variables de Settings durante la sesión de tests.
 
@@ -581,15 +591,55 @@ def require_postgres() -> RedactedDsn:
     return dsn
 
 
+_LEFTOVER_TEST_TABLES = (
+    "session_probes",
+    "session_probe_leak",
+    "session_probe_expire",
+    "mixin_probes",
+    "migrated_trigger_probes",
+    "ListaCanciones",
+    "order",
+)
+
+
+def _drop_leftover_test_tables(dsn: RedactedDsn) -> None:
+    async def drop() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                for name in _LEFTOVER_TEST_TABLES:
+                    await connection.execute(
+                        text(f'DROP TABLE IF EXISTS "{name}" CASCADE')
+                    )
+                await connection.execute(text("DROP SCHEMA IF EXISTS catalogo CASCADE"))
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(drop())
+    except Exception as exc:
+        if _is_connection_error(exc):
+            raise ConnectionError(
+                f"No se pudieron borrar tablas de test ({type(exc).__name__}). {dsn}"
+            ) from None
+        raise RuntimeError(
+            f"No se pudieron borrar tablas de test ({type(exc).__name__}). {dsn}"
+        ) from None
+
+
 @pytest.fixture(scope="session")
 def migrated_test_database(require_postgres: RedactedDsn) -> Iterator[None]:
     """Aplica las migraciones en la BD de test. Un fallo de migración es error."""
 
+    _drop_leftover_test_tables(require_postgres)
     apply_test_migrations(require_postgres)
-    yield
-    from app.config import get_settings
+    try:
+        yield
+    finally:
+        from app.config import get_settings
 
-    get_settings.cache_clear()
+        _drop_leftover_test_tables(require_postgres)
+        get_settings.cache_clear()
 
 
 @pytest.fixture
