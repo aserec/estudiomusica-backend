@@ -175,7 +175,9 @@ async def test_db_session_does_not_expire_on_commit(
     connection = await db_session.connection()
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
-    await connection.run_sync(probe_table.create)
+    await connection.run_sync(
+        lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
+    )
 
     probe = SessionProbe(label="still-loaded")
     db_session.add(probe)
