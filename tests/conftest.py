@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
@@ -27,6 +28,23 @@ DOWN_DATABASE_URL = (
     "postgresql+asyncpg://leaky_user:supersecret-password-do-not-leak"
     "@127.0.0.1:1/no_such_db"
 )
+_SETTINGS_ENV = {
+    "APP_NAME": "EstudioMusica API",
+    "APP_ENV": "development",
+    "EXPOSE_ERRORS": "false",
+    "CORS_ORIGINS": "http://localhost:3000,http://127.0.0.1:3000",
+    "CORS_ALLOW_CREDENTIALS": "true",
+    "CORS_ALLOW_METHODS": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+    "CORS_ALLOW_HEADERS": "Authorization,Content-Type,Accept",
+    "PAGINATION_DEFAULT_PAGE": "1",
+    "PAGINATION_DEFAULT_PAGE_SIZE": "20",
+    "PAGINATION_MAX_PAGE": "10000",
+    "PAGINATION_MAX_PAGE_SIZE": "100",
+    "MAX_BODY_BYTES": "1048576",
+}
+
+PROBE_FILE_BYTES = b"file-response-body\n" * 8
+_PROBE_FILE = Path("/tmp/estudiomusica-probe.bin")
 
 
 def _require_test_database_name(url: str) -> str:
@@ -72,17 +90,18 @@ def reject_non_test_database() -> None:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def isolate_app_env() -> Iterator[None]:
-    """Fija APP_ENV=development durante toda la sesión de tests.
+def isolate_settings_env() -> Iterator[None]:
+    """Fija todas las variables de Settings durante la sesión de tests."""
 
-    Se ignora el `.env` (y un APP_ENV exportado en la shell).
-    MonkeyPatch.context() restaura el entorno al terminar.
-    """
     with pytest.MonkeyPatch.context() as mp:
-        mp.setenv("APP_ENV", "development")
+        for key, value in _SETTINGS_ENV.items():
+            mp.setenv(key, value)
+        mp.delenv("ENABLE_EXAMPLE_ROUTES", raising=False)
         yield
+        from app.config import get_settings
         from app.main import get_app
 
+        get_settings.cache_clear()
         get_app.cache_clear()
 
 
@@ -107,6 +126,10 @@ def _mount_probes(application: FastAPI) -> None:
     def raise_http_422() -> None:
         raise HTTPException(status_code=422, detail="unprocessable")
 
+    @application.get("/api/v1/_test/http-418")
+    def raise_http_418() -> None:
+        raise HTTPException(status_code=418)
+
     @application.get("/api/v1/_test/http-400-dict")
     def raise_http_400_dict() -> None:
         raise HTTPException(
@@ -121,6 +144,37 @@ def _mount_probes(application: FastAPI) -> None:
     @application.post("/api/v1/_test/loose")
     def loose_body(body: dict[str, int]) -> dict[str, int]:
         return body
+
+    @application.post("/api/v1/_test/echo-size")
+    async def echo_size(request: Request) -> dict[str, int]:
+        data = await request.body()
+        return {"size": len(data)}
+
+    @application.post("/api/v1/_test/disconnect")
+    async def check_disconnect(request: Request) -> dict[str, bool]:
+        await request.body()
+        return {"disconnected": await request.is_disconnected()}
+
+    @application.get("/api/v1/_test/stream")
+    def stream_chunks() -> StreamingResponse:
+        async def generate() -> AsyncIterator[str]:
+            for index in range(5):
+                yield f"chunk{index}"
+
+        return StreamingResponse(generate(), media_type="text/plain")
+
+    @application.get("/api/v1/_test/stream-boom")
+    def stream_boom() -> StreamingResponse:
+        async def generate() -> AsyncIterator[str]:
+            yield "chunk0"
+            raise RuntimeError("mid-stream")
+
+        return StreamingResponse(generate(), media_type="text/plain")
+
+    @application.get("/api/v1/_test/file")
+    def file_probe() -> FileResponse:
+        _PROBE_FILE.write_bytes(PROBE_FILE_BYTES)
+        return FileResponse(_PROBE_FILE, media_type="application/octet-stream")
 
 
 def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> Iterator[TestClient]:
@@ -194,6 +248,18 @@ def expose_errors_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient
         APP_ENV="development",
         EXPOSE_ERRORS="true",
         ENABLE_EXAMPLE_ROUTES="true",
+    )
+
+
+@pytest.fixture
+def wildcard_cors_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    yield from _build_client(
+        monkeypatch,
+        APP_ENV="development",
+        EXPOSE_ERRORS="false",
+        ENABLE_EXAMPLE_ROUTES="true",
+        CORS_ORIGINS="*",
+        CORS_ALLOW_CREDENTIALS="false",
     )
 
 

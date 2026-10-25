@@ -1,4 +1,6 @@
 import functools
+import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version
@@ -18,6 +20,8 @@ from app.middleware import (
 )
 from app.routers import examples_router, health_router
 from app.schemas.errors import ErrorResponse
+
+logger = logging.getLogger(__name__)
 
 OPENAPI_DESCRIPTION = """
 Backend FastAPI de EstudioMusica.
@@ -64,6 +68,12 @@ async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
     await dispose_engine()
 
 
+def _cors_origin_regex(origins: list[str]) -> str | None:
+    if not origins or "*" in origins:
+        return None
+    return "(?i)^(?:" + "|".join(re.escape(origin) for origin in origins) + ")$"
+
+
 def _rewrite_openapi_errors(schema: dict[str, Any]) -> None:
     error_ref = {"$ref": "#/components/schemas/ErrorResponse"}
     error_400 = {
@@ -104,18 +114,23 @@ def create_app() -> FastAPI:
         },
         openapi_tags=OPENAPI_TAGS,
     )
-    register_exception_handlers(application)
-    application.add_middleware(BodySizeLimitMiddleware)
-    application.add_middleware(ApiErrorMiddleware)
+    if settings.expose_errors and settings.app_env == "production":
+        logger.warning(
+            "EXPOSE_ERRORS=true en production; los 500 incluirán detalles internos"
+        )
+    register_exception_handlers(application, settings)
+    application.add_middleware(BodySizeLimitMiddleware, settings=settings)
+    application.add_middleware(ApiErrorMiddleware, settings=settings)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list(),
+        allow_origin_regex=_cors_origin_regex(settings.cors_origin_list()),
         allow_credentials=settings.cors_allow_credentials,
         allow_methods=settings.cors_method_list(),
         allow_headers=settings.cors_header_list(),
         expose_headers=["X-API-Version"],
     )
-    application.add_middleware(RejectedPreflightMiddleware)
+    application.add_middleware(RejectedPreflightMiddleware, settings=settings)
 
     api_router = APIRouter(prefix="/api/v1")
     api_router.include_router(health_router)

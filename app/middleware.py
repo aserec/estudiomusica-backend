@@ -1,10 +1,14 @@
 import json
+import logging
 from typing import cast
 
+from starlette.exceptions import HTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.config import get_settings
+from app.config import Settings
 from app.errors import error_body
+
+logger = logging.getLogger(__name__)
 
 API_VERSION_HEADER = (b"x-api-version", b"v1")
 
@@ -22,8 +26,12 @@ def _with_version(headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes
     return [*headers, API_VERSION_HEADER]
 
 
+def _compact_json(payload: dict[str, object]) -> bytes:
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
 async def send_json_error(send: Send, status_code: int, error: str) -> None:
-    payload = json.dumps(error_body(error)).encode("utf-8")
+    payload = _compact_json(error_body(error))
     await send(
         {
             "type": "http.response.start",
@@ -40,48 +48,95 @@ async def send_json_error(send: Send, status_code: int, error: str) -> None:
 
 
 class RejectedPreflightMiddleware:
-    """Responde OPTIONS de un origen no permitido con el sobre JSON."""
+    """Reescribe el rechazo de CORSMiddleware a 403 con el sobre JSON."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, settings: Settings) -> None:
         self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and scope.get("method") == "OPTIONS":
-            origin = _header_map(scope).get("origin")
-            allowed = get_settings().cors_origin_list()
-            if origin is not None and origin not in allowed:
-                await send_json_error(send, 403, "forbidden")
-                return
-        await self.app(scope, receive, send)
-
-
-class ApiErrorMiddleware:
-    """ASGI puro: añade X-API-Version y captura excepciones no manejadas."""
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
+        self.settings = settings
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        async def send_with_version(message: Message) -> None:
+        pending_start: Message | None = None
+        pending_body = bytearray()
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal pending_start
             if message["type"] == "http.response.start":
+                headers = {
+                    key.decode("latin-1").lower(): value.decode("latin-1")
+                    for key, value in (message.get("headers") or [])
+                }
+                content_type = headers.get("content-type", "")
+                if message["status"] == 400 and content_type.startswith("text/plain"):
+                    pending_start = message
+                    return
+                headers_list = _with_version(list(message.get("headers") or []))
+                await send({**message, "headers": headers_list})
+                return
+
+            if pending_start is not None and message["type"] == "http.response.body":
+                pending_body.extend(message.get("body") or b"")
+                if message.get("more_body"):
+                    return
+                text = pending_body.decode("utf-8", errors="replace")
+                if text.startswith("Disallowed CORS"):
+                    await send_json_error(send, 403, "forbidden")
+                    return
+                headers_list = _with_version(list(pending_start.get("headers") or []))
+                await send({**pending_start, "headers": headers_list})
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": bytes(pending_body),
+                        "more_body": False,
+                    }
+                )
+                return
+
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+class ApiErrorMiddleware:
+    """ASGI puro: añade X-API-Version y captura excepciones no manejadas."""
+
+    def __init__(self, app: ASGIApp, settings: Settings) -> None:
+        self.app = app
+        self.settings = settings
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        started = False
+
+        async def send_with_version(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
                 headers = _with_version(list(message.get("headers") or []))
                 message = {**message, "headers": headers}
             await send(message)
 
         try:
             await self.app(scope, receive, send_with_version)
+        except HTTPException:
+            raise
         except Exception as exc:
-            settings = get_settings()
-            payload = json.dumps(
+            logger.exception("Excepción no manejada")
+            if started:
+                raise
+            payload = _compact_json(
                 error_body(
                     "internal_error",
-                    message=str(exc) if settings.expose_errors else None,
+                    message=str(exc) if self.settings.expose_errors else None,
                 )
-            ).encode("utf-8")
+            )
             await send_with_version(
                 {
                     "type": "http.response.start",
@@ -98,15 +153,16 @@ class ApiErrorMiddleware:
 class BodySizeLimitMiddleware:
     """Rechaza cuerpos grandes por Content-Length o contando el stream."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, settings: Settings) -> None:
         self.app = app
+        self.max_body_bytes = settings.max_body_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        limit = get_settings().max_body_bytes
+        limit = self.max_body_bytes
         content_length = _header_map(scope).get("content-length")
         if content_length is not None:
             try:
@@ -117,32 +173,24 @@ class BodySizeLimitMiddleware:
                 await send_json_error(send, 413, "payload_too_large")
                 return
 
-        chunks: list[bytes] = []
         total = 0
-        while True:
+        body_finished = False
+
+        async def limited_receive() -> Message:
+            nonlocal total, body_finished
+            if body_finished:
+                return await receive()
             message = await receive()
             if message["type"] != "http.request":
-                await self.app(scope, receive, send)
-                return
+                return message
             data = message.get("body", b"")
             if not isinstance(data, (bytes, bytearray)):
                 data = b""
             total += len(data)
             if total > limit:
-                await send_json_error(send, 413, "payload_too_large")
-                return
-            chunks.append(bytes(data))
+                raise HTTPException(status_code=413, detail="payload_too_large")
             if not message.get("more_body"):
-                break
+                body_finished = True
+            return message
 
-        body = b"".join(chunks)
-        sent = False
-
-        async def replay() -> Message:
-            nonlocal sent
-            if not sent:
-                sent = True
-                return {"type": "http.request", "body": body, "more_body": False}
-            return {"type": "http.disconnect"}
-
-        await self.app(scope, replay, send)
+        await self.app(scope, limited_receive, send)

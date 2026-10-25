@@ -113,3 +113,36 @@ def test_http_client_body_over_limit_returns_413(small_body_client: TestClient) 
     assert response.status_code == 413
     assert response.json() == {"error": "payload_too_large"}
     assert response.headers["x-api-version"] == "v1"
+    assert b": " not in response.content
+
+
+def test_content_length_at_limit_is_accepted(small_body_client: TestClient) -> None:
+    payload = b"x" * 64
+    response = small_body_client.post(
+        "/api/v1/_test/echo-size",
+        content=payload,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"size": 64}
+
+
+def test_content_length_over_limit_by_one_is_413(small_body_client: TestClient) -> None:
+    async def receive() -> Message:
+        raise AssertionError("el cuerpo no debe leerse si Content-Length excede")
+
+    messages = _run_asgi(
+        small_body_client.app,
+        method="POST",
+        path="/api/v1/_test/echo-size",
+        headers=[
+            (b"host", b"test"),
+            (b"content-type", b"application/octet-stream"),
+            (b"content-length", b"65"),
+        ],
+        receive=receive,
+    )
+    status, body = _json_error(messages)
+    assert status == 413
+    assert body == {"error": "payload_too_large"}

@@ -79,3 +79,24 @@ def test_database_url_defaults_to_docker_compose(
     assert settings.database_url.startswith("postgresql+asyncpg://")
     assert "127.0.0.1:5432" in settings.database_url
     assert settings.database_url.endswith("/estudiomusica")
+
+
+def test_expose_errors_in_production_logs_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from app.config import get_settings
+    from app.main import create_app, get_app
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("EXPOSE_ERRORS", "true")
+    monkeypatch.setenv("ENABLE_EXAMPLE_ROUTES", "false")
+    get_settings.cache_clear()
+    get_app.cache_clear()
+    try:
+        with caplog.at_level("WARNING", logger="app.main"):
+            create_app()
+        assert "EXPOSE_ERRORS" in caplog.text
+        assert "production" in caplog.text
+    finally:
+        get_settings.cache_clear()
+        get_app.cache_clear()
