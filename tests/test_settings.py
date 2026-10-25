@@ -116,6 +116,21 @@ def test_production_rejects_default_password_on_other_database(
     get_settings.cache_clear()
 
 
+def test_production_rejects_default_user_with_other_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://estudiomusica:otra-clave@db.example:5432/app",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="usuario") as caught:
+        Settings()
+    assert "otra-clave" not in str(caught.value)
+    get_settings.cache_clear()
+
+
 def test_production_rejects_default_password_with_other_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

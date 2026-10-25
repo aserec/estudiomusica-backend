@@ -168,10 +168,14 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_URL no es un DSN válido") from None
         query_password = self._query_value(parsed, "password")
         query_user = self._query_value(parsed, "user")
-        query_database = self._query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
         password = query_password or parsed.password
-        database = query_database or parsed.database or ""
-        if password == _DEFAULT_DEV_PASSWORD or query_user == _DEFAULT_DEV_USER:
+        username = query_user or parsed.username
+        database = (
+            self._query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
+            or parsed.database
+            or ""
+        )
+        if password == _DEFAULT_DEV_PASSWORD or username == _DEFAULT_DEV_USER:
             raise ValueError(
                 "DATABASE_URL no puede usar la contraseña o el usuario "
                 "por defecto de desarrollo fuera de APP_ENV=development"

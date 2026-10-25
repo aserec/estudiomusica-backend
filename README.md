@@ -104,7 +104,7 @@ postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
 docker compose up -d
 ```
 
-Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings rechaza la contraseña o el usuario por defecto (también en la query: `password`, `user`) y cualquier base `*_test` en el path o en `database`/`dbname`. Los tests de production activan un opt-in (`allow_test_database`) que **no** lee el entorno: un despliegue real no puede encenderlo. `str(ValidationError)` y los logs no incluyen el DSN ni `AUTH_SECRET` (`SecretStr` + `hide_input_in_errors`); `ValidationError.errors()` y `.json()` de Pydantic sí pueden traer `input_value` — no los registres ni los devuelvas. Espera a que el healthcheck esté sano:
+Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings rechaza la contraseña por defecto, el usuario por defecto (`estudiomusica`, p. ej. `estudiomusica:otra@…`, también en la query) y cualquier base `*_test` en el path o en `database`/`dbname`. Los tests de production activan un opt-in (`allow_test_database`) que **no** lee el entorno: un despliegue real no puede encenderlo. `str(ValidationError)` y los logs no incluyen el DSN ni `AUTH_SECRET` (`SecretStr` + `hide_input_in_errors`); `ValidationError.errors()` y `.json()` de Pydantic sí pueden traer `input_value` — no los registres ni los devuelvas. Espera a que el healthcheck esté sano:
 
 ```bash
 docker compose ps
@@ -122,13 +122,13 @@ Para revertirlas del todo:
 uv run alembic downgrade base
 ```
 
-Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations`). Van en el wheel con el paquete `app`. El `alembic.ini` de la raíz **no** viaja en el wheel: desde el paquete instalado usa el helper programático (también hay `app/alembic.ini`):
+Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations`). Van en el wheel con el paquete `app`. La fuente de verdad es `app/alembic.ini` (el de la raíz es un enlace para que `uv run alembic` siga funcionando en el repo). Desde el paquete instalado:
 
 ```bash
 python -c "from alembic import command; from app.migrations.config import make_alembic_config; command.upgrade(make_alembic_config(), 'head')"
 ```
 
-La inicial crea `set_updated_at()` (`clock_timestamp()`). No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. `PersistentModel` monta el trigger en las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. Nueva revisión, cuando exista un modelo:
+`0001` solo crea la función `set_updated_at()` (`clock_timestamp()`), no el trigger. No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. El trigger de cada tabla `PersistentModel` lo montan las revisiones que la crean (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. Nueva revisión, cuando exista un modelo:
 
 ```bash
 uv run alembic revision -m "descripcion" --autogenerate
@@ -275,11 +275,11 @@ app/
   auth/              # Hash argon2, JWT HS256 y cookie de sesión
   models/            # PersistentModel, User y AuthSession
   migrations/        # Alembic (env.py async + versions/ + config programático)
-  alembic.ini        # Copia empaquetada (el de la raíz no va en el wheel)
+  alembic.ini        # Fuente de verdad (el de la raíz es un enlace)
 docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
 tests/               # Tests de pytest (convenciones + BD aislada)
 docker-compose.yml   # Postgres 17 en 127.0.0.1:5432 (sin container_name fijo)
-alembic.ini          # CLI `uv run alembic` desde el repo
+alembic.ini          # Enlace a app/alembic.ini para `uv run alembic`
 .env.example         # Plantilla de variables de entorno
 pyproject.toml       # Dependencias, ruff, pytest y mypy
 uv.lock              # Lockfile reproducible de uv

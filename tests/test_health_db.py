@@ -3,11 +3,12 @@ import socket
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.db import RedactedDsn
 from app.services import health as health_service
 
 SECRET_PASSWORD = "supersecret-password-do-not-leak"
@@ -126,14 +127,6 @@ def test_health_db_returns_503_if_probe_hangs(
     assert elapsed < 2.0
 
 
-def test_health_db_does_not_await_graceful_close() -> None:
-    import inspect
-
-    source = inspect.getsource(health_service.check_database)
-    assert "connection.close()" not in source
-    assert "_abandon_health_connection" in source
-
-
 @contextmanager
 def _silent_tcp_server() -> Iterator[int]:
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -206,3 +199,106 @@ def test_health_db_ok_body_has_only_db_key(
     assert response.status_code == 200
     assert list(response.json().keys()) == ["db"]
     assert response.json()["db"] == "ok"
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_health_db_frozen_after_login_returns_503_quickly(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """Proxy que autentica y congela: 503, no 500, dentro del timeout.
+
+    Sin terminate el execute cancelado espera command_timeout (~4 s).
+    Sin invalidate la conexión queda checked-out. Abandon vacío cuelga.
+    """
+
+    from sqlalchemy.engine.url import make_url
+
+    from app.config import get_settings
+    from app.db import clear_engine, dispose_engine, get_engine
+    from tests.conftest import _build_client
+    from tests.pg_freeze_proxy import FreezeAfterLoginProxy
+
+    parsed = make_url(require_postgres.secret())
+    proxy = FreezeAfterLoginProxy(parsed.host or "127.0.0.1", parsed.port or 5432)
+    await proxy.start()
+    frozen_url = parsed.set(host="127.0.0.1", port=proxy.port).render_as_string(
+        hide_password=False
+    )
+    monkeypatch.setenv("DATABASE_URL", frozen_url)
+    monkeypatch.setenv("DB_HEALTH_TIMEOUT", "0.6")
+    monkeypatch.setenv("DB_COMMAND_TIMEOUT", "8")
+    get_settings.cache_clear()
+    clear_engine()
+    try:
+        started = time.monotonic()
+        result = await health_service.check_database()
+        elapsed = time.monotonic() - started
+        assert result.db == "down"
+        assert elapsed < 2.0
+
+        engine = get_engine()
+        assert engine.sync_engine.pool.checkedout() == 0  # type: ignore[attr-defined]
+
+        client_iter = _build_client(
+            monkeypatch,
+            APP_ENV="development",
+            EXPOSE_ERRORS="false",
+            ENABLE_EXAMPLE_ROUTES="true",
+            DB_HEALTH_TIMEOUT="0.6",
+            DB_COMMAND_TIMEOUT="8",
+            DATABASE_URL=frozen_url,
+        )
+        client = next(client_iter)
+        try:
+            started = time.monotonic()
+            response = client.get("/api/v1/health/db")
+            elapsed = time.monotonic() - started
+            assert response.status_code == 503
+            assert response.json() == {"db": "down"}
+            assert elapsed < 2.0
+        finally:
+            close = getattr(client_iter, "close", None)
+            if callable(close):
+                close()
+    finally:
+        await dispose_engine()
+        get_settings.cache_clear()
+        with suppress(Exception):
+            await asyncio.wait_for(proxy.aclose(), timeout=2)
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_health_db_reuses_pool_connection_when_postgres_is_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    from sqlalchemy import event
+
+    from app.config import get_settings
+    from app.db import clear_engine, dispose_engine, get_engine
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    get_settings.cache_clear()
+    clear_engine()
+    engine = get_engine()
+    connects = {"n": 0}
+
+    def _on_connect(*_args: object, **_kwargs: object) -> None:
+        connects["n"] += 1
+
+    event.listen(engine.sync_engine, "connect", _on_connect)
+    try:
+        first = await health_service.check_database()
+        second = await health_service.check_database()
+        assert first.db == "ok"
+        assert second.db == "ok"
+        assert connects["n"] == 1
+    finally:
+        event.remove(engine.sync_engine, "connect", _on_connect)
+        await dispose_engine()
+        get_settings.cache_clear()
