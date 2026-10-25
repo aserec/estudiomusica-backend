@@ -19,8 +19,10 @@ from app.middleware import (
     RejectedPreflightMiddleware,
 )
 from app.routers import (
+    admin_categories_router,
     admin_roles_router,
     auth_router,
+    categories_router,
     courses_router,
     examples_router,
     health_router,
@@ -45,6 +47,8 @@ Backend FastAPI de EstudioMusica.
 - Auth: `POST /api/v1/auth/signup|login|logout` y `GET /api/v1/auth/me`.
 - Roles: `GET|PATCH|DELETE /api/v1/admin/system-roles` y
   `GET /api/v1/courses/{course_id}/me/permissions`.
+- Categorías: `GET /api/v1/categories` y
+  `POST|PUT|DELETE /api/v1/admin/categories`.
 """
 
 OPENAPI_TAGS = [
@@ -72,6 +76,14 @@ OPENAPI_TAGS = [
         "description": (
             "Permisos del usuario actual en un curso. "
             "La matrícula se asigna en #403; aquí solo se lee."
+        ),
+    },
+    {
+        "name": "categories",
+        "description": (
+            "Catálogo jerárquico de categorías de curso. "
+            "Listado autenticado; altas, PUT y borrado con "
+            "`site:manage-courses`."
         ),
     },
     {
@@ -165,6 +177,8 @@ def create_app() -> FastAPI:
     api_router.include_router(health_router)
     api_router.include_router(auth_router)
     api_router.include_router(admin_roles_router)
+    api_router.include_router(categories_router)
+    api_router.include_router(admin_categories_router)
     api_router.include_router(courses_router)
     if settings.example_routes_enabled():
         api_router.include_router(examples_router)

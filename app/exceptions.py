@@ -105,3 +105,21 @@ class RoleNotAssignable(Conflict):
     """409 {error: role_not_assignable}."""
 
     error = "role_not_assignable"
+
+
+class CategoryNotEmpty(Conflict):
+    """409 {error: category_not_empty}."""
+
+    error = "category_not_empty"
+
+
+class CategoryNameTaken(Conflict):
+    """409 {error: category_name_taken}."""
+
+    error = "category_name_taken"
+
+
+class CategoryCycle(Conflict):
+    """409 {error: category_cycle}."""
+
+    error = "category_cycle"

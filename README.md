@@ -2,7 +2,7 @@
 
 Backend FastAPI de EstudioMusica. Sustituye los almacenes JSON del frontend Next.js.
 
-Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS), la persistencia (Postgres, SQLAlchemy 2 async y Alembic), la API de autenticación (`/api/v1/auth`) y la matriz de roles/permisos (`/api/v1/admin/system-roles`, `/api/v1/courses/{courseId}/me/permissions`).
+Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS), la persistencia (Postgres, SQLAlchemy 2 async y Alembic), la API de autenticación (`/api/v1/auth`), la matriz de roles/permisos (`/api/v1/admin/system-roles`, `/api/v1/courses/{courseId}/me/permissions`) y el CRUD de categorías de curso (`/api/v1/categories`, `/api/v1/admin/categories`).
 
 ## Requisitos
 
@@ -109,6 +109,21 @@ Dependencias reutilizables: `require_site_permission(...)` y `require_course_per
 
 `0003_system_roles` (en `app/migrations/versions/`) crea `system_roles` y `course_memberships`, siembra los cuatro roles y añade `users.system_role_id`. `is_admin` se mantiene sincronizado para no romper `/auth/me`. Usa `updated_at_trigger_sql` para el trigger.
 
+## Categorías de curso
+
+El catálogo es jerárquico (`parentId`). Cualquier usuario autenticado lee el listado; crear, actualizar y borrar exige `site:manage-courses` (solo admin). Alumno, profesor y profesor adjunto reciben `403 {error: forbidden}` en las mutaciones. Sin sesión o token inválido: `401 {error: unauthorized}`.
+
+```text
+GET    /api/v1/categories
+POST   /api/v1/admin/categories              {name, parentId?, description?, sortOrder?}
+PUT    /api/v1/admin/categories/{id}         {name, parentId?, description?, sortOrder?}
+DELETE /api/v1/admin/categories/{id}         409 si tiene hijas o cursos
+```
+
+El ticket #400 pedía PATCH y un array sin más. Se usa **PUT** (convención #91) y el listado sigue sin paginar: el árbol es el catálogo completo, no hace falta `page`/`pageSize`. Nombre único (citext, sin distinguir mayúsculas) entre hermanos vigentes. DELETE es lógico (`deleted_at`). `409 {error: category_not_empty}` si hay hijas vigentes o filas vigentes en `courses` (la tabla llega en #401; hasta entonces el chequeo es no-op). `409 {error: category_cycle}` si el nuevo padre sería un descendiente. `409 {error: category_name_taken}` si el nombre ya existe en el mismo padre.
+
+`0004_course_categories` crea `categories` (`id`, `name`, `parent_id`, `description`, `sort_order`, timestamps, `deleted_at`) y el trigger `updated_at`. #401 añadirá `courses.category_id` FK a esta tabla.
+
 ## Postgres, migraciones y tests con BD
 
 El DSN se lee de `DATABASE_URL` (pydantic-settings). El valor por defecto coincide con `docker-compose.yml`:
@@ -153,7 +168,7 @@ La inicial crea `set_updated_at()` (`clock_timestamp()`). No instala `pgcrypto`:
 uv run alembic revision -m "descripcion" --autogenerate
 ```
 
-Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. No hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext`, `users` y `auth_sessions` y monta ese trigger en ambas. `0003_system_roles` añade `system_roles` (id slug, no UUID), `users.system_role_id` y `course_memberships`.
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. No hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext`, `users` y `auth_sessions` y monta ese trigger en ambas. `0003_system_roles` añade `system_roles` (id slug, no UUID), `users.system_role_id` y `course_memberships`. `0004_course_categories` añade `categories` (árbol con `parent_id`, citext, índices únicos parciales por hermano).
 
 `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
@@ -279,12 +294,12 @@ app/
   errors.py          # Sobre de error y handlers (validación, HTTP)
   exceptions.py      # AccessDenied, NotFound, Validation, PayloadTooLarge
   config/            # Ajustes por variables de entorno (pydantic-settings)
-  routers/           # Rutas HTTP (health, auth, admin, courses y examples)
-  schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth, roles)
-  services/          # Lógica de aplicación (salud, auth, roles, examples)
+  routers/           # Rutas HTTP (health, auth, admin, categories, courses y examples)
+  schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth, roles, categories)
+  services/          # Lógica de aplicación (salud, auth, roles, categories, examples)
   permissions/       # Matriz versionada y dependencias require_*_permission
   auth/              # Hash argon2, JWT HS256 y cookie de sesión
-  models/            # PersistentModel, User, AuthSession, SystemRoleRow, CourseMembership
+  models/            # PersistentModel, User, AuthSession, SystemRoleRow, CourseMembership, Category
   migrations/        # Alembic (env.py async + versions/ + config programático)
   alembic.ini        # Copia empaquetada (el de la raíz no va en el wheel)
 docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
