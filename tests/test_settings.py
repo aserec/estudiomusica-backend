@@ -183,6 +183,19 @@ def test_production_auth_cookie_is_secure() -> None:
     assert settings.auth_cookie_secure() is True
 
 
+def test_assistant_media_flag_defaults_false() -> None:
+    settings = Settings(_env_file=None)
+    assert settings.assistant_media_and_sm3_visible is False
+
+
+def test_assistant_media_flag_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ASSISTANT_MEDIA_AND_SM3_VISIBLE", "true")
+    get_settings.cache_clear()
+    settings = Settings()
+    assert settings.assistant_media_and_sm3_visible is True
+    get_settings.cache_clear()
+
+
 def test_bootstrap_admin_email_set_normalizes() -> None:
     settings = Settings(
         bootstrap_admin_emails=" Ada@Example.com , , other@example.com ",

@@ -16,6 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.db import get_session, redact_database_url
 from app.exceptions import Validation
+from app.models import User
+from app.permissions.deps import require_course_permission, require_site_permission
+from app.permissions.types import Permission
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEST_DATABASE_URL = (
@@ -59,6 +62,7 @@ _SETTINGS_ENV = {
     "AUTH_ARGON2_TIME_COST": "1",
     "AUTH_ARGON2_MEMORY_COST": "8192",
     "AUTH_ARGON2_PARALLELISM": "1",
+    "ASSISTANT_MEDIA_AND_SM3_VISIBLE": "false",
 }
 
 PROBE_FILE_BYTES = b"file-response-body\n" * 8
@@ -208,6 +212,24 @@ def _mount_probes(application: FastAPI) -> None:
     ) -> dict[str, str]:
         await session.execute(text("SELECT 1"))
         return {"session": "ok"}
+
+    @application.get("/api/v1/_test/site-manage-admins")
+    async def site_manage_admins_probe(
+        _user: Annotated[
+            User,
+            Depends(require_site_permission(Permission.SITE_MANAGE_ADMINS)),
+        ],
+    ) -> dict[str, bool]:
+        return {"ok": True}
+
+    @application.get("/api/v1/_test/courses/{course_id}/teach")
+    async def course_teach_probe(
+        _user: Annotated[
+            User,
+            Depends(require_course_permission(Permission.COURSE_TEACH)),
+        ],
+    ) -> dict[str, bool]:
+        return {"ok": True}
 
 
 def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> Iterator[TestClient]:

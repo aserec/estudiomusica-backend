@@ -38,7 +38,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
     config = alembic_config(url)
 
     command.upgrade(config, "head")
-    assert _scalar(url, "SELECT version_num FROM alembic_version") == "0002_auth_users"
+    assert _scalar(url, "SELECT version_num FROM alembic_version") == "0003_system_roles"
     assert (
         _scalar(url, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
         == "set_updated_at"
@@ -46,15 +46,55 @@ def test_alembic_upgrade_head_and_downgrade_base(
     assert _scalar(url, "SELECT gen_random_uuid() IS NOT NULL") is True
     assert _scalar(url, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(url, "SELECT to_regclass('public.auth_sessions')") == "auth_sessions"
+    assert _scalar(url, "SELECT to_regclass('public.system_roles')") == "system_roles"
+    assert (
+        _scalar(url, "SELECT to_regclass('public.course_memberships')")
+        == "course_memberships"
+    )
     assert (
         _scalar(url, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
         == "citext"
     )
+    assert (
+        _scalar(
+            url,
+            "SELECT count(*) FROM system_roles "
+            "WHERE id IN ('alumno','profesor','profesor_adjunto','admin')",
+        )
+        == 4
+    )
+    assert (
+        _scalar(
+            url,
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'users' AND column_name = 'system_role_id'",
+        )
+        == 1
+    )
+
+    command.downgrade(config, "-1")
+    assert _scalar(url, "SELECT version_num FROM alembic_version") == "0002_auth_users"
+    assert _scalar(url, "SELECT to_regclass('public.users')") == "users"
+    assert _scalar(url, "SELECT to_regclass('public.system_roles')") is None
+    assert _scalar(url, "SELECT to_regclass('public.course_memberships')") is None
+    assert (
+        _scalar(
+            url,
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'users' AND column_name = 'system_role_id'",
+        )
+        is None
+    )
+
+    command.upgrade(config, "head")
+    assert _scalar(url, "SELECT version_num FROM alembic_version") == "0003_system_roles"
+    assert _scalar(url, "SELECT to_regclass('public.system_roles')") == "system_roles"
 
     command.downgrade(config, "0001_initial")
     assert _scalar(url, "SELECT version_num FROM alembic_version") == "0001_initial"
     assert _scalar(url, "SELECT to_regclass('public.users')") is None
     assert _scalar(url, "SELECT to_regclass('public.auth_sessions')") is None
+    assert _scalar(url, "SELECT to_regclass('public.system_roles')") is None
     assert (
         _scalar(url, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
         == "set_updated_at"
@@ -68,14 +108,16 @@ def test_alembic_upgrade_head_and_downgrade_base(
     )
 
     command.upgrade(config, "head")
-    assert _scalar(url, "SELECT version_num FROM alembic_version") == "0002_auth_users"
+    assert _scalar(url, "SELECT version_num FROM alembic_version") == "0003_system_roles"
     assert _scalar(url, "SELECT to_regclass('public.users')") == "users"
+    assert _scalar(url, "SELECT to_regclass('public.system_roles')") == "system_roles"
 
 
 def test_alembic_revision_chain_is_linear() -> None:
     config = alembic_config(resolve_alembic_database_url())
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0002_auth_users"]
+    assert heads == ["0003_system_roles"]
+    assert script.get_revision("0003_system_roles").down_revision == "0002_auth_users"
     assert script.get_revision("0002_auth_users").down_revision == "0001_initial"
     assert script.get_revision("0001_initial").down_revision is None
