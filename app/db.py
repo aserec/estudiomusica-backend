@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -15,15 +16,29 @@ _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
+def redact_database_url(url: str) -> str:
+    """DSN sin contraseña, para logs y mensajes de error."""
+
+    return make_url(url).render_as_string(hide_password=True)
+
+
 def get_engine() -> AsyncEngine:
     """Devuelve el motor async, creándolo la primera vez que se pide."""
 
     global _engine
     if _engine is None:
+        settings = get_settings()
         _engine = create_async_engine(
-            get_settings().database_url,
+            settings.database_url,
             pool_pre_ping=True,
-            connect_args={"timeout": 2},
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
+            pool_recycle=settings.db_pool_recycle,
+            connect_args={
+                "timeout": settings.db_connect_timeout,
+                "command_timeout": settings.db_command_timeout,
+            },
         )
     return _engine
 

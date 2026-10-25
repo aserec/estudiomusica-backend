@@ -67,7 +67,7 @@ La sonda de Postgres es `GET /api/v1/health/db` (también hay alias en `GET /hea
 curl -i http://127.0.0.1:8000/api/v1/health/db
 ```
 
-Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde, HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, code, fields}` de las rutas de negocio. `GET /health/db` en la raíz es el alias de sonda; no aparece en OpenAPI.
+Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde o la sonda supera `DB_HEALTH_TIMEOUT` (2 s por defecto), HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, code, fields}` de las rutas de negocio. `GET /health/db` en la raíz es el alias de sonda; no aparece en OpenAPI.
 
 Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
