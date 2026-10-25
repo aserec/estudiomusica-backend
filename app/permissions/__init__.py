@@ -1,10 +1,5 @@
-"""Matriz de permisos y dependencias de autorización."""
+"""Matriz de permisos y tipos. Las dependencias FastAPI viven en ``deps``."""
 
-from app.permissions.deps import (
-    get_current_user,
-    require_course_permission,
-    require_site_permission,
-)
 from app.permissions.matrix import (
     COURSE_ROLE_PERMISSIONS,
     PERMISSION_MATRIX_VERSION,
@@ -22,9 +17,6 @@ __all__ = [
     "CourseRole",
     "Permission",
     "effective_permissions",
-    "get_current_user",
     "has_course_permission",
     "has_site_permission",
-    "require_course_permission",
-    "require_site_permission",
 ]
