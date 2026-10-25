@@ -2,7 +2,7 @@
 
 Backend FastAPI de EstudioMusica. Sustituye los almacenes JSON del frontend Next.js.
 
-Este repositorio es todavía el esqueleto inicial: no incluye base de datos ni lógica de negocio. Las siguientes issues añadirán Postgres + SQLAlchemy 2 async + Alembic y las convenciones de API (errores, paginación, OpenAPI y CORS).
+Este repositorio es el esqueleto FastAPI más las convenciones transversales de la API (errores, paginación, OpenAPI y CORS). No incluye base de datos ni lógica de negocio: Postgres + SQLAlchemy 2 async + Alembic llegará en otra PR.
 
 ## Requisitos
 
@@ -31,19 +31,15 @@ uv sync
 ## Arrancar en local
 
 ```bash
-uv run fastapi dev app/main.py
-```
-
-El servidor queda en [http://127.0.0.1:8000](http://127.0.0.1:8000). Equivalente con Uvicorn:
-
-```bash
 uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+El servidor queda en [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
 Comprueba que responde:
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/api/v1/health
 ```
 
 Debe devolver HTTP 200 y:
@@ -53,8 +49,6 @@ Debe devolver HTTP 200 y:
 ```
 
 Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
-
-El host y el puerto se pueden cambiar con `HOST` y `PORT` en `.env`.
 
 ## Tests, lint y types
 
@@ -73,24 +67,95 @@ Para formatear el código:
 uv run ruff format .
 ```
 
+## Convenciones de la API
+
+Todas las rutas cuelgan de un `api_router` con prefijo **`/api/v1`**, montado en `create_app()`. Incluye `GET /api/v1/health`.
+
+### JSON camelCase, códigos snake_case
+
+Las claves JSON van en camelCase (`pageSize`, `displayName`, `refreshToken`). Los **códigos de error** y los **valores de enum** se quedan en snake_case (`not_found`, `invalid_score`, `in_progress`, `multichoice_single`).
+
+### Errores
+
+Sobre uniforme, también cuando FastAPI habría devuelto `{"detail": ...}`:
+
+```json
+{
+  "error": "validation_error",
+  "message": "La petición no es válida.",
+  "fields": [{"field": "displayName", "message": "..."}],
+  "code": "invalid_score"
+}
+```
+
+`error` es obligatorio. `message`, `fields` y `code` solo aparecen si aplican. La validación responde **400** (no 422) para alinearla con los criterios de las issues de negocio.
+
+### Paginación
+
+Query params `page` (por defecto 1) y `pageSize` (por defecto 20, máximo 100). Respuesta:
+
+```json
+{
+  "items": [],
+  "page": 1,
+  "pageSize": 20,
+  "total": 0
+}
+```
+
+Los listados de negocio pueden añadir claves extra (`unreadCount`, `categories`) junto a esos metadatos.
+
+### Actualizaciones
+
+**PUT** para actualizar. El único **PATCH** previsto es el autoguardado de intentos de cuestionario (`PATCH /courses/:courseId/quiz/:activityId/attempts/:attemptId`).
+
+### CORS
+
+Orígenes en `CORS_ORIGINS` (por defecto `http://localhost:3000` y `http://127.0.0.1:3000`, el Next.js local). Credenciales activadas. Métodos `GET,POST,PUT,PATCH,DELETE,OPTIONS`.
+
+### OpenAPI
+
+`GET /docs` y `GET /openapi.json` documentan el prefijo `/api/v1`, el sobre de error y los parámetros `page`/`pageSize`.
+
+### Rutas de demostración
+
+`/api/v1/examples` no es un recurso de negocio: sirve para ejercitar paginación, validación, PUT y 404. Las issues de cursos, usuarios, etc. reutilizarán los mismos esquemas.
+
+## De dónde salen estas decisiones
+
+La issue de convenciones es [aserec/estudioMusica-webapp#391](https://github.com/aserec/estudioMusica-webapp/issues/391). El repo del frontend es privado para este entorno, así que el contrato se tomó de las **decisiones del 24-10-2026** en [aserec/estudiomusica-backend#1](https://github.com/aserec/estudiomusica-backend/issues/1) (más recientes que la #391) y de las issues de backend que copian el contrato del Next.js:
+
+| Decisión | Dónde se vio |
+| --- | --- |
+| Claves JSON en camelCase; `page`/`pageSize`; PUT salvo el PATCH de #62; prefijo `/api/v1` | Comentario de @aserec en [#1](https://github.com/aserec/estudiomusica-backend/issues/1) (24 oct 2026) |
+| Códigos de error y enums en snake_case (`invalid_score`, `in_progress`, `multichoice_single`) | Segundo comentario de @aserec en #1 (24 oct 2026) |
+| Metadatos `page`, `pageSize`, `total`; defaults 1 y 20 | [#37](https://github.com/aserec/estudiomusica-backend/issues/37) (`GET /me/courses`, origen webapp #403 y mocks `fetchMockUserCourses` / `fetchMockCourses`); también #9, #15, #21, #82 (`GET /api/notices` hoy) |
+| Sobre `{ error, fields, code }` | [#52](https://github.com/aserec/estudiomusica-backend/issues/52) (`error: "invalid_evaluation"`, `fields`, `code`; origen webapp #420 y `docs/sheet-music-evaluation-contract.md`) |
+| `error` como código suelto (`not_open`, `closed`) | [#61](https://github.com/aserec/estudiomusica-backend/issues/61) (origen webapp #412) |
+| Validación → 400 indicando los campos | #3, #10, #33 (`updateProfileAction`, origen webapp #397) |
+
+Si la #391 proponía `limit`/`cursor` u otro sobre, **priman las decisiones del 24-10 en #1**. Eso hay que confirmarlo al revisar la PR.
+
 ## Estructura de carpetas
 
 ```text
 app/
-  main.py            # Factoría FastAPI y punto de entrada ASGI
+  main.py            # Factoría FastAPI: CORS, handlers, api_router /api/v1
+  errors.py          # Sobre de error y handlers (validación, HTTP, 500)
+  exceptions.py      # AppError
   config/            # Ajustes por variables de entorno (pydantic-settings)
-  routers/           # Rutas HTTP (ahora solo GET /health)
-  schemas/           # Modelos Pydantic de request/response
-  services/          # Lógica de aplicación (vacío salvo el chequeo de salud)
+  routers/           # Rutas HTTP (health y examples bajo /api/v1)
+  schemas/           # Modelos Pydantic (camelCase, errores, paginación)
+  services/          # Lógica de aplicación (salud + lista fija de examples)
   models/            # Reservado para modelos SQLAlchemy
-tests/               # Tests de pytest
+tests/               # Tests de pytest por convención
 .env.example         # Plantilla de variables de entorno
 pyproject.toml       # Dependencias, ruff, pytest y mypy
 uv.lock              # Lockfile reproducible de uv
 .python-version      # Python 3.15
 ```
 
-El prefijo `/api/v1`, el formato de errores, la paginación y CORS se dejarán para la issue de convenciones de API. `GET /health` permanece en la raíz a propósito: es un liveness check, no un recurso de negocio. `GET /health/db` se añadirá cuando exista la base de datos.
+`GET /health/db` se añadirá cuando exista la base de datos.
 
 ## Versiones fijadas
 
