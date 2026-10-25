@@ -2,7 +2,7 @@
 
 Backend FastAPI de EstudioMusica. Sustituye los almacenes JSON del frontend Next.js.
 
-Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS), la persistencia (Postgres, SQLAlchemy 2 async y Alembic) y la API de autenticación (`/api/v1/auth`).
+Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS), la persistencia (Postgres, SQLAlchemy 2 async y Alembic), la API de autenticación (`/api/v1/auth`) y la matriz de roles/permisos (`/api/v1/admin/system-roles`, `/api/v1/courses/{courseId}/me/permissions`).
 
 ## Requisitos
 
@@ -90,6 +90,25 @@ curl -b /tmp/em-cookies -sS http://127.0.0.1:8000/api/v1/auth/me
 curl -b /tmp/em-cookies -c /tmp/em-cookies -sS -X POST http://127.0.0.1:8000/api/v1/auth/logout
 ```
 
+## Roles de sistema y permisos de curso
+
+La autorización se comprueba en el servidor y se deniega por defecto. El JWT no lleva permisos: cada petición reevalúa el rol de sistema y la membresía de curso.
+
+Roles de sistema (id en snake_case): `alumno`, `profesor`, `profesor_adjunto`, `admin`. Roles de curso: `student`, `assistant`, `teacher`. Permisos (slugs del frontend): `course:view`, `course:grade`, `course:teach`, `site:manage-admins`, `site:manage-courses`. El admin tiene todos los de curso más los de sitio aunque no esté matriculado.
+
+```text
+GET    /api/v1/admin/system-roles
+PATCH  /api/v1/admin/system-roles/{id}   {name?, active?, sortOrder?}
+DELETE /api/v1/admin/system-roles/{id}   409 si isSystem o está en uso
+GET    /api/v1/courses/{courseId}/me/permissions
+```
+
+`GET /admin/system-roles` exige `site:manage-admins` (solo admin). Un no-admin recibe `403 {error: forbidden}`. Sin sesión o token inválido: `401 {error: unauthorized}`. Desactivar un rol impide asignarlo a usuarios nuevos; quienes ya lo tienen lo conservan. DELETE de un rol sembrado responde `409 {error: system_role_protected}`.
+
+Dependencias reutilizables: `require_site_permission(...)` y `require_course_permission(...)` (leen `course_id` del path). La asignación de matrícula queda fuera de este ticket (#403). El TODO(#306) de visibilidad multimedia/SM3 del profesor adjunto es el flag `ASSISTANT_MEDIA_AND_SM3_VISIBLE` (por defecto `false`); no se ha inventado un permiso nuevo.
+
+`0003_system_roles` crea `system_roles` y `course_memberships`, siembra los cuatro roles y añade `users.system_role_id`. `is_admin` se mantiene sincronizado para no romper `/auth/me`.
+
 ## Postgres, migraciones y tests con BD
 
 El DSN se lee de `DATABASE_URL` (pydantic-settings). El valor por defecto coincide con `docker-compose.yml`:
@@ -128,7 +147,7 @@ Las revisiones viven en `alembic/versions/`. La inicial crea `set_updated_at()` 
 uv run alembic revision -m "descripcion" --autogenerate
 ```
 
-Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE`; no hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext`, `users` y `auth_sessions` y monta ese trigger en ambas.
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE`; no hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext`, `users` y `auth_sessions` y monta ese trigger en ambas. `0003_system_roles` añade `system_roles` (id slug, no UUID), `users.system_role_id` y `course_memberships`.
 
 El directorio `alembic/` y `alembic.ini` van en el wheel (hatch `force-include`) para poder migrar desde un paquete instalado. `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
@@ -253,11 +272,12 @@ app/
   errors.py          # Sobre de error y handlers (validación, HTTP)
   exceptions.py      # AccessDenied, NotFound, Validation, PayloadTooLarge
   config/            # Ajustes por variables de entorno (pydantic-settings)
-  routers/           # Rutas HTTP (health, auth y examples)
-  schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth)
-  services/          # Lógica de aplicación (salud, auth, examples)
+  routers/           # Rutas HTTP (health, auth, admin, courses y examples)
+  schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth, roles)
+  services/          # Lógica de aplicación (salud, auth, roles, examples)
+  permissions/       # Matriz versionada y dependencias require_*_permission
   auth/              # Hash argon2, JWT HS256 y cookie de sesión
-  models/            # PersistentModel, User y AuthSession
+  models/            # PersistentModel, User, AuthSession, SystemRoleRow, CourseMembership
 alembic/             # Migraciones (env.py async + versions/)
 docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
 tests/               # Tests de pytest (convenciones + BD aislada)
