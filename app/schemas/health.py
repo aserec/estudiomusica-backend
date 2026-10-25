@@ -1,15 +1,17 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
+
+from app.schemas.base import APIModel
 
 
-class HealthResponse(BaseModel):
+class HealthResponse(APIModel):
     """Respuesta de `GET /api/v1/health` (y del alias de liveness `GET /health`)."""
 
     status: Literal["ok"] = Field(examples=["ok"])
 
 
-class DatabaseHealthResponse(BaseModel):
+class DatabaseHealthResponse(APIModel):
     """Respuesta de la sonda de Postgres (`GET /api/v1/health/db`).
 
     El contrato de la issue es ``{"db":"ok"}`` / ``{"db":"down"}``, no el

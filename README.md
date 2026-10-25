@@ -135,6 +135,8 @@ Desde la raíz del repositorio:
 
 ```bash
 uv run pytest
+uv run pytest -W error
+APP_ENV=prod uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
@@ -162,15 +164,21 @@ Sobre de [aserec/estudioMusica-webapp#391](https://github.com/aserec/estudioMusi
 { "error": "validation", "code": "invalid_score", "fields": ["displayName"] }
 ```
 
-`error` es el slug. `code` y `fields` (lista de **nombres** de campo, no objetos) son opcionales. La validación de Pydantic responde **400** `{error:"validation", fields:[...]}` y no el 422 de FastAPI.
+`error` es el slug. `code` y `fields` (lista de **nombres** de campo, no objetos) son opcionales. La validación de Pydantic responde **400** `{error:"validation", fields:[...]}` y no el 422 de FastAPI. `fields` se sanitiza (máximo 20 claves, 64 caracteres, identificadores seguros).
 
 Manejadores de dominio: `AccessDenied` → 403 `{error:"forbidden"}`, `NotFound` → 404 `{error:"not_found"}`, `Validation` → 400 `{error:"validation", fields}`, `PayloadTooLarge` → 413 `{error:"payload_too_large"}`.
 
-`message` **no** está en el contrato del frontend. Es opcional y solo se rellena en 500 cuando `APP_ENV=development`, para no meter el traceback en el slug `error`.
+`HTTPException(400, "texto")` responde `{error:"bad_request"}`. Un `HTTPException(422)` se convierte en 400. El `message` de un `detail` dict **no** se expone salvo `EXPOSE_ERRORS=true`.
+
+`message` **no** está en el contrato del frontend. Es opt-in (`EXPOSE_ERRORS=false` por defecto) y no depende de `APP_ENV`. Así un 500 en development no filtra `str(exc)` por accidente.
+
+Los 500 los captura un middleware ASGI **dentro** de CORS (`ApiErrorMiddleware`), no el `ServerErrorMiddleware` de Starlette: el sobre JSON lleva `X-API-Version` y cabeceras CORS.
+
+El cuerpo tiene un tope (`MAX_BODY_BYTES`, 1 MiB por defecto). Un `Content-Length` por encima se rechaza **antes** de leer; en chunked se cuentan los bytes. Ambos casos responden 413 `{error:"payload_too_large"}`.
 
 ### Paginación
 
-Query params `page` (por defecto 1) y `pageSize` (por defecto 20, máximo 100). Respuesta:
+Query params `page` (por defecto 1, máximo `PAGINATION_MAX_PAGE` = 10000) y `pageSize` (por defecto 20, máximo `PAGINATION_MAX_PAGE_SIZE` = 100). El tope de `page` evita un `OFFSET` enorme. Los límites viven en settings; no se duplican con `Query(le=...)`. Respuesta:
 
 ```json
 {
@@ -189,15 +197,15 @@ La #391 pedía `?limit=&cursor=` → `{ items, nextCursor }`. Se mantiene `page`
 
 ### CORS
 
-Orígenes en `CORS_ORIGINS` (por defecto `http://localhost:3000` y `http://127.0.0.1:3000`, el Next.js local). Credenciales activadas. Métodos `GET,POST,PUT,PATCH,DELETE,OPTIONS`.
+Orígenes en `CORS_ORIGINS` (por defecto `http://localhost:3000` y `http://127.0.0.1:3000`, el Next.js local). Credenciales activadas. Métodos `GET,POST,PUT,PATCH,DELETE,OPTIONS`. Se expone `X-API-Version`. Con credenciales, `CORS_ORIGINS='*'` o un origen que no sea `http(s)://` se rechazan al arrancar. Un preflight de origen desconocido responde 403 JSON (`{error:"forbidden"}`), no `text/plain`.
 
 ### OpenAPI y versión
 
-`GET /docs` y `GET /openapi.json` publican el contrato (prefijo `/api/v1`, sobre de error, `page`/`pageSize`). La versión de API es **v1**: va en la URL y en la cabecera `X-API-Version: v1`. `info.version` de OpenAPI es la del paquete (`0.1.0`).
+`GET /docs` y `GET /openapi.json` publican el contrato (prefijo `/api/v1`, sobre de error, `page`/`pageSize`). La versión de API es **v1**: va en la URL y en la cabecera `X-API-Version: v1` (también en 4xx/5xx). `info.version` es la del paquete (`version()`; si no está instalado, `0.0.0`). OpenAPI no fija `servers` a 127.0.0.1:8000. El 422/`HTTPValidationError` de FastAPI se sustituye por un 400 `ErrorResponse`.
 
 ### Rutas de demostración
 
-`/api/v1/examples` no es un recurso de negocio: sirve para ejercitar paginación, validación, PUT y 404. Las issues de cursos, usuarios, etc. reutilizarán los mismos esquemas.
+`/api/v1/examples` no es un recurso de negocio: sirve para ejercitar paginación, validación, PUT y 404. **No se monta en `production`** salvo `ENABLE_EXAMPLE_ROUTES=true`. Las issues de cursos, usuarios, etc. reutilizarán los mismos esquemas.
 
 ## De dónde salen estas decisiones
 
@@ -216,9 +224,10 @@ La issue de convenciones es [aserec/estudioMusica-webapp#391](https://github.com
 
 ```text
 app/
-  main.py            # Factoría FastAPI: CORS, handlers, api_router /api/v1
+  main.py            # Factoría FastAPI perezosa: get_app(), CORS, api_router
   db.py              # Motor async SQLAlchemy 2 y fábrica de sesiones
-  errors.py          # Sobre de error y handlers (validación, HTTP, 500)
+  middleware.py      # ASGI: versión, 500, tope de cuerpo, preflight rechazado
+  errors.py          # Sobre de error y handlers (validación, HTTP)
   exceptions.py      # AccessDenied, NotFound, Validation, PayloadTooLarge
   config/            # Ajustes por variables de entorno (pydantic-settings)
   routers/           # Rutas HTTP (health, health/db y examples)

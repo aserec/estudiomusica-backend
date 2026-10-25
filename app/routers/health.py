@@ -22,7 +22,7 @@ async def get_health() -> HealthResponse:
     description=(
         'Sonda de readiness de la base de datos. Responde `{"db":"ok"}` '
         'si Postgres acepta un `SELECT 1`; si no, `503` con `{"db":"down"}`. '
-        "No usa el sobre `{error, message}` de las rutas de negocio: el "
+        "No usa el sobre `{error, code, fields}` de las rutas de negocio: el "
         "contrato de la issue es este cuerpo mínimo, sin credenciales."
     ),
     responses={

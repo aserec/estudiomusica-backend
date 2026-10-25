@@ -1,20 +1,23 @@
-from collections.abc import AsyncIterator, Awaitable, Callable
+import functools
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
-from starlette.responses import Response
 
 from app.config import get_settings
 from app.db import dispose_engine
 from app.errors import register_exception_handlers
+from app.middleware import (
+    ApiErrorMiddleware,
+    BodySizeLimitMiddleware,
+    RejectedPreflightMiddleware,
+)
 from app.routers import examples_router, health_router
 from app.schemas.errors import ErrorResponse
-from app.schemas.examples import ExampleItem
-from app.schemas.pagination import Paginated
 
 OPENAPI_DESCRIPTION = """
 Backend FastAPI de EstudioMusica.
@@ -44,6 +47,9 @@ OPENAPI_TAGS = [
     },
 ]
 
+if TYPE_CHECKING:
+    app: FastAPI
+
 
 def _package_version() -> str:
     try:
@@ -58,6 +64,33 @@ async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
     await dispose_engine()
 
 
+def _rewrite_openapi_errors(schema: dict[str, Any]) -> None:
+    error_ref = {"$ref": "#/components/schemas/ErrorResponse"}
+    error_400 = {
+        "description": "Petición inválida",
+        "content": {"application/json": {"schema": error_ref}},
+    }
+    for path_item in schema.get("paths", {}).values():
+        if not isinstance(path_item, dict):
+            continue
+        for operation in path_item.values():
+            if not isinstance(operation, dict):
+                continue
+            responses = operation.get("responses")
+            if not isinstance(responses, dict):
+                continue
+            if "422" in responses:
+                del responses["422"]
+                responses["400"] = error_400
+    components = schema.setdefault("components", {}).setdefault("schemas", {})
+    error_schema = ErrorResponse.model_json_schema()
+    error_schema.pop("$defs", None)
+    error_schema.pop("$schema", None)
+    components["ErrorResponse"] = error_schema
+    components.pop("HTTPValidationError", None)
+    components.pop("ValidationError", None)
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     application = FastAPI(
@@ -70,34 +103,24 @@ def create_app() -> FastAPI:
             "url": "https://estudiomusica.com",
         },
         openapi_tags=OPENAPI_TAGS,
-        servers=[
-            {
-                "url": "http://127.0.0.1:8000",
-                "description": "Servidor local",
-            }
-        ],
     )
+    register_exception_handlers(application)
+    application.add_middleware(BodySizeLimitMiddleware)
+    application.add_middleware(ApiErrorMiddleware)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list(),
         allow_credentials=settings.cors_allow_credentials,
         allow_methods=settings.cors_method_list(),
         allow_headers=settings.cors_header_list(),
+        expose_headers=["X-API-Version"],
     )
-    register_exception_handlers(application)
-
-    @application.middleware("http")
-    async def api_version_header(
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        response = await call_next(request)
-        response.headers["X-API-Version"] = "v1"
-        return response
+    application.add_middleware(RejectedPreflightMiddleware)
 
     api_router = APIRouter(prefix="/api/v1")
     api_router.include_router(health_router)
-    api_router.include_router(examples_router)
+    if settings.example_routes_enabled():
+        api_router.include_router(examples_router)
     application.include_router(api_router)
 
     # Liveness en la raíz para sondas. El contrato de la API es GET /api/v1/health.
@@ -113,16 +136,9 @@ def create_app() -> FastAPI:
             description=application.description,
             routes=application.routes,
             tags=application.openapi_tags,
-            servers=application.servers,
             contact=application.contact,
         )
-        components = schema.setdefault("components", {}).setdefault("schemas", {})
-        components["ErrorResponse"] = ErrorResponse.model_json_schema(
-            ref_template="#/components/schemas/{model}"
-        )
-        components["PaginatedExampleItem"] = Paginated[ExampleItem].model_json_schema(
-            ref_template="#/components/schemas/{model}"
-        )
+        _rewrite_openapi_errors(schema)
         application.openapi_schema = schema
         return schema
 
@@ -130,4 +146,21 @@ def create_app() -> FastAPI:
     return application
 
 
-app = create_app()
+@functools.cache
+def get_app() -> FastAPI:
+    return create_app()
+
+
+def __getattr__(name: str) -> object:
+    """Expone `app` de forma perezosa para Uvicorn/FastAPI CLI.
+
+    Importar este módulo no instancia Settings, así un APP_ENV inválido
+    en la shell no rompe la recogida de tests.
+    """
+    if name == "app":
+        return get_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted([*globals(), "app"])

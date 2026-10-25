@@ -1,9 +1,4 @@
-import pytest
 from fastapi.testclient import TestClient
-
-from app.config import get_settings
-from app.db import clear_engine
-from app.main import create_app
 
 SECRET_PASSWORD = "supersecret-password-do-not-leak"
 
@@ -16,6 +11,7 @@ def test_health_db_ok_when_postgres_is_up(
     assert response.status_code == 200
     assert response.json() == {"db": "ok"}
     assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["x-api-version"] == "v1"
 
 
 def test_root_health_db_alias(
@@ -27,20 +23,22 @@ def test_root_health_db_alias(
     assert response.json() == {"db": "ok"}
 
 
-def test_health_db_down_without_credentials(
-    monkeypatch: pytest.MonkeyPatch,
+def test_health_db_ok_in_production_without_examples(
+    production_client: TestClient,
 ) -> None:
-    monkeypatch.setenv("APP_ENV", "development")
-    monkeypatch.setenv(
-        "DATABASE_URL",
-        f"postgresql+asyncpg://leaky_user:{SECRET_PASSWORD}@127.0.0.1:1/no_such_db",
-    )
-    get_settings.cache_clear()
-    clear_engine()
-    with TestClient(create_app()) as client:
-        response = client.get("/api/v1/health/db")
-    get_settings.cache_clear()
-    clear_engine()
+    """health/db se monta siempre; /examples no. SELECT 1 usa el DSN por defecto."""
+
+    response = production_client.get("/api/v1/health/db")
+
+    assert response.status_code == 200
+    assert response.json() == {"db": "ok"}
+    assert production_client.get("/api/v1/examples").status_code == 404
+
+
+def test_health_db_down_without_credentials(
+    down_db_client: TestClient,
+) -> None:
+    response = down_db_client.get("/api/v1/health/db")
 
     assert response.status_code == 503
     body = response.json()
@@ -54,20 +52,21 @@ def test_health_db_down_without_credentials(
 
 
 def test_health_db_down_is_not_business_error_envelope(
-    monkeypatch: pytest.MonkeyPatch,
+    down_db_production_client: TestClient,
 ) -> None:
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv(
-        "DATABASE_URL",
-        f"postgresql+asyncpg://leaky_user:{SECRET_PASSWORD}@127.0.0.1:1/no_such_db",
-    )
-    get_settings.cache_clear()
-    clear_engine()
-    with TestClient(create_app()) as client:
-        response = client.get("/api/v1/health/db")
-    get_settings.cache_clear()
-    clear_engine()
+    response = down_db_production_client.get("/api/v1/health/db")
 
     assert response.status_code == 503
     assert response.json() == {"db": "down"}
     assert list(response.json().keys()) == ["db"]
+
+
+def test_health_db_down_does_not_leak_with_expose_errors(
+    down_db_expose_errors_client: TestClient,
+) -> None:
+    response = down_db_expose_errors_client.get("/api/v1/health/db")
+
+    assert response.status_code == 503
+    assert response.json() == {"db": "down"}
+    assert SECRET_PASSWORD not in response.text
+    assert "message" not in response.json()

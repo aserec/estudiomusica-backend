@@ -20,6 +20,31 @@ def test_app_env_accepts_allowed_values(monkeypatch: pytest.MonkeyPatch) -> None
     get_settings.cache_clear()
 
 
+def test_expose_errors_defaults_to_false() -> None:
+    settings = Settings()
+    assert settings.expose_errors is False
+
+
+def test_cors_wildcard_rejected_with_credentials() -> None:
+    with pytest.raises(ValidationError, match="CORS_ORIGINS"):
+        Settings(cors_origins="*", cors_allow_credentials=True)
+
+
+def test_cors_non_http_origin_rejected_with_credentials() -> None:
+    with pytest.raises(ValidationError, match="http"):
+        Settings(cors_origins="ftp://evil.example", cors_allow_credentials=True)
+
+
+def test_cors_origin_without_scheme_rejected_with_credentials() -> None:
+    with pytest.raises(ValidationError, match="http"):
+        Settings(cors_origins="localhost:3000", cors_allow_credentials=True)
+
+
+def test_cors_wildcard_allowed_without_credentials() -> None:
+    settings = Settings(cors_origins="*", cors_allow_credentials=False)
+    assert settings.cors_origin_list() == ["*"]
+
+
 def test_database_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
         "DATABASE_URL",

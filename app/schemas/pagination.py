@@ -1,21 +1,18 @@
 from collections.abc import Sequence
 from typing import Annotated
 
-from fastapi import Query
-from pydantic import Field
+from fastapi import Depends, Query
 
+from app.config import Settings, get_settings
+from app.exceptions import Validation
 from app.schemas.base import APIModel
-
-DEFAULT_PAGE = 1
-DEFAULT_PAGE_SIZE = 20
-MAX_PAGE_SIZE = 100
 
 
 class PaginationQuery(APIModel):
     """Parámetros de paginación (`page` / `pageSize`) ya validados."""
 
-    page: int = Field(ge=1)
-    page_size: int = Field(ge=1, le=MAX_PAGE_SIZE)
+    page: int
+    page_size: int
 
 
 class Paginated[T](APIModel):
@@ -28,26 +25,37 @@ class Paginated[T](APIModel):
 
 
 def pagination_query(
+    settings: Annotated[Settings, Depends(get_settings)],
     page: Annotated[
-        int,
+        int | None,
         Query(
             ge=1,
             description="Número de página, empezando en 1.",
             examples=[1],
         ),
-    ] = DEFAULT_PAGE,
+    ] = None,
     page_size: Annotated[
-        int,
+        int | None,
         Query(
             alias="pageSize",
             ge=1,
-            le=MAX_PAGE_SIZE,
             description="Tamaño de página.",
             examples=[20],
         ),
-    ] = DEFAULT_PAGE_SIZE,
+    ] = None,
 ) -> PaginationQuery:
-    return PaginationQuery(page=page, page_size=page_size)
+    resolved_page = page if page is not None else settings.pagination_default_page
+    resolved_size = (
+        page_size if page_size is not None else settings.pagination_default_page_size
+    )
+    invalid: list[str] = []
+    if resolved_page > settings.pagination_max_page:
+        invalid.append("page")
+    if resolved_size > settings.pagination_max_page_size:
+        invalid.append("pageSize")
+    if invalid:
+        raise Validation(fields=invalid)
+    return PaginationQuery(page=resolved_page, page_size=resolved_size)
 
 
 def paginate[T](items: Sequence[T], query: PaginationQuery) -> Paginated[T]:
