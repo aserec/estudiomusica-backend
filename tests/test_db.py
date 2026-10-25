@@ -8,7 +8,7 @@ from sqlalchemy import String, Table, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db import clear_engine, get_session, get_session_factory
+from app.db import RedactedDsn, clear_engine, get_session, get_session_factory
 from app.models import PersistentModel
 
 
@@ -83,16 +83,16 @@ async def test_get_session_override_runs_select(session_client: Any) -> None:
 @pytest.mark.db
 async def test_get_session_commits_persistently(
     monkeypatch: pytest.MonkeyPatch,
-    require_postgres: str,
+    require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
     from app.config import get_settings
     from app.db import dispose_engine
 
-    monkeypatch.setenv("DATABASE_URL", require_postgres)
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     try:
@@ -125,16 +125,16 @@ async def test_get_session_commits_persistently(
 @pytest.mark.db
 async def test_get_session_rollbacks_persistently(
     monkeypatch: pytest.MonkeyPatch,
-    require_postgres: str,
+    require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
     from app.config import get_settings
     from app.db import dispose_engine
 
-    monkeypatch.setenv("DATABASE_URL", require_postgres)
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     try:
@@ -186,12 +186,12 @@ async def test_db_session_does_not_expire_on_commit(
 
 @pytest.mark.db
 async def test_join_transaction_rollback_discards_committed_rows(
-    require_postgres: str,
+    require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
     from sqlalchemy.ext.asyncio import AsyncSession as SASession
 
-    engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     async with engine.begin() as connection:
