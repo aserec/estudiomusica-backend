@@ -85,7 +85,7 @@ postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
 docker compose up -d
 ```
 
-Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Las credenciales por defecto del compose se rechazan si `APP_ENV` no es `development`. Espera a que el healthcheck esté sano:
+Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings rechaza la contraseña por defecto del compose (en cualquier DSN) y cualquier base `*_test`. Espera a que el healthcheck esté sano:
 
 ```bash
 docker compose ps
@@ -103,21 +103,21 @@ Para revertirlas del todo:
 uv run alembic downgrade base
 ```
 
-Las revisiones viven en `alembic/versions/`. La inicial crea `set_updated_at()` (`clock_timestamp()`). No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. Las tablas de negocio irán en issues posteriores y deben montar `BEFORE UPDATE ... EXECUTE FUNCTION set_updated_at()`. Nueva revisión, cuando exista un modelo:
+Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations` en `alembic.ini`). Van en el wheel con el paquete `app`. La inicial crea `set_updated_at()` (`clock_timestamp()`). No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. `PersistentModel` monta el trigger al crear la tabla; las migraciones pueden usar `updated_at_trigger_sql`. Nueva revisión, cuando exista un modelo:
 
 ```bash
 uv run alembic revision -m "descripcion" --autogenerate
 ```
 
-Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE`; no hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes).
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` (evento `after_create`); no hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes).
 
-El directorio `alembic/` y `alembic.ini` van en el wheel (hatch `force-include`) para poder migrar desde un paquete instalado. `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
+`env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
 ### Tests con base aislada
 
-Los tests de persistencia **no** usan los JSON de `.data/` del frontend. Usan `estudiomusica_test` (y `estudiomusica_alembic_test` solo para upgrade/downgrade de Alembic) y envuelven cada caso en una transacción que se revierte al terminar. El nombre de la base de `TEST_DATABASE_URL` debe terminar en `_test`; si no, pytest aborta.
+Los tests de persistencia **no** usan los JSON de `.data/` del frontend. Usan `estudiomusica_test` y envuelven cada caso en una transacción que se revierte al terminar. `ALEMBIC_TEST_DATABASE_URL` se deriva de `TEST_DATABASE_URL` (`<stem>_alembic_test`, p. ej. `estudiomusica_alembic_test`) y solo se usa en upgrade/downgrade de Alembic. El nombre efectivo de ambas bases debe terminar en `_test`; se rechazan query params que puedan cambiar el destino (`database`, `dbname`, `service`, `options`). Si no, pytest aborta (el mensaje nunca incluye la contraseña).
 
-`docker/postgres/init-test-db.sql` solo corre la primera vez que se crea el volumen `postgres_data`. Si el volumen ya existía, `pytest` crea las bases `*_test` al arrancar (conecta a `estudiomusica` o `postgres`). Para recrearlas a mano: `docker compose down -v && docker compose up -d`.
+`docker/postgres/init-test-db.sql` solo corre la primera vez que se crea el volumen `postgres_data`. Si el volumen ya existía, `pytest` crea las bases `*_test` conectando a la BD de mantenimiento `postgres`. Para recrearlas a mano: `docker compose down -v && docker compose up -d`.
 
 ```bash
 docker compose up -d
@@ -131,7 +131,7 @@ export TEST_DATABASE_URL=postgresql+asyncpg://estudiomusica:estudiomusica@127.0.
 uv run pytest
 ```
 
-`uv run pytest` sin Postgres en marcha **salta** los tests de BD (mensaje sin contraseña) y sigue pasando el resto. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
+`uv run pytest` sin Postgres en marcha **salta** los tests de BD solo si el error es de conexión (refused, host desconocido, timeout). Un fallo de autenticación o una migración rota **falla**. En CI: `REQUIRE_POSTGRES=1 uv run pytest` convierte el skip en fallo. Los mensajes no incluyen la contraseña. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
 
 ## Tests, lint y types
 
@@ -238,7 +238,7 @@ app/
   schemas/           # Modelos Pydantic (camelCase, errores, paginación)
   services/          # Lógica de aplicación (salud + lista fija de examples)
   models/            # Base SQLAlchemy y mixin PersistentModel
-alembic/             # Migraciones (env.py async + versions/)
+  migrations/        # Alembic (env.py async + versions/); script_location app:migrations
 docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
 tests/               # Tests de pytest (convenciones + BD aislada)
 docker-compose.yml   # Postgres 17 en 127.0.0.1:5432 (sin container_name fijo)
@@ -263,6 +263,7 @@ uv.lock              # Lockfile reproducible de uv
 | Alembic | 1.20.1 |
 | pytest-asyncio | 1.4.0 |
 | pytest | 9.1.1 |
+| pytest-timeout | 2.4.0 |
 | ruff | 0.17.2 |
 | mypy | 2.4.0 |
 
