@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -83,6 +84,31 @@ def test_resolve_alembic_database_url_derives_from_test(
     monkeypatch.delenv("ALEMBIC_TEST_DATABASE_URL", raising=False)
     url = resolve_alembic_database_url()
     assert url.endswith("/app_alembic_test")
+
+
+def test_make_alembic_config_works_without_repo_ini(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from alembic.script import ScriptDirectory
+
+    from app.migrations.config import make_alembic_config
+
+    monkeypatch.chdir(tmp_path)
+    assert not (tmp_path / "alembic.ini").exists()
+    url = (
+        "postgresql+asyncpg://estudiomusica:p%40ss%25w0rd"
+        "@127.0.0.1:5432/estudiomusica_test"
+    )
+    config = make_alembic_config(url)
+    assert config.get_main_option("script_location") == "app:migrations"
+    assert config.get_main_option("sqlalchemy.url") == url
+    assert ScriptDirectory.from_config(config).get_heads() == ["0001_initial"]
+
+
+def test_packaged_alembic_ini_is_importable() -> None:
+    from importlib.resources import files
+
+    assert files("app").joinpath("alembic.ini").is_file()
 
 
 def test_alembic_config_escapes_percent_in_password() -> None:

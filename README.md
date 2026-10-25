@@ -103,13 +103,19 @@ Para revertirlas del todo:
 uv run alembic downgrade base
 ```
 
-Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations` en `alembic.ini`). Van en el wheel con el paquete `app`. La inicial crea `set_updated_at()` (`clock_timestamp()`). No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. `PersistentModel` monta el trigger al crear la tabla; las migraciones pueden usar `updated_at_trigger_sql`. Nueva revisión, cuando exista un modelo:
+Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations`). Van en el wheel con el paquete `app`. El `alembic.ini` de la raíz **no** viaja en el wheel: desde el paquete instalado usa el helper programático (también hay `app/alembic.ini`):
+
+```bash
+python -c "from alembic import command; from app.migrations.config import make_alembic_config; command.upgrade(make_alembic_config(), 'head')"
+```
+
+La inicial crea `set_updated_at()` (`clock_timestamp()`). No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. `PersistentModel` monta el trigger en las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. Nueva revisión, cuando exista un modelo:
 
 ```bash
 uv run alembic revision -m "descripcion" --autogenerate
 ```
 
-Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` (evento `after_create`); no hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes).
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones; no hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes).
 
 `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
@@ -238,11 +244,12 @@ app/
   schemas/           # Modelos Pydantic (camelCase, errores, paginación)
   services/          # Lógica de aplicación (salud + lista fija de examples)
   models/            # Base SQLAlchemy y mixin PersistentModel
-  migrations/        # Alembic (env.py async + versions/); script_location app:migrations
+  migrations/        # Alembic (env.py async + versions/ + config programático)
+  alembic.ini        # Copia empaquetada (el de la raíz no va en el wheel)
 docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
 tests/               # Tests de pytest (convenciones + BD aislada)
 docker-compose.yml   # Postgres 17 en 127.0.0.1:5432 (sin container_name fijo)
-alembic.ini          # Configuración de Alembic
+alembic.ini          # CLI `uv run alembic` desde el repo
 .env.example         # Plantilla de variables de entorno
 pyproject.toml       # Dependencias, ruff, pytest y mypy
 uv.lock              # Lockfile reproducible de uv

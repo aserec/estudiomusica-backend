@@ -115,16 +115,14 @@ def resolve_alembic_database_url() -> str:
 
 
 def alembic_config(database_url: str | RedactedDsn) -> Config:
-    config = Config(str(ROOT / "alembic.ini"))
+    from app.migrations.config import make_alembic_config
+
     raw = (
         database_url.secret()
         if isinstance(database_url, RedactedDsn)
         else database_url
     )
-    # ConfigParser interpola '%'; una contraseña urlencoded (p%40ss%25w0rd)
-    # rompería con "invalid interpolation syntax" y el ValueError imprimiría el DSN.
-    config.set_main_option("sqlalchemy.url", raw.replace("%", "%%"))
-    return config
+    return make_alembic_config(raw)
 
 
 @pytest.fixture(scope="session", autouse=True)
