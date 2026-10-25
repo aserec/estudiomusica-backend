@@ -166,6 +166,75 @@ async def test_get_session_rollbacks_persistently(
         get_settings.cache_clear()
 
 
+@pytest.mark.db
+async def test_db_session_does_not_expire_on_commit(
+    db_session: AsyncSession,
+) -> None:
+    from sqlalchemy import inspect as sa_inspect
+
+    connection = await db_session.connection()
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
+    await connection.run_sync(probe_table.create)
+
+    probe = SessionProbe(label="still-loaded")
+    db_session.add(probe)
+    await db_session.commit()
+    assert sa_inspect(probe).expired is False
+    assert probe.label == "still-loaded"
+
+
+@pytest.mark.db
+async def test_join_transaction_rollback_discards_committed_rows(
+    require_postgres: str,
+    migrated_test_database: None,
+) -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession as SASession
+
+    engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
+        )
+        await connection.execute(
+            text("DELETE FROM session_probes WHERE label = 'must-not-leak'")
+        )
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+            session = SASession(
+                bind=connection,
+                expire_on_commit=False,
+                join_transaction_mode="create_savepoint",
+            )
+            try:
+                session.add(SessionProbe(label="must-not-leak"))
+                await session.commit()
+                found = await session.scalar(
+                    text(
+                        "SELECT label FROM session_probes WHERE label = 'must-not-leak'"
+                    )
+                )
+                assert found == "must-not-leak"
+            finally:
+                await session.close()
+                await transaction.rollback()
+
+        async with engine.connect() as connection:
+            leftover = await connection.scalar(
+                text("SELECT label FROM session_probes WHERE label = 'must-not-leak'")
+            )
+            assert leftover is None
+    finally:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
+            )
+        await engine.dispose()
+
+
 def test_clear_engine_disposes_sync_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     from app import db as db_module
     from app.config import get_settings
