@@ -1,5 +1,6 @@
+import functools
 from importlib.metadata import PackageNotFoundError, version
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,6 +37,9 @@ OPENAPI_TAGS = [
         "description": "Demostración de convenciones. No es lógica de negocio.",
     },
 ]
+
+if TYPE_CHECKING:
+    app: FastAPI
 
 
 def _package_version() -> str:
@@ -126,12 +130,21 @@ def create_app() -> FastAPI:
     return application
 
 
-def __getattr__(name: str) -> FastAPI:
+@functools.cache
+def get_app() -> FastAPI:
+    return create_app()
+
+
+def __getattr__(name: str) -> object:
     """Expone `app` de forma perezosa para Uvicorn/FastAPI CLI.
 
     Importar este módulo no instancia Settings, así un APP_ENV inválido
     en la shell no rompe la recogida de tests.
     """
     if name == "app":
-        return create_app()
+        return get_app()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted([*globals(), "app"])

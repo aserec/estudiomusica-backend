@@ -9,9 +9,17 @@ from app.exceptions import Validation
 
 @pytest.fixture(scope="session", autouse=True)
 def isolate_app_env() -> Iterator[None]:
+    """Fija APP_ENV=development durante toda la sesión de tests.
+
+    Se ignora el `.env` (y un APP_ENV exportado en la shell).
+    MonkeyPatch.context() restaura el entorno al terminar.
+    """
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("APP_ENV", "development")
         yield
+        from app.main import get_app
+
+        get_app.cache_clear()
 
 
 def _mount_probes(application: FastAPI) -> None:
@@ -53,16 +61,18 @@ def _mount_probes(application: FastAPI) -> None:
 
 def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> Iterator[TestClient]:
     from app.config import get_settings
-    from app.main import create_app
+    from app.main import create_app, get_app
 
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     get_settings.cache_clear()
+    get_app.cache_clear()
     application = create_app()
     _mount_probes(application)
     with TestClient(application) as test_client:
         yield test_client
     get_settings.cache_clear()
+    get_app.cache_clear()
 
 
 @pytest.fixture
