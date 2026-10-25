@@ -18,7 +18,7 @@ from app.middleware import (
     BodySizeLimitMiddleware,
     RejectedPreflightMiddleware,
 )
-from app.routers import examples_router, health_router
+from app.routers import auth_router, examples_router, health_router
 from app.schemas.errors import ErrorResponse
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ Backend FastAPI de EstudioMusica.
 - Versión de API: prefijo `/api/v1` y cabecera `X-API-Version: v1`.
 - CORS: orígenes en `CORS_ORIGINS` (por defecto el Next.js local).
 - Postgres: `GET /api/v1/health/db` → `{"db":"ok"}` o `503` `{"db":"down"}`.
+- Auth: `POST /api/v1/auth/signup|login|logout` y `GET /api/v1/auth/me`.
 """
 
 OPENAPI_TAGS = [
@@ -43,6 +44,12 @@ OPENAPI_TAGS = [
         "name": "health",
         "description": (
             "Liveness (`/api/v1/health`) y readiness de Postgres (`/api/v1/health/db`)."
+        ),
+    },
+    {
+        "name": "auth",
+        "description": (
+            "Registro, login, logout y sesión. Cookie HttpOnly + JWT HS256."
         ),
     },
     {
@@ -134,6 +141,7 @@ def create_app() -> FastAPI:
 
     api_router = APIRouter(prefix="/api/v1")
     api_router.include_router(health_router)
+    api_router.include_router(auth_router)
     if settings.example_routes_enabled():
         api_router.include_router(examples_router)
     application.include_router(api_router)

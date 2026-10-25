@@ -1,9 +1,4 @@
-"""Servicios de aplicación.
-
-La lógica de negocio llega en issues posteriores. Aquí solo hay
-el chequeo de salud (proceso y Postgres) y un listado fijo para
-demostrar paginación.
-"""
+"""Servicios de aplicación."""
 
 from app.services.health import check_database, check_health
 
