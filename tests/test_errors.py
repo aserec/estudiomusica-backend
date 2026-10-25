@@ -1,4 +1,8 @@
+import re
+
 from fastapi.testclient import TestClient
+
+SAFE_FIELD = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 
 
 def test_pydantic_validation_returns_400_validation_fields(
@@ -45,6 +49,124 @@ def test_http_exception_slug_becomes_error_code(probe_client: TestClient) -> Non
     assert response.json() == {"error": "not_open"}
 
 
+def test_http_exception_400_text_is_bad_request_without_fields(
+    probe_client: TestClient,
+) -> None:
+    response = probe_client.get("/api/v1/_test/http-400-text")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "bad_request"}
+
+
+def test_http_exception_422_becomes_400(probe_client: TestClient) -> None:
+    response = probe_client.get("/api/v1/_test/http-422")
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "validation"
+
+
+def test_http_exception_detail_message_hidden_in_production(
+    production_client: TestClient,
+) -> None:
+    response = production_client.get("/api/v1/_test/http-400-dict")
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body == {"error": "invalid_evaluation", "code": "no_solution"}
+    assert "secret-leak" not in response.text
+
+
+def test_malformed_json_fields_are_body_not_index(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/examples",
+        content=b"{not-json",
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "validation", "fields": ["body"]}
+
+
+def test_client_supplied_field_names_are_sanitized(probe_client: TestClient) -> None:
+    response = probe_client.post(
+        "/api/v1/_test/loose",
+        json={"<script>": "nope", "a;b": "nope", "ok_field": "nope"},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "validation"
+    fields = body.get("fields")
+    if fields is not None:
+        assert "ok_field" in fields or "okField" in fields
+        for name in fields:
+            assert SAFE_FIELD.match(name)
+            assert len(name) <= 64
+            assert "<script>" not in name
+            assert ";" not in name
+
+
+def test_domain_validation_stays_400_not_422(probe_client: TestClient) -> None:
+    response = probe_client.get("/api/v1/_test/validation")
+
+    assert response.status_code == 400
+    assert response.status_code != 422
+    assert response.json() == {"error": "validation", "fields": ["email"]}
+
+
+def test_unhandled_error_is_500_without_message(client: TestClient) -> None:
+    response = client.get("/api/v1/_test/boom")
+
+    assert response.status_code == 500
+    assert response.json() == {"error": "internal_error"}
+    assert "secret-leak" not in response.text
+    assert response.headers["x-api-version"] == "v1"
+
+
+def test_production_500_has_no_message(production_client: TestClient) -> None:
+    response = production_client.get("/api/v1/_test/boom")
+
+    assert response.status_code == 500
+    assert response.json() == {"error": "internal_error"}
+    assert "message" not in response.json()
+    assert "secret-leak" not in response.text
+
+
+def test_expose_errors_opt_in_includes_message(
+    expose_errors_client: TestClient,
+) -> None:
+    response = expose_errors_client.get("/api/v1/_test/boom")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": "internal_error",
+        "message": "secret-leak",
+    }
+
+
+def test_unhandled_error_includes_cors_and_version(client: TestClient) -> None:
+    response = client.get(
+        "/api/v1/_test/boom",
+        headers={"Origin": "http://localhost:3000"},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"error": "internal_error"}
+    assert response.headers["x-api-version"] == "v1"
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert response.headers["access-control-allow-credentials"] == "true"
+
+
+def test_version_header_is_not_limited_to_2xx(client: TestClient) -> None:
+    not_found = client.get("/api/v1/does-not-exist")
+    boom = client.get("/api/v1/_test/boom")
+
+    assert not_found.status_code == 404
+    assert boom.status_code == 500
+    assert not_found.headers["x-api-version"] == "v1"
+    assert boom.headers["x-api-version"] == "v1"
+
+
 def test_json_keys_are_camel_case_on_success(client: TestClient) -> None:
     response = client.get("/api/v1/examples/ex-1")
 
@@ -61,3 +183,10 @@ def test_put_updates_example(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"id": "ex-1", "displayName": "Nombre nuevo"}
+
+
+def test_examples_are_disabled_in_production(production_client: TestClient) -> None:
+    response = production_client.get("/api/v1/examples")
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "not_found"}

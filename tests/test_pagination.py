@@ -36,10 +36,38 @@ def test_pagination_empty_page_is_200(client: TestClient) -> None:
     assert body["total"] == 25
 
 
-def test_invalid_pagination_params_return_validation_error(client: TestClient) -> None:
+def test_invalid_pagination_params_return_validation(client: TestClient) -> None:
     response = client.get("/api/v1/examples", params={"page": 0, "pageSize": 0})
 
     assert response.status_code == 400
     body = response.json()
     assert body["error"] == "validation"
     assert set(body["fields"]) == {"page", "pageSize"}
+
+
+def test_page_size_over_100_returns_400(client: TestClient) -> None:
+    response = client.get("/api/v1/examples", params={"pageSize": 101})
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "validation", "fields": ["pageSize"]}
+
+
+def test_page_over_max_returns_400(client: TestClient) -> None:
+    response = client.get("/api/v1/examples", params={"page": 10_001})
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "validation", "fields": ["page"]}
+
+
+def test_pagination_limits_come_from_settings(
+    tight_pagination_client: TestClient,
+) -> None:
+    too_big_page = tight_pagination_client.get("/api/v1/examples", params={"page": 51})
+    too_big_size = tight_pagination_client.get(
+        "/api/v1/examples", params={"pageSize": 6}
+    )
+
+    assert too_big_page.status_code == 400
+    assert too_big_page.json() == {"error": "validation", "fields": ["page"]}
+    assert too_big_size.status_code == 400
+    assert too_big_size.json() == {"error": "validation", "fields": ["pageSize"]}
