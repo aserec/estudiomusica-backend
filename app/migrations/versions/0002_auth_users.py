@@ -120,4 +120,4 @@ def downgrade() -> None:
     )
     op.drop_table("auth_sessions")
     op.drop_table("users")
-    op.execute("DROP EXTENSION IF EXISTS citext")
+    # citext puede venir preinstalada o usarla otra revisión; no se elimina.

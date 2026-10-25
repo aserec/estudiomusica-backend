@@ -108,6 +108,10 @@ def test_alembic_upgrade_head_and_downgrade_base(
         _scalar(dsn, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
         == "set_updated_at"
     )
+    assert (
+        _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
+        == "citext"
+    )
 
     command.downgrade(config, "base")
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") is None
@@ -118,6 +122,40 @@ def test_alembic_upgrade_head_and_downgrade_base(
 
     command.upgrade(config, "head")
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0002_auth_users"
+    assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
+
+
+def test_0002_downgrade_keeps_preinstalled_citext(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
+
+    async def preinstall() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text("CREATE EXTENSION IF NOT EXISTS citext"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(preinstall())
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = alembic_config(dsn)
+    command.upgrade(config, "head")
+    command.downgrade(config, "0001_initial")
+    assert (
+        _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
+        == "citext"
+    )
+    command.downgrade(config, "base")
+    assert (
+        _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
+        == "citext"
+    )
+    command.upgrade(config, "head")
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
 
 
