@@ -54,6 +54,9 @@ def _wipe_alembic_schema(dsn: RedactedDsn) -> None:
                 await connection.execute(
                     text("DROP TABLE IF EXISTS course_memberships CASCADE")
                 )
+                await connection.execute(
+                    text("DROP TABLE IF EXISTS categories CASCADE")
+                )
                 await connection.execute(text("DROP TABLE IF EXISTS users CASCADE"))
                 await connection.execute(
                     text("DROP TABLE IF EXISTS system_roles CASCADE")
@@ -84,7 +87,8 @@ def test_alembic_upgrade_head_and_downgrade_base(
 
     command.upgrade(config, "head")
     assert (
-        _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
+        _scalar(dsn, "SELECT version_num FROM alembic_version")
+        == "0004_course_categories"
     )
     assert (
         _scalar(dsn, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
@@ -98,6 +102,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
         _scalar(dsn, "SELECT to_regclass('public.course_memberships')")
         == "course_memberships"
     )
+    assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
     assert (
         _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
         == "citext"
@@ -123,6 +128,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
         "auth_sessions",
         "system_roles",
         "course_memberships",
+        "categories",
     ):
         name = updated_at_trigger_name(table)
         assert (
@@ -135,24 +141,32 @@ def test_alembic_upgrade_head_and_downgrade_base(
         )
 
     command.downgrade(config, "-1")
-    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0002_auth_users"
+    assert (
+        _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
+    )
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
-    assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") is None
-    assert _scalar(dsn, "SELECT to_regclass('public.course_memberships')") is None
+    assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+    assert _scalar(dsn, "SELECT to_regclass('public.categories')") is None
+    assert (
+        _scalar(dsn, "SELECT to_regclass('public.course_memberships')")
+        == "course_memberships"
+    )
     assert (
         _scalar(
             dsn,
             "SELECT 1 FROM information_schema.columns "
             "WHERE table_name = 'users' AND column_name = 'system_role_id'",
         )
-        is None
+        == 1
     )
 
     command.upgrade(config, "head")
     assert (
-        _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
+        _scalar(dsn, "SELECT version_num FROM alembic_version")
+        == "0004_course_categories"
     )
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+    assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
 
     command.downgrade(config, "0001_initial")
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0001_initial"
@@ -173,17 +187,23 @@ def test_alembic_upgrade_head_and_downgrade_base(
 
     command.upgrade(config, "head")
     assert (
-        _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
+        _scalar(dsn, "SELECT version_num FROM alembic_version")
+        == "0004_course_categories"
     )
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+    assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
 
 
 def test_alembic_revision_chain_is_linear() -> None:
     config = alembic_config(resolve_alembic_database_url())
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0003_system_roles"]
+    assert heads == ["0004_course_categories"]
+    assert (
+        script.get_revision("0004_course_categories").down_revision
+        == "0003_system_roles"
+    )
     assert script.get_revision("0003_system_roles").down_revision == "0002_auth_users"
     assert script.get_revision("0002_auth_users").down_revision == "0001_initial"
     assert script.get_revision("0001_initial").down_revision is None
@@ -222,8 +242,8 @@ def test_autogenerate_hook_adds_updated_at_trigger() -> None:
 
 _PROBE_REVISION = '''"""Probe PersistentModel created via Alembic, not create_all.
 
-Revision ID: 0004_migrated_trigger
-Revises: 0003_system_roles
+Revision ID: 0005_migrated_trigger
+Revises: 0004_course_categories
 Create Date: 2026-10-25
 """
 
@@ -234,8 +254,8 @@ from alembic import op
 
 from app.migrations.ops import op_create_updated_at_trigger, op_drop_updated_at_trigger
 
-revision: str = "0004_migrated_trigger"
-down_revision: str | None = "0003_system_roles"
+revision: str = "0005_migrated_trigger"
+down_revision: str | None = "0004_course_categories"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

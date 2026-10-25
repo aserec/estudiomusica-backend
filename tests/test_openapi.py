@@ -39,6 +39,9 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert "/api/v1/auth/me" in paths
     assert "/api/v1/admin/system-roles" in paths
     assert "/api/v1/admin/system-roles/{role_id}" in paths
+    assert "/api/v1/categories" in paths
+    assert "/api/v1/admin/categories" in paths
+    assert "/api/v1/admin/categories/{category_id}" in paths
     assert "/api/v1/courses/{course_id}/me/permissions" in paths
     assert "/api/v1/examples" in paths
     assert "/api/v1/examples/denied" in paths
@@ -137,3 +140,39 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert set(patch_props) == {"name", "active", "sortOrder"}
     perms_props = schemas["CoursePermissionsResponse"]["properties"]
     assert set(perms_props) >= {"courseRole", "permissions"}
+
+    categories_get = paths["/api/v1/categories"]["get"]
+    assert "200" in categories_get["responses"]
+    assert "401" in categories_get["responses"]
+    categories_post = paths["/api/v1/admin/categories"]["post"]
+    assert "201" in categories_post["responses"]
+    assert "400" in categories_post["responses"]
+    assert "401" in categories_post["responses"]
+    assert "403" in categories_post["responses"]
+    assert "409" in categories_post["responses"]
+    assert "patch" not in paths["/api/v1/admin/categories/{category_id}"]
+    categories_put = paths["/api/v1/admin/categories/{category_id}"]["put"]
+    assert "200" in categories_put["responses"]
+    assert "400" in categories_put["responses"]
+    assert "404" in categories_put["responses"]
+    assert "409" in categories_put["responses"]
+    categories_delete = paths["/api/v1/admin/categories/{category_id}"]["delete"]
+    assert "204" in categories_delete["responses"]
+    assert "409" in categories_delete["responses"]
+    assert "CategoryResponse" in schemas
+    assert "CategoryCreate" in schemas
+    assert "CategoryUpdate" in schemas
+    category_props = schemas["CategoryResponse"]["properties"]
+    assert set(category_props) >= {
+        "id",
+        "name",
+        "parentId",
+        "description",
+        "sortOrder",
+        "createdAt",
+        "updatedAt",
+    }
+    create_props = schemas["CategoryCreate"]["properties"]
+    assert set(create_props) == {"name", "parentId", "description", "sortOrder"}
+    update_props = schemas["CategoryUpdate"]["properties"]
+    assert set(update_props) == {"name", "parentId", "description", "sortOrder"}
