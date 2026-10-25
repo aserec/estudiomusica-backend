@@ -102,7 +102,7 @@ def test_make_alembic_config_works_without_repo_ini(
     config = make_alembic_config(url)
     assert config.get_main_option("script_location") == "app:migrations"
     assert config.get_main_option("sqlalchemy.url") == url
-    assert ScriptDirectory.from_config(config).get_heads() == ["0002_auth_users"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["0003_system_roles"]
 
 
 def test_packaged_alembic_ini_is_importable() -> None:

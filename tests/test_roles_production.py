@@ -9,7 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.db import RedactedDsn
-from tests.test_auth import PASSWORD, signup_body, unique_email
+from tests.test_auth import signup_body, unique_email
 
 pytestmark = pytest.mark.db
 

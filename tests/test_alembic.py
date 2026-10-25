@@ -83,7 +83,9 @@ def test_alembic_upgrade_head_and_downgrade_base(
     config = alembic_config(dsn)
 
     command.upgrade(config, "head")
-    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
+    assert (
+        _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
+    )
     assert (
         _scalar(dsn, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
         == "set_updated_at"
@@ -147,7 +149,9 @@ def test_alembic_upgrade_head_and_downgrade_base(
     )
 
     command.upgrade(config, "head")
-    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
+    assert (
+        _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
+    )
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
 
     command.downgrade(config, "0001_initial")
@@ -168,7 +172,9 @@ def test_alembic_upgrade_head_and_downgrade_base(
     )
 
     command.upgrade(config, "head")
-    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
+    assert (
+        _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
+    )
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
 
