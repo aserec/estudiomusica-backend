@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,7 +14,7 @@ from app.exceptions import (
     NotFound,
     Validation,
 )
-from app.models import Category
+from app.models import Category, Course
 from app.schemas.categories import CategoryCreate, CategoryResponse, CategoryUpdate
 
 _MAX_ANCESTOR_WALK = 64
@@ -160,21 +160,16 @@ async def _has_active_children(session: AsyncSession, category_id: UUID) -> bool
 
 
 async def _has_courses(session: AsyncSession, category_id: UUID) -> bool:
-    """#401 creará ``courses``. Hasta entonces ``to_regclass`` es NULL."""
-
-    table = await session.scalar(text("SELECT to_regclass('public.courses')"))
-    if table is None:
-        return False
-    return bool(
+    return (
         await session.scalar(
-            text(
-                "SELECT EXISTS ("
-                "SELECT 1 FROM courses "
-                "WHERE category_id = :category_id AND deleted_at IS NULL"
-                ")"
-            ),
-            {"category_id": category_id},
+            select(Course.id)
+            .where(
+                Course.category_id == category_id,
+                Course.deleted_at.is_(None),
+            )
+            .limit(1)
         )
+        is not None
     )
 
 

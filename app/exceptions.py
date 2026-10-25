@@ -123,3 +123,15 @@ class CategoryCycle(Conflict):
     """409 {error: category_cycle}."""
 
     error = "category_cycle"
+
+
+class DuplicateShortName(Conflict):
+    """409 {error: duplicate_short_name}."""
+
+    error = "duplicate_short_name"
+
+
+class CourseArchived(Conflict):
+    """409 {error: course_archived}."""
+
+    error = "course_archived"

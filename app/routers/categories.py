@@ -111,8 +111,7 @@ async def put_category(
     summary="Borrar una categoría",
     description=(
         "Requiere ``site:manage-courses``. Borrado lógico. 409 "
-        "``category_not_empty`` si tiene hijas vigentes o cursos vigentes "
-        "(cuando exista la tabla ``courses`` de #401)."
+        "``category_not_empty`` si tiene hijas vigentes o cursos vigentes."
     ),
     responses={
         401: ERROR_RESPONSES[401],

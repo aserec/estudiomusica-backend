@@ -27,6 +27,6 @@ async def load_course_role(
 async def load_user_course_context(
     session: AsyncSession, user: User, course_id: UUID
 ) -> CourseRole | None:
-    """Resuelve el rol de curso del usuario. Lo usará #403; ningún router lo llama."""
+    """Resuelve el rol de curso del usuario (membresía vigente)."""
 
     return await load_course_role(session, user.id, course_id)

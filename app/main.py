@@ -20,6 +20,7 @@ from app.middleware import (
 )
 from app.routers import (
     admin_categories_router,
+    admin_courses_router,
     admin_roles_router,
     auth_router,
     categories_router,
@@ -49,6 +50,9 @@ Backend FastAPI de EstudioMusica.
   `GET /api/v1/courses/{course_id}/me/permissions`.
 - Categorías: `GET /api/v1/categories` y
   `POST|PUT|DELETE /api/v1/admin/categories`.
+- Cursos: `GET|PUT /api/v1/courses/{course_id}`,
+  `PUT /api/v1/courses/{course_id}/archived` y
+  `GET|POST|DELETE /api/v1/admin/courses`.
 """
 
 OPENAPI_TAGS = [
@@ -74,8 +78,10 @@ OPENAPI_TAGS = [
     {
         "name": "courses",
         "description": (
-            "Permisos del usuario actual en un curso. "
-            "La matrícula se asigna en #403; aquí solo se lee."
+            "Ficha de curso y permisos del usuario actual. "
+            "Crear, listar, duplicar y borrar exigen "
+            "`site:manage-courses`. Editar y archivar exigen "
+            "`course:teach`. La matrícula se asigna en #403."
         ),
     },
     {
@@ -180,6 +186,7 @@ def create_app() -> FastAPI:
     api_router.include_router(categories_router)
     api_router.include_router(admin_categories_router)
     api_router.include_router(courses_router)
+    api_router.include_router(admin_courses_router)
     if settings.example_routes_enabled():
         api_router.include_router(examples_router)
     application.include_router(api_router)

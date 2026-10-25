@@ -9,12 +9,14 @@ from app.routers.admin_roles import router as admin_roles_router
 from app.routers.auth import router as auth_router
 from app.routers.categories import admin_router as admin_categories_router
 from app.routers.categories import router as categories_router
+from app.routers.courses import admin_router as admin_courses_router
 from app.routers.courses import router as courses_router
 from app.routers.examples import router as examples_router
 from app.routers.health import router as health_router
 
 __all__ = [
     "admin_categories_router",
+    "admin_courses_router",
     "admin_roles_router",
     "auth_router",
     "categories_router",
