@@ -115,4 +115,12 @@ def create_app() -> FastAPI:
     return application
 
 
-app = create_app()
+def __getattr__(name: str) -> FastAPI:
+    """Expone `app` de forma perezosa para Uvicorn/FastAPI CLI.
+
+    Importar este módulo no instancia Settings, así un APP_ENV inválido
+    en la shell no rompe la recogida de tests.
+    """
+    if name == "app":
+        return create_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
