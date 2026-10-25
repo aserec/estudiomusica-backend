@@ -4,7 +4,15 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Uuid, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    Uuid,
+    text,
+)
 from sqlalchemy.dialects.postgresql import CITEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,6 +30,12 @@ class SystemRole(StrEnum):
 
 class User(PersistentModel):
     __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint(
+            "is_admin = (system_role_id = 'admin')",
+            name="is_admin_matches_system_role",
+        ),
+    )
 
     first_name: Mapped[str] = mapped_column(String(80), nullable=False)
     last_name: Mapped[str] = mapped_column(
@@ -63,8 +77,14 @@ class User(PersistentModel):
         return f"{self.first_name} {self.last_name}".strip()
 
     @property
+    def is_site_admin(self) -> bool:
+        """Fuente de verdad de ``isAdmin``: el rol, no la columna ``is_admin``."""
+
+        return self.system_role_id == SystemRole.ADMIN
+
+    @property
     def system_role(self) -> SystemRole:
         try:
             return SystemRole(self.system_role_id)
         except ValueError:
-            return SystemRole.ADMIN if self.is_admin else SystemRole.ALUMNO
+            return SystemRole.ALUMNO

@@ -107,7 +107,7 @@ GET    /api/v1/courses/{courseId}/me/permissions
 
 Dependencias reutilizables: `require_site_permission(...)` y `require_course_permission(...)` (leen `course_id` del path). La asignación de matrícula queda fuera de este ticket (#403). El TODO(#306) de visibilidad multimedia/SM3 del profesor adjunto es el flag `ASSISTANT_MEDIA_AND_SM3_VISIBLE` (por defecto `false`); no se ha inventado un permiso nuevo.
 
-`0003_system_roles` (en `app/migrations/versions/`) crea `system_roles` y `course_memberships`, siembra los cuatro roles y añade `users.system_role_id`. `is_admin` se mantiene sincronizado para no romper `/auth/me`. Usa `updated_at_trigger_sql` para el trigger.
+`0003_system_roles` (en `app/migrations/versions/`) crea `system_roles` y `course_memberships`, siembra los cuatro roles y añade `users.system_role_id`. `/auth/me` deriva `isAdmin` de `system_role_id`; la columna `is_admin` es un espejo con `CHECK (is_admin = (system_role_id = 'admin'))`. Monta el trigger con `op_create_updated_at_trigger`.
 
 ## Postgres, migraciones y tests con BD
 
