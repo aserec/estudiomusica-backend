@@ -80,3 +80,28 @@ class EmailTaken(DomainError):
 
     status_code = 409
     error = "email_taken"
+
+
+class Conflict(DomainError):
+    """409 {error: conflict}."""
+
+    status_code = 409
+    error = "conflict"
+
+
+class SystemRoleProtected(Conflict):
+    """409 {error: system_role_protected}."""
+
+    error = "system_role_protected"
+
+
+class RoleInUse(Conflict):
+    """409 {error: role_in_use}."""
+
+    error = "role_in_use"
+
+
+class RoleNotAssignable(Conflict):
+    """409 {error: role_not_assignable}."""
+
+    error = "role_not_assignable"
