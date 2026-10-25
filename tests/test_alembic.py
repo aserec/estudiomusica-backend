@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import shutil
 from pathlib import Path
 
@@ -239,4 +240,108 @@ def test_migrated_database_has_updated_at_trigger_without_create_all(
         asyncio.run(advance())
     finally:
         command.downgrade(config, "base")
+
+
+_AUTOGEN_ENV = '''\
+import asyncio
+
+from alembic import context
+from sqlalchemy import Column, Integer, MetaData, String, Table, pool
+from sqlalchemy.ext.asyncio import async_engine_from_config
+
+config = context.config
+target_metadata = MetaData()
+Table(
+    "autogen_sa_probe",
+    target_metadata,
+    Column("id", Integer, primary_key=True),
+    Column("label", String(32), nullable=False),
+)
+
+
+def get_database_url() -> str:
+    return config.get_main_option("sqlalchemy.url") or ""
+
+
+def do_run_migrations(connection):
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_server_default=True,
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_async_migrations() -> None:
+    configuration = config.get_section(config.config_ini_section) or {}
+    configuration["sqlalchemy.url"] = get_database_url()
+    connectable = async_engine_from_config(
+        configuration,
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+    async with connectable.connect() as connection:
+        await connection.run_sync(do_run_migrations)
+    await connectable.dispose()
+
+
+if context.is_offline_mode():
+    context.configure(
+        url=get_database_url(),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+else:
+    asyncio.run(run_async_migrations())
+'''
+
+
+def test_autogenerate_revision_imports_sqlalchemy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    require_postgres: RedactedDsn,
+) -> None:
+    from sqlalchemy.engine.url import make_url
+
+    dest = tmp_path / "migrations"
+    dest.mkdir()
+    (dest / "versions").mkdir()
+    shutil.copy(ROOT / "app" / "migrations" / "script.py.mako", dest / "script.py.mako")
+    (dest / "env.py").write_text(_AUTOGEN_ENV)
+
+    parsed = make_url(resolve_alembic_database_url())
+    dsn = RedactedDsn(
+        parsed.set(database="autogen_sa_probe_test").render_as_string(
+            hide_password=False
+        )
+    )
+    ensure_database_exists(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = _alembic_config_for(dest, dsn)
+    command.revision(config, message="sa_probe", autogenerate=True)
+
+    generated = list((dest / "versions").glob("*.py"))
+    assert generated
+    source = generated[0].read_text()
+    assert "import sqlalchemy as sa" in source
+    assert "sa." in source
+
+    spec = importlib.util.spec_from_file_location("sa_probe_rev", generated[0])
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        module.upgrade()
+    except NameError:
+        raise AssertionError(
+            "la revisión autogenerada no importa sqlalchemy as sa"
+        ) from None
+    except Exception:
+        pass
+    assert callable(module.upgrade)
+    assert callable(module.downgrade)
 
