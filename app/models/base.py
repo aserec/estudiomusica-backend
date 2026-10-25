@@ -3,7 +3,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, MetaData, Uuid, func
+from sqlalchemy import DateTime, MetaData, Table, Uuid, event, func, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 NAMING_CONVENTION: dict[str, str] = {
@@ -13,6 +14,34 @@ NAMING_CONVENTION: dict[str, str] = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
+
+UPDATED_AT_FUNCTION = "set_updated_at"
+
+
+def updated_at_trigger_name(table_name: str) -> str:
+    return f"{table_name}_set_updated_at"
+
+
+def updated_at_trigger_sql(table_name: str) -> str:
+    """SQL para montar el trigger BEFORE UPDATE en una tabla."""
+
+    return (
+        f"CREATE TRIGGER {updated_at_trigger_name(table_name)} "
+        f"BEFORE UPDATE ON {table_name} "
+        f"FOR EACH ROW EXECUTE FUNCTION {UPDATED_AT_FUNCTION}()"
+    )
+
+
+def attach_updated_at_trigger(connection: Connection, table_name: str) -> None:
+    """Ejecuta el CREATE TRIGGER (conexión síncrona: Alembic / after_create)."""
+
+    connection.execute(text(updated_at_trigger_sql(table_name)))
+
+
+def _after_create_updated_at_trigger(
+    target: Table, connection: Connection, **_kwargs: object
+) -> None:
+    attach_updated_at_trigger(connection, target.name)
 
 
 class Base(DeclarativeBase):
@@ -27,8 +56,10 @@ class PersistentMixin:
     - ``id``: UUID (texto UUID en JSON; tipo UUID en Postgres).
     - ``created_at`` / ``updated_at``: ``clock_timestamp()``, no ``now()``.
       ``now()`` es la hora de inicio de transacción y el SQL crudo no
-      actualiza ``updated_at``. Las tablas de negocio deben montar
-      ``BEFORE UPDATE ... EXECUTE FUNCTION set_updated_at()``.
+      actualiza ``updated_at``. ``PersistentModel`` monta
+      ``BEFORE UPDATE ... EXECUTE FUNCTION set_updated_at()`` al crear
+      la tabla (evento ``after_create``). Las migraciones de negocio
+      pueden reutilizar ``updated_at_trigger_sql``.
     - ``deleted_at``: borrado lógico (NULL = vigente). Sin índice genérico:
       un B-tree sobre toda la columna no ayuda a listar vigentes. Quien
       filtre ``deleted_at IS NULL`` debe añadir un índice parcial.
@@ -64,3 +95,12 @@ class PersistentModel(PersistentMixin, Base):
     """Clase abstracta lista para que los modelos de negocio la hereden."""
 
     __abstract__ = True
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.__dict__.get("__abstract__", False):
+            return
+        table = getattr(cls, "__table__", None)
+        if table is None:
+            return
+        event.listen(table, "after_create", _after_create_updated_at_trigger)

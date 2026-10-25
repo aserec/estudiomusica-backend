@@ -1,5 +1,7 @@
 import asyncio
+import errno
 import os
+import socket
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Annotated, Any
@@ -21,15 +23,21 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEST_DATABASE_URL = (
     "postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica_test"
 )
-DEFAULT_ALEMBIC_DATABASE_URL = (
-    "postgresql+asyncpg://estudiomusica:estudiomusica"
-    "@127.0.0.1:5432/estudiomusica_alembic_test"
-)
 DOWN_DATABASE_URL = (
     "postgresql+asyncpg://leaky_user:supersecret-password-do-not-leak"
     "@127.0.0.1:1/no_such_db"
 )
 UNUSED_DATABASE_URL = "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused"
+_DATABASE_OVERRIDE_QUERY_KEYS = frozenset({"database", "dbname", "service", "options"})
+_PING_CONNECT_TIMEOUT = 2.0
+_PING_TOTAL_TIMEOUT = 3.0
+_CONNECTION_ERRNOS = {
+    errno.ECONNREFUSED,
+    errno.EHOSTUNREACH,
+    errno.ENETUNREACH,
+    errno.ETIMEDOUT,
+    errno.ECONNRESET,
+}
 
 _SETTINGS_ENV = {
     "APP_NAME": "EstudioMusica API",
@@ -62,30 +70,55 @@ _SETTINGS_ENV = {
 }
 
 PROBE_FILE_BYTES = b"file-response-body\n" * 8
-_PROBE_FILE = Path("/tmp/estudiomusica-probe.bin")
+_PROBE_FILE: Path | None = None
 
 
-def _require_test_database_name(url: str) -> str:
-    name = make_url(url).database or ""
+def require_test_database_url(url: str, *, env_name: str = "TEST_DATABASE_URL") -> str:
+    """Exige una base ``*_test`` y rechaza query que pueda cambiar el destino."""
+
+    try:
+        parsed = make_url(url)
+    except Exception as exc:
+        raise pytest.UsageError(
+            f"{env_name} no es un DSN válido. Recibido: {redact_database_url(url)}"
+        ) from exc
+    query_keys = {key.lower() for key in parsed.query}
+    banned = query_keys & _DATABASE_OVERRIDE_QUERY_KEYS
+    if banned:
+        raise pytest.UsageError(
+            f"{env_name} no puede incluir parámetros que cambien la base "
+            f"({', '.join(sorted(banned))}). Recibido: {redact_database_url(url)}"
+        )
+    name = parsed.database or ""
     if not name.endswith("_test"):
         raise pytest.UsageError(
-            "TEST_DATABASE_URL debe apuntar a una base cuyo nombre termina "
+            f"{env_name} debe apuntar a una base cuyo nombre termina "
             "en '_test' para no tocar desarrollo. Recibido: "
             f"{redact_database_url(url)}"
         )
     return url
 
 
+def derive_alembic_database_url(test_url: str) -> str:
+    parsed = make_url(test_url)
+    name = parsed.database or ""
+    stem = name[: -len("_test")] if name.endswith("_test") else name
+    return parsed.set(database=f"{stem}_alembic_test").render_as_string(
+        hide_password=False
+    )
+
+
 def resolve_test_database_url() -> str:
-    return _require_test_database_name(
+    return require_test_database_url(
         os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
     )
 
 
 def resolve_alembic_database_url() -> str:
-    return _require_test_database_name(
-        os.environ.get("ALEMBIC_TEST_DATABASE_URL", DEFAULT_ALEMBIC_DATABASE_URL)
-    )
+    raw = os.environ.get("ALEMBIC_TEST_DATABASE_URL")
+    if raw is None:
+        raw = derive_alembic_database_url(resolve_test_database_url())
+    return require_test_database_url(raw, env_name="ALEMBIC_TEST_DATABASE_URL")
 
 
 def alembic_config(database_url: str) -> Config:
@@ -96,15 +129,26 @@ def alembic_config(database_url: str) -> Config:
 
 @pytest.fixture(scope="session", autouse=True)
 def reject_non_test_database() -> None:
-    """Aborta la suite si TEST_DATABASE_URL apunta a una base de desarrollo."""
+    """Aborta la suite si una URL de test apunta a una base de desarrollo."""
 
-    raw = os.environ.get("TEST_DATABASE_URL")
-    if raw is None:
-        return
-    try:
-        _require_test_database_name(raw)
-    except pytest.UsageError as exc:
-        pytest.exit(str(exc), returncode=2)
+    for env_name in ("TEST_DATABASE_URL", "ALEMBIC_TEST_DATABASE_URL"):
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        try:
+            require_test_database_url(raw, env_name=env_name)
+        except pytest.UsageError as exc:
+            pytest.exit(str(exc), returncode=2)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def probe_file_path(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    global _PROBE_FILE
+    path = tmp_path_factory.mktemp("probes") / "estudiomusica-probe.bin"
+    path.write_bytes(PROBE_FILE_BYTES)
+    _PROBE_FILE = path
+    yield path
+    _PROBE_FILE = None
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -199,7 +243,8 @@ def _mount_probes(application: FastAPI) -> None:
 
     @application.get("/api/v1/_test/file")
     def file_probe() -> FileResponse:
-        _PROBE_FILE.write_bytes(PROBE_FILE_BYTES)
+        if _PROBE_FILE is None:
+            raise RuntimeError("probe_file_path no inicializó el fichero de sonda")
         return FileResponse(_PROBE_FILE, media_type="application/octet-stream")
 
     @application.get("/api/v1/_test/session")
@@ -324,21 +369,6 @@ def db_client(
 
 
 @pytest.fixture
-def production_db_client(
-    monkeypatch: pytest.MonkeyPatch,
-    require_postgres: str,
-    migrated_test_database: None,
-) -> Iterator[TestClient]:
-    yield from _build_client(
-        monkeypatch,
-        APP_ENV="production",
-        EXPOSE_ERRORS="false",
-        ENABLE_EXAMPLE_ROUTES="false",
-        DATABASE_URL=require_postgres,
-    )
-
-
-@pytest.fixture
 def down_db_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     yield from _build_client(
         monkeypatch,
@@ -375,84 +405,154 @@ def down_db_expose_errors_client(
     )
 
 
+def _postgres_required() -> bool:
+    return os.environ.get("REQUIRE_POSTGRES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+class _MissingDatabase(RuntimeError):
+    """La instancia responde pero la base de test no existe."""
+
+
+def _skip_or_fail_postgres(message: str) -> None:
+    if _postgres_required():
+        pytest.fail(message)
+    pytest.skip(message)
+
+
+def _is_connection_error(exc: BaseException) -> bool:
+    if isinstance(exc, ConnectionRefusedError | TimeoutError | asyncio.TimeoutError):
+        return True
+    if isinstance(exc, socket.gaierror):
+        return True
+    if isinstance(exc, OSError) and exc.errno in _CONNECTION_ERRNOS:
+        return True
+    message = str(exc).lower()
+    needles = (
+        "connection refused",
+        "connect call failed",
+        "name or service not known",
+        "nodename nor servname",
+        "temporary failure in name resolution",
+        "could not translate host",
+        "network is unreachable",
+        "no route to host",
+        "timed out",
+        "timeout expired",
+        "error connecting to localhost",
+    )
+    if any(needle in message for needle in needles) and "password" not in message:
+        return True
+    for inner in (exc.__cause__, exc.__context__):
+        if inner is not None and inner is not exc and _is_connection_error(inner):
+            return True
+    return False
+
+
 def ensure_database_exists(url: str) -> None:
-    """Crea la base si el volumen de compose ya existía sin init-test-db.sql."""
+    """Crea la base conectando a la BD de mantenimiento ``postgres``."""
 
     parsed = make_url(url)
     db_name = parsed.database
     if db_name is None:
         raise RuntimeError("DSN sin nombre de base")
 
-    async def create_if_missing(admin_name: str) -> None:
-        admin = parsed.set(database=admin_name)
+    async def create_if_missing() -> None:
+        admin = parsed.set(database="postgres")
         engine = create_async_engine(
             admin.render_as_string(hide_password=False),
             isolation_level="AUTOCOMMIT",
+            connect_args={
+                "timeout": _PING_CONNECT_TIMEOUT,
+                "command_timeout": _PING_CONNECT_TIMEOUT,
+            },
         )
         try:
-            async with engine.connect() as connection:
-                exists = await connection.scalar(
-                    text("SELECT 1 FROM pg_database WHERE datname = :name"),
-                    {"name": db_name},
-                )
-                if exists is None:
-                    await connection.execute(text(f'CREATE DATABASE "{db_name}"'))
+            async with asyncio.timeout(_PING_TOTAL_TIMEOUT):
+                async with engine.connect() as connection:
+                    exists = await connection.scalar(
+                        text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                        {"name": db_name},
+                    )
+                    if exists is None:
+                        await connection.execute(text(f'CREATE DATABASE "{db_name}"'))
         finally:
             await engine.dispose()
 
-    last_error: Exception | None = None
-    for admin_name in ("estudiomusica", "postgres"):
-        try:
-            asyncio.run(create_if_missing(admin_name))
-            return
-        except Exception as exc:
-            last_error = exc
-    if last_error is not None:
-        raise last_error
+    try:
+        asyncio.run(create_if_missing())
+    except Exception as exc:
+        redacted = redact_database_url(url)
+        if _is_connection_error(exc):
+            raise ConnectionError(
+                f"No se pudo crear la base de test ({type(exc).__name__}). {redacted}"
+            ) from None
+        raise RuntimeError(
+            f"No se pudo crear la base de test ({type(exc).__name__}). {redacted}"
+        ) from None
 
 
-def _postgres_is_available(url: str) -> bool:
+def _ping_postgres(url: str) -> None:
     async def ping() -> None:
-        engine = create_async_engine(url, pool_pre_ping=False)
+        engine = create_async_engine(
+            url,
+            pool_pre_ping=False,
+            connect_args={
+                "timeout": _PING_CONNECT_TIMEOUT,
+                "command_timeout": _PING_CONNECT_TIMEOUT,
+            },
+        )
         try:
-            async with engine.connect() as connection:
-                await connection.execute(text("SELECT 1"))
+            async with asyncio.timeout(_PING_TOTAL_TIMEOUT):
+                async with engine.connect() as connection:
+                    await connection.execute(text("SELECT 1"))
         finally:
             await engine.dispose()
 
     try:
         asyncio.run(ping())
-    except Exception:
-        return False
-    return True
+    except Exception as exc:
+        redacted = redact_database_url(url)
+        detail = str(exc).lower()
+        if _is_connection_error(exc):
+            raise ConnectionError(
+                f"Postgres de test no está disponible ({type(exc).__name__}). "
+                f"{redacted}"
+            ) from None
+        if "does not exist" in detail and "database" in detail:
+            raise _MissingDatabase(
+                f"La base de test no existe ({type(exc).__name__}). {redacted}"
+            ) from None
+        raise RuntimeError(
+            f"Postgres de test rechazó la conexión ({type(exc).__name__}). {redacted}"
+        ) from None
 
 
 @pytest.fixture(scope="session")
 def require_postgres() -> str:
-    """Salta los tests de BD si Postgres no responde. Nunca imprime la contraseña."""
+    """Salta o falla si Postgres no responde. Nunca imprime la contraseña."""
 
     url = resolve_test_database_url()
-    if not _postgres_is_available(url):
+    try:
+        _ping_postgres(url)
+    except ConnectionError, _MissingDatabase:
         try:
             ensure_database_exists(url)
-        except Exception:
-            pytest.skip(
+            _ping_postgres(url)
+        except ConnectionError as exc:
+            _skip_or_fail_postgres(
                 "Postgres de test no está disponible. "
-                "En local: docker compose up -d. "
-                f"{redact_database_url(url)}"
-            )
-        if not _postgres_is_available(url):
-            pytest.skip(
-                "Postgres de test no está disponible. "
-                "En local: docker compose up -d. "
-                f"{redact_database_url(url)}"
+                f"En local: docker compose up -d. {exc}"
             )
     return url
 
 
 @pytest.fixture(scope="session")
 def migrated_test_database(require_postgres: str) -> Iterator[None]:
-    """Aplica las migraciones en la BD de test. Requiere docker compose up -d."""
+    """Aplica las migraciones en la BD de test. Un fallo de migración es error."""
 
     from app.config import get_settings
 
@@ -462,13 +562,12 @@ def migrated_test_database(require_postgres: str) -> Iterator[None]:
         get_settings.cache_clear()
         try:
             command.upgrade(alembic_config(url), "head")
-        except Exception:
+        except Exception as exc:
             get_settings.cache_clear()
-            pytest.skip(
-                "No se pudieron aplicar las migraciones de test. "
-                "En local: docker compose up -d && uv run alembic upgrade head. "
-                f"{redact_database_url(url)}"
-            )
+            raise RuntimeError(
+                "No se pudieron aplicar las migraciones de test "
+                f"({type(exc).__name__}). {redact_database_url(url)}"
+            ) from None
         get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -490,29 +589,31 @@ async def db_session(
     get_settings.cache_clear()
     get_app.cache_clear()
     engine = create_async_engine(url, pool_pre_ping=True)
-    async with engine.connect() as connection:
-        transaction = await connection.begin()
-        session = AsyncSession(
-            bind=connection,
-            expire_on_commit=False,
-            join_transaction_mode="create_savepoint",
-        )
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+            session = AsyncSession(
+                bind=connection,
+                expire_on_commit=False,
+                join_transaction_mode="create_savepoint",
+            )
 
-        async def _override_session() -> AsyncIterator[AsyncSession]:
-            yield session
+            async def _override_session() -> AsyncIterator[AsyncSession]:
+                yield session
 
-        application = get_app()
-        application.dependency_overrides[get_session] = _override_session
-        try:
-            yield session
-        finally:
-            application.dependency_overrides.pop(get_session, None)
-            await session.close()
-            await transaction.rollback()
-    await engine.dispose()
-    await dispose_engine()
-    get_settings.cache_clear()
-    get_app.cache_clear()
+            application = get_app()
+            application.dependency_overrides[get_session] = _override_session
+            try:
+                yield session
+            finally:
+                application.dependency_overrides.pop(get_session, None)
+                await session.close()
+                await transaction.rollback()
+    finally:
+        await engine.dispose()
+        await dispose_engine()
+        get_settings.cache_clear()
+        get_app.cache_clear()
 
 
 @pytest.fixture

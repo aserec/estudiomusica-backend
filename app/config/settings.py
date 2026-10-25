@@ -3,13 +3,11 @@ from pathlib import Path
 from typing import Literal, Self
 from urllib.parse import urlparse
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine.url import make_url
 
-_DEFAULT_DEV_USER = "estudiomusica"
 _DEFAULT_DEV_PASSWORD = "estudiomusica"
-_DEFAULT_DEV_DATABASE = "estudiomusica"
 DEFAULT_DEV_AUTH_SECRET = "dev-insecure-auth-secret-change-me"
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -41,8 +39,8 @@ class Settings(BaseSettings):
     pagination_max_page_size: int = Field(default=100, ge=1)
     max_body_bytes: int = Field(default=1_048_576, ge=1)
     enable_example_routes: bool | None = None
-    database_url: str = Field(
-        default=(
+    database_url: SecretStr = Field(
+        default=SecretStr(
             "postgresql+asyncpg://estudiomusica:estudiomusica"
             "@127.0.0.1:5432/estudiomusica"
         ),
@@ -50,6 +48,7 @@ class Settings(BaseSettings):
             "DSN async de Postgres (SQLAlchemy). El valor por defecto coincide "
             "con docker-compose.yml."
         ),
+        repr=False,
     )
     db_health_timeout: float = Field(default=2.0, gt=0)
     db_connect_timeout: float = Field(default=2.0, gt=0)
@@ -100,6 +99,9 @@ class Settings(BaseSettings):
             return self.enable_example_routes
         return self.app_env != "production"
 
+    def resolved_database_url(self) -> str:
+        return self.database_url.get_secret_value()
+
     @model_validator(mode="after")
     def reject_unsafe_cors(self) -> Self:
         if not self.cors_allow_credentials:
@@ -119,22 +121,24 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_default_database_credentials(self) -> Self:
-        """Las credenciales del compose no valen fuera de development."""
+        """Las credenciales y bases de test no valen fuera de development."""
 
         if self.app_env == "development":
             return self
-        parsed = make_url(self.database_url)
+        try:
+            parsed = make_url(self.resolved_database_url())
+        except Exception:
+            raise ValueError("DATABASE_URL no es un DSN válido") from None
         database = parsed.database or ""
-        if database.endswith("_test"):
-            return self
-        if (
-            parsed.username == _DEFAULT_DEV_USER
-            and parsed.password == _DEFAULT_DEV_PASSWORD
-            and database == _DEFAULT_DEV_DATABASE
-        ):
+        if parsed.password == _DEFAULT_DEV_PASSWORD:
             raise ValueError(
-                "DATABASE_URL no puede usar las credenciales por defecto "
+                "DATABASE_URL no puede usar la contraseña por defecto "
                 "de desarrollo fuera de APP_ENV=development"
+            )
+        if database.endswith("_test"):
+            raise ValueError(
+                "DATABASE_URL no puede apuntar a una base *_test "
+                "fuera de APP_ENV=development"
             )
         return self
 

@@ -31,15 +31,20 @@ def test_root_health_db_alias(
 
 
 def test_health_db_ok_in_production_without_examples(
-    production_db_client: TestClient,
+    production_client: TestClient,
 ) -> None:
-    """health/db se monta siempre; /examples no. Usa la BD de test."""
+    """health/db se monta siempre; /examples no.
 
-    response = production_db_client.get("/api/v1/health/db")
+    En production Settings rechaza bases ``*_test`` y la contraseña del
+    compose, así que el cliente usa un DSN dummy: 503 es la sonda, no un
+    sobre de error.
+    """
 
-    assert response.status_code == 200
-    assert response.json() == {"db": "ok"}
-    assert production_db_client.get("/api/v1/examples").status_code == 404
+    response = production_client.get("/api/v1/health/db")
+
+    assert response.status_code == 503
+    assert response.json() == {"db": "down"}
+    assert production_client.get("/api/v1/examples").status_code == 404
 
 
 def test_health_db_down_without_credentials(
@@ -117,3 +122,51 @@ def test_health_db_returns_503_if_probe_hangs(
     assert response.status_code == 503
     assert response.json() == {"db": "down"}
     assert elapsed < 2.0
+
+
+class _HangingClose:
+    async def execute(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def close(self) -> None:
+        await asyncio.Event().wait()
+
+
+class _HangingCloseEngine:
+    async def connect(self) -> _HangingClose:
+        return _HangingClose()
+
+
+@pytest.fixture
+def hang_close_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    from tests.conftest import _build_client
+
+    monkeypatch.setattr(health_service, "get_engine", lambda: _HangingCloseEngine())
+    yield from _build_client(
+        monkeypatch,
+        APP_ENV="development",
+        EXPOSE_ERRORS="false",
+        ENABLE_EXAMPLE_ROUTES="true",
+        DB_HEALTH_TIMEOUT="0.3",
+    )
+
+
+def test_health_db_returns_503_if_close_hangs(
+    hang_close_client: TestClient,
+) -> None:
+    started = time.monotonic()
+    response = hang_close_client.get("/api/v1/health/db")
+    elapsed = time.monotonic() - started
+
+    assert response.status_code == 503
+    assert response.json() == {"db": "down"}
+    assert elapsed < 2.0
+
+
+def test_health_db_ok_body_has_only_db_key(
+    db_client: TestClient, migrated_test_database: None
+) -> None:
+    response = db_client.get("/api/v1/health/db")
+    assert response.status_code == 200
+    assert list(response.json().keys()) == ["db"]
+    assert response.json()["db"] == "ok"
