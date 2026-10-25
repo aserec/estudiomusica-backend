@@ -67,7 +67,7 @@ La sonda de Postgres es `GET /api/v1/health/db` (también hay alias en `GET /hea
 curl -i http://127.0.0.1:8000/api/v1/health/db
 ```
 
-Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde, HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, message}` de las rutas de negocio.
+Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde, HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, code, fields}` de las rutas de negocio. `GET /health/db` en la raíz es el alias de sonda; no aparece en OpenAPI.
 
 Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
@@ -156,18 +156,17 @@ Las claves JSON van en camelCase (`pageSize`, `displayName`, `refreshToken`). Lo
 
 ### Errores
 
-Sobre uniforme, también cuando FastAPI habría devuelto `{"detail": ...}`:
+Sobre de [aserec/estudioMusica-webapp#391](https://github.com/aserec/estudioMusica-webapp/issues/391), visto en `src/app/api/notices/route.ts`, la ruta de grading de cuestionarios y `docs/sheet-music-evaluation-contract.md` (commit `4817bcd`):
 
 ```json
-{
-  "error": "validation_error",
-  "message": "La petición no es válida.",
-  "fields": [{"field": "displayName", "message": "..."}],
-  "code": "invalid_score"
-}
+{ "error": "validation", "code": "invalid_score", "fields": ["displayName"] }
 ```
 
-`error` es obligatorio. `message`, `fields` y `code` solo aparecen si aplican. La validación responde **400** (no 422) para alinearla con los criterios de las issues de negocio.
+`error` es el slug. `code` y `fields` (lista de **nombres** de campo, no objetos) son opcionales. La validación de Pydantic responde **400** `{error:"validation", fields:[...]}` y no el 422 de FastAPI.
+
+Manejadores de dominio: `AccessDenied` → 403 `{error:"forbidden"}`, `NotFound` → 404 `{error:"not_found"}`, `Validation` → 400 `{error:"validation", fields}`, `PayloadTooLarge` → 413 `{error:"payload_too_large"}`.
+
+`message` **no** está en el contrato del frontend. Es opcional y solo se rellena en 500 cuando `APP_ENV=development`, para no meter el traceback en el slug `error`.
 
 ### Paginación
 
@@ -182,7 +181,7 @@ Query params `page` (por defecto 1) y `pageSize` (por defecto 20, máximo 100). 
 }
 ```
 
-Los listados de negocio pueden añadir claves extra (`unreadCount`, `categories`) junto a esos metadatos.
+La #391 pedía `?limit=&cursor=` → `{ items, nextCursor }`. Se mantiene `page`/`pageSize` porque la decisión del 24-10 en [#1](https://github.com/aserec/estudiomusica-backend/issues/1) es más reciente. Los listados de negocio pueden añadir claves extra (`unreadCount`, `categories`) junto a esos metadatos.
 
 ### Actualizaciones
 
@@ -192,9 +191,9 @@ Los listados de negocio pueden añadir claves extra (`unreadCount`, `categories`
 
 Orígenes en `CORS_ORIGINS` (por defecto `http://localhost:3000` y `http://127.0.0.1:3000`, el Next.js local). Credenciales activadas. Métodos `GET,POST,PUT,PATCH,DELETE,OPTIONS`.
 
-### OpenAPI
+### OpenAPI y versión
 
-`GET /docs` y `GET /openapi.json` documentan el prefijo `/api/v1`, el sobre de error y los parámetros `page`/`pageSize`.
+`GET /docs` y `GET /openapi.json` publican el contrato (prefijo `/api/v1`, sobre de error, `page`/`pageSize`). La versión de API es **v1**: va en la URL y en la cabecera `X-API-Version: v1`. `info.version` de OpenAPI es la del paquete (`0.1.0`).
 
 ### Rutas de demostración
 
@@ -202,18 +201,16 @@ Orígenes en `CORS_ORIGINS` (por defecto `http://localhost:3000` y `http://127.0
 
 ## De dónde salen estas decisiones
 
-La issue de convenciones es [aserec/estudioMusica-webapp#391](https://github.com/aserec/estudioMusica-webapp/issues/391). El repo del frontend es privado para este entorno, así que el contrato se tomó de las **decisiones del 24-10-2026** en [aserec/estudiomusica-backend#1](https://github.com/aserec/estudiomusica-backend/issues/1) (más recientes que la #391) y de las issues de backend que copian el contrato del Next.js:
+La issue de convenciones es [aserec/estudioMusica-webapp#391](https://github.com/aserec/estudioMusica-webapp/issues/391) (texto completo; commit del frontend `4817bcd`). Donde choca con las **decisiones del 24-10-2026** en [aserec/estudiomusica-backend#1](https://github.com/aserec/estudiomusica-backend/issues/1), priman las de #1.
 
 | Decisión | Dónde se vio |
 | --- | --- |
-| Claves JSON en camelCase; `page`/`pageSize`; PUT salvo el PATCH de #62; prefijo `/api/v1` | Comentario de @aserec en [#1](https://github.com/aserec/estudiomusica-backend/issues/1) (24 oct 2026) |
-| Códigos de error y enums en snake_case (`invalid_score`, `in_progress`, `multichoice_single`) | Segundo comentario de @aserec en #1 (24 oct 2026) |
-| Metadatos `page`, `pageSize`, `total`; defaults 1 y 20 | [#37](https://github.com/aserec/estudiomusica-backend/issues/37) (`GET /me/courses`, origen webapp #403 y mocks `fetchMockUserCourses` / `fetchMockCourses`); también #9, #15, #21, #82 (`GET /api/notices` hoy) |
-| Sobre `{ error, fields, code }` | [#52](https://github.com/aserec/estudiomusica-backend/issues/52) (`error: "invalid_evaluation"`, `fields`, `code`; origen webapp #420 y `docs/sheet-music-evaluation-contract.md`) |
-| `error` como código suelto (`not_open`, `closed`) | [#61](https://github.com/aserec/estudiomusica-backend/issues/61) (origen webapp #412) |
-| Validación → 400 indicando los campos | #3, #10, #33 (`updateProfileAction`, origen webapp #397) |
-
-Si la #391 proponía `limit`/`cursor` u otro sobre, **priman las decisiones del 24-10 en #1**. Eso hay que confirmarlo al revisar la PR.
+| Sobre `{ error, code?, fields?: string[] }`; slugs `unauthorized` / `invalid` / `not_found` / `forbidden`; 413 | #391 y `src/app/api/notices/route.ts`, grading de cuestionarios, `docs/sheet-music-evaluation-contract.md` |
+| Validación Pydantic → 400 `{error:"validation", fields:[...]}` | Criterio de aceptación de la #391 |
+| `AccessDenied`→403, `NotFound`→404, `Validation`→400, `PayloadTooLarge`→413 | Alcance de la #391 |
+| Prefijo `/api/v1`, OpenAPI publicado, CORS con credenciales | #391 |
+| Claves JSON camelCase; códigos/enums snake_case; PUT salvo PATCH de #62 | Comentarios de @aserec en #1 (24 oct 2026) |
+| Paginación `page`/`pageSize` + `total` (no `limit`/`cursor`) | #1 (24 oct 2026), más reciente que la #391 (`?limit=&cursor=` → `{items, nextCursor}`) |
 
 ## Estructura de carpetas
 
@@ -222,7 +219,7 @@ app/
   main.py            # Factoría FastAPI: CORS, handlers, api_router /api/v1
   db.py              # Motor async SQLAlchemy 2 y fábrica de sesiones
   errors.py          # Sobre de error y handlers (validación, HTTP, 500)
-  exceptions.py      # AppError
+  exceptions.py      # AccessDenied, NotFound, Validation, PayloadTooLarge
   config/            # Ajustes por variables de entorno (pydantic-settings)
   routers/           # Rutas HTTP (health, health/db y examples)
   schemas/           # Modelos Pydantic (camelCase, errores, paginación)
@@ -256,4 +253,4 @@ uv.lock              # Lockfile reproducible de uv
 | ruff | 0.17.2 |
 | mypy | 2.4.0 |
 
-Las transitivas quedan ancladas en `uv.lock`. Se eligió [uv](https://docs.astral.sh/uv/) porque instala Python, resuelve dependencias de forma reproducible y es el gestor que recomienda el ecosistema actual de FastAPI / Astral. El extra `fastapi[standard]` no se usa en runtime: arrastra `fastapi-cloud-cli`, Sentry y OpenTelemetry. En producción van `fastapi` + `uvicorn[standard]`; `fastapi-cli`, `httpx` y `httpx2` (el cliente que pide Starlette 1.10 para `TestClient`) quedan en el grupo de desarrollo.
+Las transitivas quedan ancladas en `uv.lock`. Se eligió [uv](https://docs.astral.sh/uv/) porque instala Python, resuelve dependencias de forma reproducible y es el gestor que recomienda el ecosistema actual de FastAPI / Astral. El extra `fastapi[standard]` no se usa en runtime: arrastra `fastapi-cloud-cli`, Sentry y OpenTelemetry. En producción van `fastapi` + `uvicorn[standard]`; `fastapi-cli` y `httpx2` (el cliente que pide Starlette 1.x para `TestClient`) quedan en el grupo de desarrollo.

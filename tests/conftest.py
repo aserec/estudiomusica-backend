@@ -9,9 +9,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from app.config import get_settings
-from app.db import clear_engine, dispose_engine
-from app.main import create_app
+os.environ.setdefault("APP_ENV", "development")
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEST_DATABASE_URL = (
@@ -31,6 +29,10 @@ def alembic_config(database_url: str) -> Config:
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    from app.config import get_settings
+    from app.db import clear_engine
+    from app.main import create_app
+
     monkeypatch.setenv("APP_ENV", "development")
     get_settings.cache_clear()
     clear_engine()
@@ -43,6 +45,10 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
 @pytest.fixture
 def probe_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """App de producción más rutas de sonda para códigos de error de negocio."""
+
+    from app.config import get_settings
+    from app.db import clear_engine
+    from app.main import create_app
 
     monkeypatch.setenv("APP_ENV", "development")
     get_settings.cache_clear()
@@ -62,6 +68,10 @@ def probe_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
 def db_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """Cliente HTTP apuntando a la BD de test (docker-compose)."""
 
+    from app.config import get_settings
+    from app.db import clear_engine
+    from app.main import create_app
+
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("DATABASE_URL", resolve_test_database_url())
     get_settings.cache_clear()
@@ -75,6 +85,8 @@ def db_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
 @pytest.fixture(scope="session")
 def migrated_test_database() -> Iterator[None]:
     """Aplica las migraciones en la BD de test. Requiere docker compose up -d."""
+
+    from app.config import get_settings
 
     url = resolve_test_database_url()
     previous = os.environ.get("DATABASE_URL")
@@ -107,6 +119,9 @@ async def db_session(
     migrated_test_database: None,
 ) -> AsyncIterator[AsyncSession]:
     """Sesión envuelta en una transacción que se revierte al terminar el test."""
+
+    from app.config import get_settings
+    from app.db import dispose_engine
 
     url = resolve_test_database_url()
     monkeypatch.setenv("DATABASE_URL", url)

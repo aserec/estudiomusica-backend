@@ -16,7 +16,6 @@ dependencies = [
 [dependency-groups]
 dev = [
     "fastapi-cli==0.0.32",
-    "httpx==0.28.1",
     "httpx2==2.16.0",
     "mypy==2.4.0",
     "pytest==9.1.1",

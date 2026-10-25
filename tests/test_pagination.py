@@ -41,7 +41,5 @@ def test_invalid_pagination_params_return_validation_error(client: TestClient) -
 
     assert response.status_code == 400
     body = response.json()
-    assert body["error"] == "validation_error"
-    fields = {item["field"] for item in body["fields"]}
-    assert "page" in fields
-    assert "pageSize" in fields
+    assert body["error"] == "validation"
+    assert set(body["fields"]) == {"page", "pageSize"}
