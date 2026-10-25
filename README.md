@@ -2,7 +2,7 @@
 
 Backend FastAPI de EstudioMusica. Sustituye los almacenes JSON del frontend Next.js.
 
-Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS) y la persistencia: Postgres, SQLAlchemy 2 async y Alembic. No incluye modelos de negocio.
+Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS), la persistencia (Postgres, SQLAlchemy 2 async y Alembic) y la API de autenticación (`/api/v1/auth`).
 
 ## Requisitos
 
@@ -71,6 +71,25 @@ Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde 
 
 Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
+## Autenticación
+
+`POST /api/v1/auth/signup` `{name,email,password}` → 201 `{user}` y cookie HttpOnly `session`.
+`POST /api/v1/auth/login` `{email,password}` → 200 `{user}` y cookie.
+`POST /api/v1/auth/logout` → 204 (revoca la sesión y borra la cookie).
+`GET /api/v1/auth/me` → 200 `{user, systemRole, isAdmin}` (cookie o `Authorization: Bearer`).
+
+Errores de negocio (slugs en snake_case, convención #91): `email_taken` (409), `invalid_credentials` (401), `account_suspended` (403). Sin sesión o token caducado/manipulado: `unauthorized` (401).
+
+El secreto `AUTH_SECRET` firma un JWT HS256. El valor por defecto solo vale en `development`. La cookie es HttpOnly, SameSite=Lax y Secure fuera de development. Logout escribe `revoked_at` en `auth_sessions` para que el JWT no se pueda reutilizar.
+
+```bash
+curl -c /tmp/em-cookies -sS -X POST http://127.0.0.1:8000/api/v1/auth/signup \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Ada Lovelace","email":"ada@example.com","password":"password12"}'
+curl -b /tmp/em-cookies -sS http://127.0.0.1:8000/api/v1/auth/me
+curl -b /tmp/em-cookies -c /tmp/em-cookies -sS -X POST http://127.0.0.1:8000/api/v1/auth/logout
+```
+
 ## Postgres, migraciones y tests con BD
 
 El DSN se lee de `DATABASE_URL` (pydantic-settings). El valor por defecto coincide con `docker-compose.yml`:
@@ -109,7 +128,7 @@ Las revisiones viven en `alembic/versions/`. La inicial crea `set_updated_at()` 
 uv run alembic revision -m "descripcion" --autogenerate
 ```
 
-Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE`; no hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes).
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE`; no hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext`, `users` y `auth_sessions` y monta ese trigger en ambas.
 
 El directorio `alembic/` y `alembic.ini` van en el wheel (hatch `force-include`) para poder migrar desde un paquete instalado. `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
@@ -234,10 +253,11 @@ app/
   errors.py          # Sobre de error y handlers (validación, HTTP)
   exceptions.py      # AccessDenied, NotFound, Validation, PayloadTooLarge
   config/            # Ajustes por variables de entorno (pydantic-settings)
-  routers/           # Rutas HTTP (health, health/db y examples)
-  schemas/           # Modelos Pydantic (camelCase, errores, paginación)
-  services/          # Lógica de aplicación (salud + lista fija de examples)
-  models/            # Base SQLAlchemy y mixin PersistentModel
+  routers/           # Rutas HTTP (health, auth y examples)
+  schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth)
+  services/          # Lógica de aplicación (salud, auth, examples)
+  auth/              # Hash argon2, JWT HS256 y cookie de sesión
+  models/            # PersistentModel, User y AuthSession
 alembic/             # Migraciones (env.py async + versions/)
 docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
 tests/               # Tests de pytest (convenciones + BD aislada)
@@ -261,6 +281,9 @@ uv.lock              # Lockfile reproducible de uv
 | SQLAlchemy | 2.1.6 (extra asyncio) |
 | asyncpg | 0.32.0 |
 | Alembic | 1.20.1 |
+| argon2-cffi | 25.1.0 |
+| PyJWT | 2.15.1 |
+| email-validator | 2.3.0 |
 | pytest-asyncio | 1.4.0 |
 | pytest | 9.1.1 |
 | ruff | 0.17.2 |
