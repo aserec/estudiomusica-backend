@@ -71,7 +71,10 @@ async def assign_system_role(
     target: User,
     role_id: str,
 ) -> User:
-    """Asigna un rol. Solo un admin. Deniega por defecto. No filtra datos ajenos."""
+    """Asigna un rol. Solo un admin. Deniega por defecto. No filtra datos ajenos.
+
+    Ningún router lo llama aún: queda para la API de usuarios (webapp #395).
+    """
 
     if not _actor_manages_admins(actor):
         raise AccessDenied()
