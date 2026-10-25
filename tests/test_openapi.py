@@ -39,6 +39,11 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert "/api/v1/auth/me" in paths
     assert "/api/v1/admin/system-roles" in paths
     assert "/api/v1/admin/system-roles/{role_id}" in paths
+    assert "/api/v1/admin/users" in paths
+    assert "/api/v1/admin/users/{user_id}" in paths
+    assert "/api/v1/admin/users/{user_id}/admin" in paths
+    assert "/api/v1/admin/users/{user_id}/suspension" in paths
+    assert "/api/v1/users/search" in paths
     assert "/api/v1/courses/{course_id}/me/permissions" in paths
     assert "/api/v1/examples" in paths
     assert "/api/v1/examples/denied" in paths
@@ -137,3 +142,50 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert set(patch_props) == {"name", "active", "sortOrder"}
     perms_props = schemas["CoursePermissionsResponse"]["properties"]
     assert set(perms_props) >= {"courseRole", "permissions"}
+
+    users_get = paths["/api/v1/admin/users"]["get"]
+    user_params = {param["name"] for param in users_get["parameters"]}
+    assert {"page", "pageSize", "query", "status"} <= user_params
+    assert "limit" not in user_params
+    assert "cursor" not in user_params
+    assert "200" in users_get["responses"]
+    assert "401" in users_get["responses"]
+    assert "403" in users_get["responses"]
+    identity_put = paths["/api/v1/admin/users/{user_id}"]["put"]
+    assert "200" in identity_put["responses"]
+    assert "409" in identity_put["responses"]
+    assert "patch" not in paths["/api/v1/admin/users/{user_id}"]
+    admin_put = paths["/api/v1/admin/users/{user_id}/admin"]["put"]
+    assert "200" in admin_put["responses"]
+    assert "409" in admin_put["responses"]
+    suspend_put = paths["/api/v1/admin/users/{user_id}/suspension"]["put"]
+    assert "200" in suspend_put["responses"]
+    user_delete = paths["/api/v1/admin/users/{user_id}"]["delete"]
+    assert "204" in user_delete["responses"]
+    search = paths["/api/v1/users/search"]["get"]
+    search_params = {param["name"] for param in search["parameters"]}
+    assert {"q", "page", "pageSize"} <= search_params
+    assert "200" in search["responses"]
+    assert "401" in search["responses"]
+    assert "403" in search["responses"]
+    assert "AdminUserView" in schemas
+    assert "AdminUserIdentityUpdate" in schemas
+    assert "AdminFlagUpdate" in schemas
+    assert "SuspensionUpdate" in schemas
+    assert "UserSearchHit" in schemas
+    view_props = schemas["AdminUserView"]["properties"]
+    assert set(view_props) >= {
+        "id",
+        "name",
+        "email",
+        "firstName",
+        "lastName",
+        "suspendedAt",
+        "deletedAt",
+        "systemRoleId",
+    }
+    assert "passwordHash" not in view_props
+    identity_props = schemas["AdminUserIdentityUpdate"]["properties"]
+    assert set(identity_props) == {"firstName", "lastName", "email"}
+    search_props = schemas["UserSearchHit"]["properties"]
+    assert set(search_props) == {"id", "name", "email", "firstName", "lastName"}
