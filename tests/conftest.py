@@ -258,7 +258,12 @@ def _mount_probes(application: FastAPI) -> None:
         return {"session": "ok"}
 
 
-def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> Iterator[TestClient]:
+def _build_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    base_url: str = "http://testserver",
+    **env: str,
+) -> Iterator[TestClient]:
     from app.config import get_settings
     from app.db import clear_engine
     from app.main import create_app, get_app
@@ -271,7 +276,7 @@ def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> Iterator[TestC
     try:
         application = create_app()
         _mount_probes(application)
-        with TestClient(application) as test_client:
+        with TestClient(application, base_url=base_url) as test_client:
             yield test_client
     finally:
         get_settings.cache_clear()
@@ -408,6 +413,7 @@ def production_client(
 
     yield from _build_client(
         monkeypatch,
+        base_url="https://testserver",
         **production_settings_env(production_test_database_url),
     )
 
