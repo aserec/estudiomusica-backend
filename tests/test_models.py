@@ -25,7 +25,9 @@ def _column_names(sync_conn: Connection) -> list[str]:
 
 
 def _create_probe_table(sync_conn: Connection) -> None:
-    MixinProbe.__table__.create(sync_conn, checkfirst=True)
+    probe_table = MixinProbe.__table__
+    assert isinstance(probe_table, Table)
+    probe_table.create(sync_conn, checkfirst=True)
 
 
 @pytest.mark.db
@@ -92,13 +94,14 @@ async def test_updated_at_advances_across_separate_commits(
     monkeypatch.setenv("DATABASE_URL", require_postgres)
     get_settings.cache_clear()
     engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    probe_table = MixinProbe.__table__
+    assert isinstance(probe_table, Table)
     try:
         async with engine.begin() as connection:
             await connection.run_sync(_create_probe_table)
             await connection.execute(
                 text(
-                    "DROP TRIGGER IF EXISTS mixin_probes_set_updated_at "
-                    "ON mixin_probes"
+                    "DROP TRIGGER IF EXISTS mixin_probes_set_updated_at ON mixin_probes"
                 )
             )
             await connection.execute(
@@ -135,7 +138,7 @@ async def test_updated_at_advances_across_separate_commits(
     finally:
         async with engine.begin() as connection:
             await connection.run_sync(
-                lambda sync_conn: MixinProbe.__table__.drop(sync_conn, checkfirst=True)
+                lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
             )
         await engine.dispose()
         await dispose_engine()

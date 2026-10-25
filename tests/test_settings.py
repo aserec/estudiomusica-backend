@@ -82,8 +82,7 @@ def test_database_url_defaults_to_docker_compose(
 
 
 _DEFAULT_DEV_DSN = (
-    "postgresql+asyncpg://estudiomusica:estudiomusica"
-    "@127.0.0.1:5432/estudiomusica"
+    "postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica"
 )
 
 

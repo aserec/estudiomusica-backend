@@ -1,10 +1,10 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import String, text
+from sqlalchemy import String, Table, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -64,7 +64,7 @@ async def test_get_session_rollbacks_on_error(
         yield session
 
     monkeypatch.setattr("app.db.get_session_factory", lambda: _cm)
-    agen = get_session()
+    agen = cast(AsyncGenerator[AsyncMock], get_session())
     await anext(agen)
     with pytest.raises(RuntimeError, match="boom"):
         await agen.athrow(RuntimeError("boom"))
@@ -93,12 +93,12 @@ async def test_get_session_commits_persistently(
     get_settings.cache_clear()
     clear_engine()
     engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
     try:
         async with engine.begin() as connection:
             await connection.run_sync(
-                lambda sync_conn: SessionProbe.__table__.create(
-                    sync_conn, checkfirst=True
-                )
+                lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
             )
 
         agen = get_session()
@@ -115,9 +115,7 @@ async def test_get_session_commits_persistently(
     finally:
         async with engine.begin() as connection:
             await connection.run_sync(
-                lambda sync_conn: SessionProbe.__table__.drop(
-                    sync_conn, checkfirst=True
-                )
+                lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
             )
         await engine.dispose()
         await dispose_engine()
@@ -137,15 +135,15 @@ async def test_get_session_rollbacks_persistently(
     get_settings.cache_clear()
     clear_engine()
     engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
     try:
         async with engine.begin() as connection:
             await connection.run_sync(
-                lambda sync_conn: SessionProbe.__table__.create(
-                    sync_conn, checkfirst=True
-                )
+                lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
             )
 
-        agen = get_session()
+        agen = cast(AsyncGenerator[AsyncSession], get_session())
         session = await anext(agen)
         session.add(SessionProbe(label="rolled-back"))
         await session.flush()
@@ -161,9 +159,7 @@ async def test_get_session_rollbacks_persistently(
     finally:
         async with engine.begin() as connection:
             await connection.run_sync(
-                lambda sync_conn: SessionProbe.__table__.drop(
-                    sync_conn, checkfirst=True
-                )
+                lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
             )
         await engine.dispose()
         await dispose_engine()
@@ -171,8 +167,8 @@ async def test_get_session_rollbacks_persistently(
 
 
 def test_clear_engine_disposes_sync_engine(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.config import get_settings
     from app import db as db_module
+    from app.config import get_settings
 
     monkeypatch.setenv(
         "DATABASE_URL",

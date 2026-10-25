@@ -2,7 +2,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 from alembic import command
@@ -189,7 +189,7 @@ def _mount_probes(application: FastAPI) -> None:
 
     @application.get("/api/v1/_test/session")
     async def session_probe(
-        session: AsyncSession = Depends(get_session),
+        session: Annotated[AsyncSession, Depends(get_session)],
     ) -> dict[str, str]:
         await session.execute(text("SELECT 1"))
         return {"session": "ok"}
