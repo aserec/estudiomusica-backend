@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.auth.tokens import encode_session_token
 from app.config import get_settings
 from app.db import RedactedDsn
-from app.exceptions import LastAdmin
+from app.exceptions import AccessDenied, LastAdmin
 from app.models import User
 from app.models.user import SystemRole
 from app.permissions.types import CourseRole
@@ -690,9 +690,20 @@ async def test_concurrent_cross_demote_keeps_one_admin(
             return_exceptions=True,
         )
         successes = [item for item in results if not isinstance(item, Exception)]
-        last_admin_errors = [item for item in results if isinstance(item, LastAdmin)]
+        denied = [
+            item
+            for item in results
+            if isinstance(item, (LastAdmin, AccessDenied))
+        ]
+        other_errors = [
+            item
+            for item in results
+            if isinstance(item, Exception)
+            and not isinstance(item, (LastAdmin, AccessDenied))
+        ]
+        assert other_errors == [], other_errors
         assert len(successes) == 1
-        assert len(last_admin_errors) == 1
+        assert len(denied) == 1
         async with AsyncSession(engine) as session:
             rows = list(
                 await session.scalars(
