@@ -28,9 +28,7 @@ def test_student_matrix_is_view_only() -> None:
 
 
 def test_assistant_matrix_excludes_teach() -> None:
-    granted = effective_permissions(
-        SystemRole.PROFESOR_ADJUNTO, CourseRole.ASSISTANT
-    )
+    granted = effective_permissions(SystemRole.PROFESOR_ADJUNTO, CourseRole.ASSISTANT)
     assert granted == COURSE_ROLE_PERMISSIONS[CourseRole.ASSISTANT]
     assert Permission.COURSE_TEACH not in granted
 

@@ -9,7 +9,7 @@ from app.exceptions import AccessDenied, RoleNotAssignable
 from app.models import CourseMembership, SystemRoleRow, User
 from app.models.user import SystemRole
 from app.permissions.types import CourseRole
-from app.services.roles import assign_system_role, assert_role_assignable
+from app.services.roles import assert_role_assignable, assign_system_role
 from tests.test_auth import PASSWORD, signup_body, unique_email
 
 pytestmark = pytest.mark.db
@@ -158,9 +158,7 @@ async def test_enrolled_student_receives_only_course_view(
 ) -> None:
     created = await _signup(session_client)
     await _enroll(db_session, created["id"], _COURSE_A, CourseRole.STUDENT)
-    response = await session_client.get(
-        f"/api/v1/courses/{_COURSE_A}/me/permissions"
-    )
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
     assert response.status_code == 200
     body = response.json()
     assert body == {"courseRole": "student", "permissions": ["course:view"]}
@@ -173,9 +171,7 @@ async def test_assistant_receives_view_and_grade_not_teach(
     created = await _signup(session_client)
     await _set_role(db_session, created["id"], SystemRole.PROFESOR_ADJUNTO)
     await _enroll(db_session, created["id"], _COURSE_A, CourseRole.ASSISTANT)
-    response = await session_client.get(
-        f"/api/v1/courses/{_COURSE_A}/me/permissions"
-    )
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
     assert response.status_code == 200
     body = response.json()
     assert body["courseRole"] == "assistant"
@@ -189,9 +185,7 @@ async def test_teacher_receives_view_grade_teach(
     created = await _signup(session_client)
     await _set_role(db_session, created["id"], SystemRole.PROFESOR)
     await _enroll(db_session, created["id"], _COURSE_A, CourseRole.TEACHER)
-    response = await session_client.get(
-        f"/api/v1/courses/{_COURSE_A}/me/permissions"
-    )
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
     assert response.status_code == 200
     assert response.json() == {
         "courseRole": "teacher",
@@ -204,9 +198,7 @@ async def test_admin_gets_site_permissions_without_enrollment(
 ) -> None:
     created = await _signup(session_client)
     await _set_role(db_session, created["id"], SystemRole.ADMIN)
-    response = await session_client.get(
-        f"/api/v1/courses/{_COURSE_A}/me/permissions"
-    )
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
     assert response.status_code == 200
     body = response.json()
     assert body["courseRole"] is None
@@ -223,9 +215,7 @@ async def test_unenrolled_non_admin_is_forbidden(
     session_client: Any,
 ) -> None:
     await _signup(session_client)
-    response = await session_client.get(
-        f"/api/v1/courses/{_COURSE_A}/me/permissions"
-    )
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
     assert response.status_code == 403
     assert response.json() == {"error": "forbidden"}
     _assert_no_secrets(response)
@@ -234,9 +224,7 @@ async def test_unenrolled_non_admin_is_forbidden(
 async def test_course_permissions_without_session_are_unauthorized(
     session_client: Any,
 ) -> None:
-    response = await session_client.get(
-        f"/api/v1/courses/{_COURSE_A}/me/permissions"
-    )
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
     assert response.status_code == 401
     assert response.json() == {"error": "unauthorized"}
 
@@ -249,9 +237,7 @@ async def test_idor_does_not_reveal_other_course_membership(
     session_client.cookies.clear()
     other = await _signup(session_client, email=unique_email("other"))
     await _enroll(db_session, other["id"], _COURSE_A, CourseRole.STUDENT)
-    response = await session_client.get(
-        f"/api/v1/courses/{_COURSE_B}/me/permissions"
-    )
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_B}/me/permissions")
     assert response.status_code == 403
     assert response.json() == {"error": "forbidden"}
     assert owner["email"] not in response.text
@@ -264,14 +250,10 @@ async def test_permissions_are_reevaluated_after_role_change(
 ) -> None:
     created = await _signup(session_client)
     await _enroll(db_session, created["id"], _COURSE_A, CourseRole.STUDENT)
-    first = await session_client.get(
-        f"/api/v1/courses/{_COURSE_A}/me/permissions"
-    )
+    first = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
     assert first.json()["permissions"] == ["course:view"]
     await _set_role(db_session, created["id"], SystemRole.ADMIN)
-    second = await session_client.get(
-        f"/api/v1/courses/{_COURSE_A}/me/permissions"
-    )
+    second = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
     assert "site:manage-admins" in second.json()["permissions"]
     assert "course:teach" in second.json()["permissions"]
 
@@ -449,18 +431,14 @@ async def test_require_site_and_course_permission_probes(
     await _enroll(db_session, student["id"], _COURSE_A, CourseRole.STUDENT)
     denied_site = await session_client.get("/api/v1/_test/site-manage-admins")
     assert denied_site.status_code == 403
-    denied_teach = await session_client.get(
-        f"/api/v1/_test/courses/{_COURSE_A}/teach"
-    )
+    denied_teach = await session_client.get(f"/api/v1/_test/courses/{_COURSE_A}/teach")
     assert denied_teach.status_code == 403
 
     session_client.cookies.clear()
     teacher = await _signup(session_client, email=unique_email("tea"))
     await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
     await _enroll(db_session, teacher["id"], _COURSE_A, CourseRole.TEACHER)
-    allowed_teach = await session_client.get(
-        f"/api/v1/_test/courses/{_COURSE_A}/teach"
-    )
+    allowed_teach = await session_client.get(f"/api/v1/_test/courses/{_COURSE_A}/teach")
     assert allowed_teach.status_code == 200
     assert allowed_teach.json() == {"ok": True}
     denied_admin = await session_client.get("/api/v1/_test/site-manage-admins")

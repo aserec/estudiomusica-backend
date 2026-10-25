@@ -16,9 +16,7 @@ PERMISSION_ORDER: tuple[Permission, ...] = (
 
 COURSE_ROLE_PERMISSIONS: dict[CourseRole, frozenset[Permission]] = {
     CourseRole.STUDENT: frozenset({Permission.COURSE_VIEW}),
-    CourseRole.ASSISTANT: frozenset(
-        {Permission.COURSE_VIEW, Permission.COURSE_GRADE}
-    ),
+    CourseRole.ASSISTANT: frozenset({Permission.COURSE_VIEW, Permission.COURSE_GRADE}),
     CourseRole.TEACHER: frozenset(
         {
             Permission.COURSE_VIEW,

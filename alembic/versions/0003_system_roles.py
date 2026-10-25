@@ -84,12 +84,9 @@ def upgrade() -> None:
         "users",
         sa.Column("system_role_id", sa.String(length=64), nullable=True),
     )
+    op.execute("UPDATE users SET system_role_id = 'admin' WHERE is_admin IS TRUE")
     op.execute(
-        "UPDATE users SET system_role_id = 'admin' WHERE is_admin IS TRUE"
-    )
-    op.execute(
-        "UPDATE users SET system_role_id = 'alumno' "
-        "WHERE system_role_id IS NULL"
+        "UPDATE users SET system_role_id = 'alumno' WHERE system_role_id IS NULL"
     )
     op.alter_column(
         "users",
@@ -184,12 +181,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
-        "DROP TRIGGER IF EXISTS course_memberships_set_updated_at "
-        "ON course_memberships"
+        "DROP TRIGGER IF EXISTS course_memberships_set_updated_at ON course_memberships"
     )
-    op.execute(
-        "DROP TRIGGER IF EXISTS system_roles_set_updated_at ON system_roles"
-    )
+    op.execute("DROP TRIGGER IF EXISTS system_roles_set_updated_at ON system_roles")
     op.execute("DROP INDEX IF EXISTS uq_course_memberships_user_course_active")
     op.drop_index(
         "ix_course_memberships_course_id",
