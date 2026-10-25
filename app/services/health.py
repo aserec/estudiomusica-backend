@@ -19,26 +19,33 @@ def check_health() -> HealthResponse:
 
 
 def _abandon_health_connection(connection: AsyncConnection) -> None:
-    """Libera la sonda sin un ``close()`` ordenado.
+    """Descarta la sonda sin un ``close()`` ordenado.
 
-    Con Postgres congelado ``close()`` puede bloquear ~4 s y el
-    ``asyncio.timeout`` no lo cancela. ``terminate`` / ``invalidate``
-    cortan el socket en el hilo actual.
+    No toca ``Connection.connection``: ese property revalida y lanza
+    ``PendingRollbackError`` que se escapa de ``suppress``. Se usa
+    ``_dbapi_connection.driver_connection.terminate()`` y después
+    ``invalidate()``. Solo en timeout o error: el caso sano devuelve
+    la conexión al pool.
     """
 
-    sync_connection = connection.sync_connection
-    if sync_connection is None:
+    try:
+        sync_connection = connection.sync_connection
+        if sync_connection is None:
+            return
+        proxied = getattr(sync_connection, "_dbapi_connection", None)
+        driver = (
+            getattr(proxied, "driver_connection", None) if proxied is not None else None
+        )
+        terminate = getattr(driver, "terminate", None)
+        if callable(terminate):
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                terminate()
+        # invalidate() hace checkin y deja checkedout=0. close() no: el
+        # property ``connection`` revalida y lanza PendingRollbackError.
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            sync_connection.invalidate()
+    except Exception, asyncio.CancelledError:
         return
-    raw = getattr(sync_connection, "connection", None)
-    dbapi = getattr(raw, "dbapi_connection", None)
-    if dbapi is None:
-        dbapi = raw
-    terminate = getattr(dbapi, "terminate", None)
-    if callable(terminate):
-        with contextlib.suppress(Exception):
-            terminate()
-    with contextlib.suppress(Exception):
-        sync_connection.invalidate()
 
 
 async def check_database() -> DatabaseHealthResponse:
@@ -46,20 +53,46 @@ async def check_database() -> DatabaseHealthResponse:
 
     Cualquier fallo (incluida la expiración de ``db_health_timeout``) se
     traduce en ``down``. No se reenvía el mensaje de la excepción.
+    En éxito la conexión vuelve al pool; solo se descarta si falla.
     """
 
     settings = get_settings()
+    engine = get_engine()
     connection: AsyncConnection | None = None
+
+    async def probe() -> None:
+        nonlocal connection
+        connection = await engine.connect()
+        await connection.execute(text("SELECT 1"))
+
+    task = asyncio.create_task(probe())
     try:
-        async with asyncio.timeout(settings.db_health_timeout):
-            engine = get_engine()
-            connection = await engine.connect()
-            await connection.execute(text("SELECT 1"))
-    except Exception as exc:
-        logger.warning("database health check failed: %s", type(exc).__name__)
-        return DatabaseHealthResponse(db="down")
-    else:
-        return DatabaseHealthResponse(db="ok")
-    finally:
+        await asyncio.wait_for(asyncio.shield(task), timeout=settings.db_health_timeout)
+    except TimeoutError:
+        logger.warning("database health check failed: %s", "TimeoutError")
         if connection is not None:
             _abandon_health_connection(connection)
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(task, timeout=0.3)
+        return DatabaseHealthResponse(db="down")
+    except Exception as exc:
+        logger.warning("database health check failed: %s", type(exc).__name__)
+        if connection is not None:
+            _abandon_health_connection(connection)
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(task, timeout=0.3)
+        return DatabaseHealthResponse(db="down")
+
+    try:
+        if connection is not None:
+            await connection.close()
+    except Exception as exc:
+        logger.warning("database health check failed: %s", type(exc).__name__)
+        if connection is not None:
+            _abandon_health_connection(connection)
+        return DatabaseHealthResponse(db="down")
+    return DatabaseHealthResponse(db="ok")
