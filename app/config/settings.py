@@ -1,15 +1,10 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
+from urllib.parse import urlparse
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from app.schemas.pagination import (
-    DEFAULT_PAGE,
-    DEFAULT_PAGE_SIZE,
-    MAX_PAGE_SIZE,
-)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_FILE = _PROJECT_ROOT / ".env"
@@ -29,13 +24,17 @@ class Settings(BaseSettings):
 
     app_name: str = "EstudioMusica API"
     app_env: Literal["development", "staging", "production"] = "development"
+    expose_errors: bool = False
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     cors_allow_credentials: bool = True
     cors_allow_methods: str = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
     cors_allow_headers: str = "Authorization,Content-Type,Accept"
-    pagination_default_page: int = Field(default=DEFAULT_PAGE)
-    pagination_default_page_size: int = Field(default=DEFAULT_PAGE_SIZE)
-    pagination_max_page_size: int = Field(default=MAX_PAGE_SIZE)
+    pagination_default_page: int = 1
+    pagination_default_page_size: int = 20
+    pagination_max_page: int = Field(default=10_000, ge=1)
+    pagination_max_page_size: int = Field(default=100, ge=1)
+    max_body_bytes: int = Field(default=1_048_576, ge=1)
+    enable_example_routes: bool | None = None
 
     def cors_origin_list(self) -> list[str]:
         return [
@@ -55,6 +54,28 @@ class Settings(BaseSettings):
             for header in self.cors_allow_headers.split(",")
             if header.strip()
         ]
+
+    def example_routes_enabled(self) -> bool:
+        if self.enable_example_routes is not None:
+            return self.enable_example_routes
+        return self.app_env != "production"
+
+    @model_validator(mode="after")
+    def reject_unsafe_cors(self) -> Self:
+        if not self.cors_allow_credentials:
+            return self
+        for origin in self.cors_origin_list():
+            if origin == "*":
+                raise ValueError(
+                    "CORS_ORIGINS no puede ser '*' cuando CORS_ALLOW_CREDENTIALS=true"
+                )
+            parsed = urlparse(origin)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError(
+                    "Origen CORS inválido con credenciales "
+                    f"(hace falta http(s)://): {origin}"
+                )
+        return self
 
 
 @lru_cache
