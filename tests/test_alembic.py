@@ -424,6 +424,11 @@ def test_0001_upgrade_after_stamp_base_is_clear(
             try:
                 async with engine.begin() as connection:
                     await connection.execute(
+                        text("DROP TABLE IF EXISTS auth_sessions CASCADE")
+                    )
+                    await connection.execute(text("DROP TABLE IF EXISTS users CASCADE"))
+                    await connection.execute(text("DROP EXTENSION IF EXISTS citext"))
+                    await connection.execute(
                         text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
                     )
             finally:
@@ -467,6 +472,11 @@ def test_0001_downgrade_with_business_trigger_is_clear(
             try:
                 async with engine.begin() as connection:
                     await connection.execute(text("DROP TABLE IF EXISTS dep_trig"))
+                    await connection.execute(
+                        text("DROP TABLE IF EXISTS auth_sessions CASCADE")
+                    )
+                    await connection.execute(text("DROP TABLE IF EXISTS users CASCADE"))
+                    await connection.execute(text("DROP EXTENSION IF EXISTS citext"))
                     await connection.execute(
                         text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
                     )
