@@ -2,7 +2,7 @@
 
 from app.schemas.errors import ErrorResponse, FieldError
 from app.schemas.examples import ExampleCreate, ExampleItem
-from app.schemas.health import HealthResponse
+from app.schemas.health import DatabaseHealthResponse, HealthResponse
 from app.schemas.pagination import Paginated, PaginationQuery
 
 __all__ = [
@@ -10,6 +10,7 @@ __all__ = [
     "ExampleCreate",
     "ExampleItem",
     "FieldError",
+    "DatabaseHealthResponse",
     "HealthResponse",
     "Paginated",
     "PaginationQuery",

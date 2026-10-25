@@ -23,3 +23,6 @@ htmlcov/
 # Sistema
 .DS_Store
 Thumbs.db
+
+# Almacenes JSON del frontend (este backend no los usa)
+.data/

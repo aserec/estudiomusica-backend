@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     pagination_default_page: int = Field(default=DEFAULT_PAGE)
     pagination_default_page_size: int = Field(default=DEFAULT_PAGE_SIZE)
     pagination_max_page_size: int = Field(default=MAX_PAGE_SIZE)
+    database_url: str = Field(
+        default=(
+            "postgresql+asyncpg://estudiomusica:estudiomusica"
+            "@127.0.0.1:5432/estudiomusica"
+        ),
+        description=(
+            "DSN async de Postgres (SQLAlchemy). El valor por defecto coincide "
+            "con docker-compose.yml."
+        ),
+    )
 
     def cors_origin_list(self) -> list[str]:
         return [

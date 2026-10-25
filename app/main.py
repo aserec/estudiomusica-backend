@@ -1,3 +1,5 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib.metadata import version
 from typing import Any
 
@@ -6,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
 from app.config import get_settings
+from app.db import dispose_engine
 from app.errors import register_exception_handlers
 from app.routers import examples_router, health_router
 from app.schemas.errors import ErrorResponse
@@ -23,15 +26,27 @@ Backend FastAPI de EstudioMusica.
 - Errores: `{ "error": "not_found", "message": "...", "fields": [...], "code": "..." }`.
 - Listados: `{ "items": [...], "page": 1, "pageSize": 20, "total": 0 }`.
 - CORS: orígenes en `CORS_ORIGINS` (por defecto el Next.js local).
+- Postgres: `GET /api/v1/health/db` → `{"db":"ok"}` o `503` `{"db":"down"}`.
 """
 
 OPENAPI_TAGS = [
-    {"name": "health", "description": "Liveness. Contrato: `/api/v1/health`."},
+    {
+        "name": "health",
+        "description": (
+            "Liveness (`/api/v1/health`) y readiness de Postgres (`/api/v1/health/db`)."
+        ),
+    },
     {
         "name": "examples",
         "description": "Demostración de convenciones. No es lógica de negocio.",
     },
 ]
+
+
+@asynccontextmanager
+async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+    yield
+    await dispose_engine()
 
 
 def create_app() -> FastAPI:
@@ -40,6 +55,7 @@ def create_app() -> FastAPI:
         title=settings.app_name,
         version=version("estudiomusica-backend"),
         description=OPENAPI_DESCRIPTION,
+        lifespan=lifespan,
         contact={
             "name": "EstudioMusica",
             "url": "https://estudiomusica.com",

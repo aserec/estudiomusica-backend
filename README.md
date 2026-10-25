@@ -2,7 +2,7 @@
 
 Backend FastAPI de EstudioMusica. Sustituye los almacenes JSON del frontend Next.js.
 
-Este repositorio es el esqueleto FastAPI más las convenciones transversales de la API (errores, paginación, OpenAPI y CORS). No incluye base de datos ni lógica de negocio: Postgres + SQLAlchemy 2 async + Alembic (incluido `GET /api/v1/health/db`) llegará en otra PR.
+Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS) y la persistencia: Postgres, SQLAlchemy 2 async y Alembic. No incluye modelos de negocio.
 
 ## Requisitos
 
@@ -61,7 +61,73 @@ Debe devolver HTTP 200 y:
 
 `GET /health` en la raíz es el mismo chequeo, expuesto como liveness para sondas. El contrato de la API es `GET /api/v1/health`.
 
+La sonda de Postgres es `GET /api/v1/health/db` (también hay alias en `GET /health/db`):
+
+```bash
+curl -i http://127.0.0.1:8000/api/v1/health/db
+```
+
+Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde, HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, message}` de las rutas de negocio.
+
 Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+
+## Postgres, migraciones y tests con BD
+
+El DSN se lee de `DATABASE_URL` (pydantic-settings). El valor por defecto coincide con `docker-compose.yml`:
+
+```text
+postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
+```
+
+### Arrancar Postgres en local
+
+```bash
+docker compose up -d
+```
+
+Eso levanta Postgres 17 en el puerto `5432` y crea dos bases: `estudiomusica` (desarrollo) y `estudiomusica_test` (pytest). Espera a que el healthcheck esté sano:
+
+```bash
+docker compose ps
+```
+
+Aplica las migraciones sobre la base de desarrollo:
+
+```bash
+uv run alembic upgrade head
+```
+
+Para revertirlas del todo:
+
+```bash
+uv run alembic downgrade base
+```
+
+Las revisiones viven en `alembic/versions/`. La inicial solo instala `pgcrypto` (`gen_random_uuid`); las tablas de negocio irán en issues posteriores. Nueva revisión, cuando exista un modelo:
+
+```bash
+uv run alembic revision -m "descripcion" --autogenerate
+```
+
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`.
+
+### Tests con base aislada
+
+Los tests de persistencia **no** usan los JSON de `.data/` del frontend. Usan `estudiomusica_test` y envuelven cada caso en una transacción que se revierte al terminar.
+
+```bash
+docker compose up -d
+uv run pytest
+```
+
+Si Postgres no está en `127.0.0.1:5432`, apunta `TEST_DATABASE_URL` a tu DSN async:
+
+```bash
+export TEST_DATABASE_URL=postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica_test
+uv run pytest
+```
+
+`uv run pytest` sin Postgres en marcha falla en los tests de BD con un mensaje que recuerda `docker compose up -d`. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
 
 ## Tests, lint y types
 
@@ -154,21 +220,24 @@ Si la #391 proponía `limit`/`cursor` u otro sobre, **priman las decisiones del 
 ```text
 app/
   main.py            # Factoría FastAPI: CORS, handlers, api_router /api/v1
+  db.py              # Motor async SQLAlchemy 2 y fábrica de sesiones
   errors.py          # Sobre de error y handlers (validación, HTTP, 500)
   exceptions.py      # AppError
   config/            # Ajustes por variables de entorno (pydantic-settings)
-  routers/           # Rutas HTTP (health y examples; health también en la raíz)
+  routers/           # Rutas HTTP (health, health/db y examples)
   schemas/           # Modelos Pydantic (camelCase, errores, paginación)
   services/          # Lógica de aplicación (salud + lista fija de examples)
-  models/            # Reservado para modelos SQLAlchemy
-tests/               # Tests de pytest por convención
+  models/            # Base SQLAlchemy y mixin PersistentModel
+alembic/             # Migraciones (env.py async + versions/)
+docker/postgres/     # init-test-db.sql (base estudiomusica_test)
+tests/               # Tests de pytest (convenciones + BD aislada)
+docker-compose.yml   # Postgres 17 para desarrollo y tests
+alembic.ini          # Configuración de Alembic
 .env.example         # Plantilla de variables de entorno
 pyproject.toml       # Dependencias, ruff, pytest y mypy
 uv.lock              # Lockfile reproducible de uv
 .python-version      # Python 3.15 (desarrollo)
 ```
-
-`GET /api/v1/health/db` se añadirá cuando exista la base de datos.
 
 ## Versiones fijadas
 
@@ -179,6 +248,10 @@ uv.lock              # Lockfile reproducible de uv
 | FastAPI | 0.162.0 |
 | uvicorn | 0.54.0 |
 | pydantic-settings | 2.16.1 |
+| SQLAlchemy | 2.1.6 (extra asyncio) |
+| asyncpg | 0.32.0 |
+| Alembic | 1.20.1 |
+| pytest-asyncio | 1.4.0 |
 | pytest | 9.1.1 |
 | ruff | 0.17.2 |
 | mypy | 2.4.0 |
