@@ -237,9 +237,8 @@ def test_invalid_auth_secret_is_not_logged(
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("AUTH_SECRET", _DEFAULT_DEV_AUTH_SECRET)
     get_settings.cache_clear()
-    with caplog.at_level(logging.DEBUG):
-        with pytest.raises(ValidationError):
-            Settings()
+    with caplog.at_level(logging.DEBUG), pytest.raises(ValidationError):
+        Settings()
     assert _DEFAULT_DEV_AUTH_SECRET not in caplog.text
     get_settings.cache_clear()
 
