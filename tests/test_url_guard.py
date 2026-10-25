@@ -1,6 +1,11 @@
+import os
+import subprocess
+import sys
+
 import pytest
 
 from tests.conftest import (
+    ROOT,
     alembic_config,
     derive_alembic_database_url,
     require_test_database_url,
@@ -98,3 +103,32 @@ def test_resolve_alembic_database_url_rejects_explicit_dev(
     with pytest.raises(pytest.UsageError, match="ALEMBIC_TEST_DATABASE_URL") as caught:
         resolve_alembic_database_url()
     assert _SECRET not in str(caught.value)
+
+
+def test_autouse_guard_aborts_session_on_dev_database() -> None:
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env["TEST_DATABASE_URL"] = (
+        f"postgresql+asyncpg://estudiomusica:{_SECRET}@127.0.0.1:5432/estudiomusica"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--tb=short",
+            "-p",
+            "no:cacheprovider",
+            "tests/test_health.py::test_api_health_returns_ok",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 2
+    assert _SECRET not in output
+    assert "_test" in output
