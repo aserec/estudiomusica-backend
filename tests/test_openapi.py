@@ -22,7 +22,7 @@ def test_openapi_documents_api_v1_errors_and_pagination(client: TestClient) -> N
     paths = spec["paths"]
     assert "/api/v1/health" in paths
     assert "/api/v1/examples" in paths
-    assert "/health" not in paths
+    assert "/health" in paths
 
     examples_get = paths["/api/v1/examples"]["get"]
     param_names = {param["name"] for param in examples_get["parameters"]}

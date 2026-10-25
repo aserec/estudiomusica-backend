@@ -2,12 +2,12 @@
 
 Backend FastAPI de EstudioMusica. Sustituye los almacenes JSON del frontend Next.js.
 
-Este repositorio es el esqueleto FastAPI más las convenciones transversales de la API (errores, paginación, OpenAPI y CORS). No incluye base de datos ni lógica de negocio: Postgres + SQLAlchemy 2 async + Alembic llegará en otra PR.
+Este repositorio es el esqueleto FastAPI más las convenciones transversales de la API (errores, paginación, OpenAPI y CORS). No incluye base de datos ni lógica de negocio: Postgres + SQLAlchemy 2 async + Alembic (incluido `GET /api/v1/health/db`) llegará en otra PR.
 
 ## Requisitos
 
-- [Python](https://www.python.org/downloads/) **3.15** (la versión fijada del proyecto)
-- [uv](https://docs.astral.sh/uv/) (instalador, entornos virtuales y lockfile)
+- [Python](https://www.python.org/downloads/) **3.14 o superior**. El desarrollo se fija en **3.15** (`.python-version`).
+- [uv](https://docs.astral.sh/uv/) **0.13.5 o superior** (`[tool.uv] required-version`)
 
 Si no tienes `uv`:
 
@@ -23,10 +23,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone https://github.com/aserec/estudiomusica-backend.git
 cd estudiomusica-backend
 cp .env.example .env
-uv sync
+uv sync --locked
 ```
 
-`uv sync` crea `.venv`, instala las dependencias de runtime y de desarrollo según `uv.lock` (versiones reproducibles) y deja el paquete `app` instalado en modo editable.
+`uv sync --locked` crea `.venv`, instala las dependencias de runtime y de desarrollo exactamente según `uv.lock` y deja el paquete `app` instalado en modo editable.
 
 ## Arrancar en local
 
@@ -34,7 +34,18 @@ uv sync
 uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-El servidor queda en [http://127.0.0.1:8000](http://127.0.0.1:8000).
+El servidor queda en [http://127.0.0.1:8000](http://127.0.0.1:8000). En desarrollo, equivalente con `fastapi-cli`:
+
+```bash
+uv run fastapi dev app/main.py
+```
+
+Host y puerto **no** se leen del `.env`: Uvicorn y `fastapi dev` usan 127.0.0.1:8000 por defecto. Cámbialos con las flags del comando:
+
+```bash
+uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
+uv run fastapi dev app/main.py --host 127.0.0.1 --port 8001
+```
 
 Comprueba que responde:
 
@@ -47,6 +58,8 @@ Debe devolver HTTP 200 y:
 ```json
 {"status":"ok"}
 ```
+
+`GET /health` en la raíz es el mismo chequeo, expuesto como liveness para sondas. El contrato de la API es `GET /api/v1/health`.
 
 Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
@@ -69,7 +82,7 @@ uv run ruff format .
 
 ## Convenciones de la API
 
-Todas las rutas cuelgan de un `api_router` con prefijo **`/api/v1`**, montado en `create_app()`. Incluye `GET /api/v1/health`.
+`create_app()` monta un `api_router` con prefijo **`/api/v1`**. El contrato de salud es `GET /api/v1/health`; `GET /health` en la raíz es un alias de liveness.
 
 ### JSON camelCase, códigos snake_case
 
@@ -144,7 +157,7 @@ app/
   errors.py          # Sobre de error y handlers (validación, HTTP, 500)
   exceptions.py      # AppError
   config/            # Ajustes por variables de entorno (pydantic-settings)
-  routers/           # Rutas HTTP (health y examples bajo /api/v1)
+  routers/           # Rutas HTTP (health y examples; health también en la raíz)
   schemas/           # Modelos Pydantic (camelCase, errores, paginación)
   services/          # Lógica de aplicación (salud + lista fija de examples)
   models/            # Reservado para modelos SQLAlchemy
@@ -152,20 +165,22 @@ tests/               # Tests de pytest por convención
 .env.example         # Plantilla de variables de entorno
 pyproject.toml       # Dependencias, ruff, pytest y mypy
 uv.lock              # Lockfile reproducible de uv
-.python-version      # Python 3.15
+.python-version      # Python 3.15 (desarrollo)
 ```
 
-`GET /health/db` se añadirá cuando exista la base de datos.
+`GET /api/v1/health/db` se añadirá cuando exista la base de datos.
 
 ## Versiones fijadas
 
 | Pieza | Versión |
 | --- | --- |
-| Python | 3.15 |
+| Python | >=3.14 (desarrollo en 3.15) |
+| uv | >=0.13.5 |
 | FastAPI | 0.162.0 |
+| uvicorn | 0.54.0 |
 | pydantic-settings | 2.16.1 |
 | pytest | 9.1.1 |
 | ruff | 0.17.2 |
 | mypy | 2.4.0 |
 
-Las transitivas quedan ancladas en `uv.lock`. Se eligió [uv](https://docs.astral.sh/uv/) porque instala Python, resuelve dependencias de forma reproducible y es el gestor que recomienda el ecosistema actual de FastAPI / Astral.
+Las transitivas quedan ancladas en `uv.lock`. Se eligió [uv](https://docs.astral.sh/uv/) porque instala Python, resuelve dependencias de forma reproducible y es el gestor que recomienda el ecosistema actual de FastAPI / Astral. El extra `fastapi[standard]` no se usa en runtime: arrastra `fastapi-cloud-cli`, Sentry y OpenTelemetry. En producción van `fastapi` + `uvicorn[standard]`; `fastapi-cli`, `httpx` y `httpx2` (el cliente que pide Starlette 1.10 para `TestClient`) quedan en el grupo de desarrollo.

@@ -11,13 +11,15 @@ from app.schemas.pagination import (
     MAX_PAGE_SIZE,
 )
 
-_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
-
-AppEnv = Literal["development", "staging", "production"]
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_ENV_FILE = _PROJECT_ROOT / ".env"
 
 
 class Settings(BaseSettings):
-    """Ajustes de runtime. Se leen de variables de entorno y de `.env`."""
+    """Ajustes de runtime.
+
+    Se leen de variables de entorno y del `.env` de la raíz del repo.
+    """
 
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE,
@@ -26,8 +28,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "EstudioMusica API"
-    app_env: AppEnv = "development"
-    api_v1_prefix: str = "/api/v1"
+    app_env: Literal["development", "staging", "production"] = "development"
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     cors_allow_credentials: bool = True
     cors_allow_methods: str = "GET,POST,PUT,PATCH,DELETE,OPTIONS"

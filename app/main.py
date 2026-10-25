@@ -1,3 +1,4 @@
+from importlib.metadata import version
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
@@ -6,7 +7,7 @@ from fastapi.openapi.utils import get_openapi
 
 from app.config import get_settings
 from app.errors import register_exception_handlers
-from app.routers import examples, health
+from app.routers import examples_router, health_router
 from app.schemas.errors import ErrorResponse
 from app.schemas.examples import ExampleItem
 from app.schemas.pagination import Paginated
@@ -25,7 +26,7 @@ Backend FastAPI de EstudioMusica.
 """
 
 OPENAPI_TAGS = [
-    {"name": "health", "description": "Liveness bajo `/api/v1`."},
+    {"name": "health", "description": "Liveness. Contrato: `/api/v1/health`."},
     {
         "name": "examples",
         "description": "Demostración de convenciones. No es lógica de negocio.",
@@ -37,7 +38,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     application = FastAPI(
         title=settings.app_name,
-        version="0.1.0",
+        version=version("estudiomusica-backend"),
         description=OPENAPI_DESCRIPTION,
         contact={
             "name": "EstudioMusica",
@@ -60,10 +61,13 @@ def create_app() -> FastAPI:
     )
     register_exception_handlers(application)
 
-    api_router = APIRouter(prefix=settings.api_v1_prefix)
-    api_router.include_router(health.router)
-    api_router.include_router(examples.router)
+    api_router = APIRouter(prefix="/api/v1")
+    api_router.include_router(health_router)
+    api_router.include_router(examples_router)
     application.include_router(api_router)
+
+    # Liveness en la raíz para sondas. El contrato de la API es GET /api/v1/health.
+    application.include_router(health_router)
 
     def custom_openapi() -> dict[str, Any]:
         if application.openapi_schema:
