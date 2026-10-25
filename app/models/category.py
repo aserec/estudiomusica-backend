@@ -1,0 +1,58 @@
+"""Categoría jerárquica de cursos. ``course.category_id`` (#401) apuntará aquí."""
+
+import uuid
+
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, text
+from sqlalchemy.dialects.postgresql import CITEXT
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import PersistentModel
+
+
+class Category(PersistentModel):
+    """Nodo del árbol de categorías.
+
+    El CRUD de cursos (#401) añadirá ``courses.category_id`` FK a
+    ``categories.id``. El borrado consulta ``public.courses`` si existe
+    para responder ``409 category_not_empty``.
+    """
+
+    __tablename__ = "categories"
+    __table_args__ = (
+        CheckConstraint(
+            "parent_id IS NULL OR parent_id <> id",
+            name="parent_not_self",
+        ),
+        Index(
+            "ix_categories_active_sort",
+            "sort_order",
+            "name",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index(
+            "uq_categories_root_name_active",
+            "name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL AND parent_id IS NULL"),
+        ),
+        Index(
+            "uq_categories_parent_name_active",
+            "parent_id",
+            "name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL AND parent_id IS NOT NULL"),
+        ),
+    )
+
+    name: Mapped[str] = mapped_column(CITEXT(), nullable=False)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    description: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    sort_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
