@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import importlib.util
 import shutil
 from pathlib import Path
@@ -242,7 +243,7 @@ def test_migrated_database_has_updated_at_trigger_without_create_all(
         command.downgrade(config, "base")
 
 
-_AUTOGEN_ENV = '''\
+_AUTOGEN_ENV = """\
 import asyncio
 
 from alembic import context
@@ -297,7 +298,7 @@ if context.is_offline_mode():
         context.run_migrations()
 else:
     asyncio.run(run_async_migrations())
-'''
+"""
 
 
 def test_autogenerate_revision_imports_sqlalchemy(
@@ -345,3 +346,105 @@ def test_autogenerate_revision_imports_sqlalchemy(
     assert callable(module.upgrade)
     assert callable(module.downgrade)
 
+
+def test_0001_upgrade_duplicate_function_has_clear_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = importlib.import_module("app.migrations.versions.0001_initial")
+
+    def boom(_sql: object) -> None:
+        raise RuntimeError("function set_updated_at() already exists")
+
+    monkeypatch.setattr(mod.op, "execute", boom)
+    with pytest.raises(RuntimeError, match="medio migrar") as caught:
+        mod.upgrade()
+    assert "set_updated_at" in str(caught.value)
+
+
+def test_0001_downgrade_dependent_trigger_has_clear_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = importlib.import_module("app.migrations.versions.0001_initial")
+
+    def boom(_sql: object) -> None:
+        raise RuntimeError(
+            "cannot drop function set_updated_at because other objects depend on it"
+        )
+
+    monkeypatch.setattr(mod.op, "execute", boom)
+    with pytest.raises(RuntimeError, match="triggers de negocio") as caught:
+        mod.downgrade()
+    assert "set_updated_at" in str(caught.value)
+
+
+def test_0001_upgrade_after_stamp_base_is_clear(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = alembic_config(dsn)
+    command.upgrade(config, "head")
+    command.stamp(config, "base")
+    try:
+        with pytest.raises(Exception, match="medio migrar"):
+            command.upgrade(config, "head")
+    finally:
+
+        async def cleanup() -> None:
+            engine = create_async_engine(dsn.secret())
+            try:
+                async with engine.begin() as connection:
+                    await connection.execute(
+                        text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(cleanup())
+        command.stamp(config, "base")
+
+
+def test_0001_downgrade_with_business_trigger_is_clear(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    from app.models.base import updated_at_trigger_sql
+
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = alembic_config(dsn)
+    command.upgrade(config, "head")
+
+    async def add_dependent_trigger() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text("CREATE TABLE IF NOT EXISTS dep_trig (updated_at timestamptz)")
+                )
+                await connection.execute(text(updated_at_trigger_sql("dep_trig")))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(add_dependent_trigger())
+    try:
+        with pytest.raises(Exception, match="triggers de negocio"):
+            command.downgrade(config, "base")
+    finally:
+
+        async def cleanup() -> None:
+            engine = create_async_engine(dsn.secret())
+            try:
+                async with engine.begin() as connection:
+                    await connection.execute(text("DROP TABLE IF EXISTS dep_trig"))
+                    await connection.execute(
+                        text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(cleanup())
+        command.stamp(config, "base")
