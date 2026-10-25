@@ -5,9 +5,9 @@ Revises:
 Create Date: 2026-10-25
 
 No se instala pgcrypto: en Postgres >= 13 ``gen_random_uuid()`` es nativa.
-``PersistentModel`` monta ``BEFORE UPDATE ... set_updated_at()`` al crear
-cada tabla. Las migraciones de negocio pueden usar
-``updated_at_trigger_sql`` / ``attach_updated_at_trigger``.
+Las tablas ``PersistentModel`` montan el trigger en las revisiones
+(``op_create_updated_at_trigger`` / hook de autogenerate). ``after_create``
+solo aplica a ``create_all`` en tests.
 """
 
 from collections.abc import Sequence
