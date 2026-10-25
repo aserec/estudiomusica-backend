@@ -101,13 +101,21 @@ def reject_non_test_database() -> None:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def isolate_settings_env() -> Iterator[None]:
-    """Fija todas las variables de Settings durante la sesión de tests."""
+def isolate_settings_env(reject_non_test_database: None) -> Iterator[None]:
+    """Fija todas las variables de Settings durante la sesión de tests.
+
+    ``DATABASE_URL`` queda en un DSN dummy para que production no herede
+    las credenciales del compose. ``TEST_DATABASE_URL`` no es un setting:
+    si el invocador no la exportó, se fija a ``estudiomusica_test``; si
+    sí (y pasó ``reject_non_test_database``), se respeta.
+    """
 
     with pytest.MonkeyPatch.context() as mp:
         for key, value in _SETTINGS_ENV.items():
             mp.setenv(key, value)
         mp.delenv("ENABLE_EXAMPLE_ROUTES", raising=False)
+        if os.environ.get("TEST_DATABASE_URL") is None:
+            mp.setenv("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
         yield
         from app.config import get_settings
         from app.main import get_app
