@@ -479,22 +479,4 @@ def test_0001_downgrade_with_business_trigger_is_clear(
         with pytest.raises(Exception, match="triggers de negocio"):
             command.downgrade(config, "base")
     finally:
-
-        async def cleanup() -> None:
-            engine = create_async_engine(dsn.secret())
-            try:
-                async with engine.begin() as connection:
-                    await connection.execute(text("DROP TABLE IF EXISTS dep_trig"))
-                    await connection.execute(
-                        text("DROP TABLE IF EXISTS auth_sessions CASCADE")
-                    )
-                    await connection.execute(text("DROP TABLE IF EXISTS users CASCADE"))
-                    await connection.execute(text("DROP EXTENSION IF EXISTS citext"))
-                    await connection.execute(
-                        text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
-                    )
-            finally:
-                await engine.dispose()
-
-        asyncio.run(cleanup())
-        command.stamp(config, "base")
+        _wipe_alembic_schema(dsn)
