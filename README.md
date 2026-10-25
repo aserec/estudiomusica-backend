@@ -85,7 +85,7 @@ postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
 docker compose up -d
 ```
 
-Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings rechaza la contraseña por defecto del compose (en cualquier DSN) y cualquier base `*_test`. Espera a que el healthcheck esté sano:
+Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings rechaza la contraseña por defecto y las bases `*_test` también si vienen en la query (`password`, `user`, `database`, `dbname`). Los errores de validación no muestran el DSN (`hide_input_in_errors`). Espera a que el healthcheck esté sano:
 
 ```bash
 docker compose ps
