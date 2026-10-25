@@ -67,12 +67,14 @@ def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> Iterator[TestC
         monkeypatch.setenv(key, value)
     get_settings.cache_clear()
     get_app.cache_clear()
-    application = create_app()
-    _mount_probes(application)
-    with TestClient(application) as test_client:
-        yield test_client
-    get_settings.cache_clear()
-    get_app.cache_clear()
+    try:
+        application = create_app()
+        _mount_probes(application)
+        with TestClient(application) as test_client:
+            yield test_client
+    finally:
+        get_settings.cache_clear()
+        get_app.cache_clear()
 
 
 @pytest.fixture
