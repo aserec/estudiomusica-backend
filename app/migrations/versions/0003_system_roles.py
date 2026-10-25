@@ -102,7 +102,7 @@ def upgrade() -> None:
         unique=False,
     )
     op.create_check_constraint(
-        "ck_users_is_admin_matches_system_role",
+        "is_admin_matches_system_role",
         "users",
         "is_admin = (system_role_id = 'admin')",
     )
@@ -180,10 +180,9 @@ def downgrade() -> None:
         if_exists=True,
     )
     op.drop_table("course_memberships")
-    op.drop_constraint(
-        "ck_users_is_admin_matches_system_role",
-        "users",
-        type_="check",
+    op.execute(
+        "ALTER TABLE users DROP CONSTRAINT IF EXISTS "
+        "ck_users_is_admin_matches_system_role"
     )
     op.drop_constraint(
         "fk_users_system_role_id_system_roles",
