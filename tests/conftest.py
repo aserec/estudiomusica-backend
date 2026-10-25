@@ -7,13 +7,19 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from app.db import redact_database_url
 from app.exceptions import Validation
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEST_DATABASE_URL = (
     "postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica_test"
+)
+DEFAULT_ALEMBIC_DATABASE_URL = (
+    "postgresql+asyncpg://estudiomusica:estudiomusica"
+    "@127.0.0.1:5432/estudiomusica_alembic_test"
 )
 DOWN_DATABASE_URL = (
     "postgresql+asyncpg://leaky_user:supersecret-password-do-not-leak"
@@ -21,14 +27,46 @@ DOWN_DATABASE_URL = (
 )
 
 
+def _require_test_database_name(url: str) -> str:
+    name = make_url(url).database or ""
+    if not name.endswith("_test"):
+        raise pytest.UsageError(
+            "TEST_DATABASE_URL debe apuntar a una base cuyo nombre termina "
+            "en '_test' para no tocar desarrollo. Recibido: "
+            f"{redact_database_url(url)}"
+        )
+    return url
+
+
 def resolve_test_database_url() -> str:
-    return os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
+    return _require_test_database_name(
+        os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
+    )
+
+
+def resolve_alembic_database_url() -> str:
+    return _require_test_database_name(
+        os.environ.get("ALEMBIC_TEST_DATABASE_URL", DEFAULT_ALEMBIC_DATABASE_URL)
+    )
 
 
 def alembic_config(database_url: str) -> Config:
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("sqlalchemy.url", database_url)
     return config
+
+
+@pytest.fixture(scope="session", autouse=True)
+def reject_non_test_database() -> None:
+    """Aborta la suite si TEST_DATABASE_URL apunta a una base de desarrollo."""
+
+    raw = os.environ.get("TEST_DATABASE_URL")
+    if raw is None:
+        return
+    try:
+        _require_test_database_name(raw)
+    except pytest.UsageError as exc:
+        pytest.exit(str(exc), returncode=2)
 
 
 @pytest.fixture(scope="session", autouse=True)

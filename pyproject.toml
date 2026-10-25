@@ -52,6 +52,7 @@ testpaths = ["tests"]
 addopts = ["-q"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = ["db: tests that require Postgres (docker compose up -d)"]
 
 [tool.mypy]
 python_version = "3.14"

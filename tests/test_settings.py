@@ -58,6 +58,19 @@ def test_database_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
 
 
+def test_resolve_test_database_url_rejects_non_test_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.conftest import resolve_test_database_url
+
+    monkeypatch.setenv(
+        "TEST_DATABASE_URL",
+        "postgresql+asyncpg://estudiomusica:secret@127.0.0.1:5432/estudiomusica",
+    )
+    with pytest.raises(pytest.UsageError, match="_test"):
+        resolve_test_database_url()
+
+
 def test_database_url_defaults_to_docker_compose(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

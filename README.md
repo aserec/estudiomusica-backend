@@ -113,7 +113,7 @@ Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UU
 
 ### Tests con base aislada
 
-Los tests de persistencia **no** usan los JSON de `.data/` del frontend. Usan `estudiomusica_test` y envuelven cada caso en una transacción que se revierte al terminar.
+Los tests de persistencia **no** usan los JSON de `.data/` del frontend. Usan `estudiomusica_test` (y `estudiomusica_alembic_test` solo para upgrade/downgrade de Alembic) y envuelven cada caso en una transacción que se revierte al terminar. El nombre de la base de `TEST_DATABASE_URL` debe terminar en `_test`; si no, pytest aborta.
 
 ```bash
 docker compose up -d
