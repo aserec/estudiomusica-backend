@@ -40,12 +40,39 @@ def _scalar(dsn: RedactedDsn, sql: str) -> object:
     return asyncio.run(run())
 
 
+def _wipe_alembic_schema(dsn: RedactedDsn) -> None:
+    """Quita restos de 0001/0002 para que los tests no se pisen el DSN."""
+
+    async def wipe() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
+                await connection.execute(
+                    text("DROP TABLE IF EXISTS auth_sessions CASCADE")
+                )
+                await connection.execute(text("DROP TABLE IF EXISTS users CASCADE"))
+                await connection.execute(text("DROP TABLE IF EXISTS dep_trig CASCADE"))
+                await connection.execute(
+                    text("DROP TABLE IF EXISTS migrated_trigger_probes CASCADE")
+                )
+                await connection.execute(text("DROP EXTENSION IF EXISTS citext"))
+                await connection.execute(
+                    text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(wipe())
+
+
 def test_alembic_upgrade_head_and_downgrade_base(
     monkeypatch: pytest.MonkeyPatch,
     require_postgres: RedactedDsn,
 ) -> None:
     dsn = RedactedDsn(resolve_alembic_database_url())
     ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = alembic_config(dsn)
 
@@ -205,6 +232,7 @@ def test_migrated_database_has_updated_at_trigger_without_create_all(
 
     dsn = RedactedDsn(resolve_alembic_database_url())
     ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = _alembic_config_for(dest, dsn)
     command.upgrade(config, "head")
@@ -410,6 +438,7 @@ def test_0001_upgrade_after_stamp_base_is_clear(
 ) -> None:
     dsn = RedactedDsn(resolve_alembic_database_url())
     ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = alembic_config(dsn)
     command.upgrade(config, "head")
@@ -418,24 +447,7 @@ def test_0001_upgrade_after_stamp_base_is_clear(
         with pytest.raises(Exception, match="medio migrar"):
             command.upgrade(config, "head")
     finally:
-
-        async def cleanup() -> None:
-            engine = create_async_engine(dsn.secret())
-            try:
-                async with engine.begin() as connection:
-                    await connection.execute(
-                        text("DROP TABLE IF EXISTS auth_sessions CASCADE")
-                    )
-                    await connection.execute(text("DROP TABLE IF EXISTS users CASCADE"))
-                    await connection.execute(text("DROP EXTENSION IF EXISTS citext"))
-                    await connection.execute(
-                        text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
-                    )
-            finally:
-                await engine.dispose()
-
-        asyncio.run(cleanup())
-        command.stamp(config, "base")
+        _wipe_alembic_schema(dsn)
 
 
 def test_0001_downgrade_with_business_trigger_is_clear(
@@ -446,6 +458,7 @@ def test_0001_downgrade_with_business_trigger_is_clear(
 
     dsn = RedactedDsn(resolve_alembic_database_url())
     ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = alembic_config(dsn)
     command.upgrade(config, "head")
