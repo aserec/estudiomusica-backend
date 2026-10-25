@@ -28,6 +28,9 @@ DOWN_DATABASE_URL = (
     "@127.0.0.1:1/no_such_db"
 )
 UNUSED_DATABASE_URL = "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused"
+PRODUCTION_AUTH_SECRET = "production-test-auth-secret-at-least-32ch"
+PRODUCTION_TEST_USER = "em_prod_tests"
+PRODUCTION_TEST_PASSWORD = "prod-test-dsn-password-not-default"
 _DATABASE_OVERRIDE_QUERY_KEYS = frozenset({"database", "dbname", "service", "options"})
 _PING_CONNECT_TIMEOUT = 2.0
 _PING_TOTAL_TIMEOUT = 3.0
@@ -298,13 +301,114 @@ def probe_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     )
 
 
+def production_settings_env(database_url: str, **overrides: str) -> dict[str, str]:
+    """Variables de production reutilizables (auth, roles, health)."""
+
+    env = {
+        "APP_ENV": "production",
+        "EXPOSE_ERRORS": "false",
+        "ENABLE_EXAMPLE_ROUTES": "false",
+        "AUTH_SECRET": PRODUCTION_AUTH_SECRET,
+        "DATABASE_URL": database_url,
+    }
+    env.update(overrides)
+    return env
+
+
+def production_database_url(test_url: str) -> str:
+    """DSN de la base ``*_test`` con rol de production, sin password por defecto."""
+
+    parsed = make_url(require_test_database_url(test_url))
+    return parsed.set(
+        username=PRODUCTION_TEST_USER,
+        password=PRODUCTION_TEST_PASSWORD,
+    ).render_as_string(hide_password=False)
+
+
+def ensure_production_test_role(admin_url: str) -> str:
+    """Crea el rol de tests de production y devuelve el DSN reescrito."""
+
+    prod_url = production_database_url(admin_url)
+
+    async def create_role() -> None:
+        engine = create_async_engine(
+            admin_url,
+            isolation_level="AUTOCOMMIT",
+            connect_args={
+                "timeout": _PING_CONNECT_TIMEOUT,
+                "command_timeout": _PING_CONNECT_TIMEOUT,
+            },
+        )
+        try:
+            async with engine.connect() as connection:
+                exists = await connection.scalar(
+                    text("SELECT 1 FROM pg_roles WHERE rolname = :name"),
+                    {"name": PRODUCTION_TEST_USER},
+                )
+                if exists is None:
+                    await connection.execute(
+                        text(
+                            f"CREATE ROLE {PRODUCTION_TEST_USER} LOGIN SUPERUSER "
+                            f"PASSWORD '{PRODUCTION_TEST_PASSWORD}'"
+                        )
+                    )
+                else:
+                    await connection.execute(
+                        text(
+                            f"ALTER ROLE {PRODUCTION_TEST_USER} WITH LOGIN SUPERUSER "
+                            f"PASSWORD '{PRODUCTION_TEST_PASSWORD}'"
+                        )
+                    )
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(create_role())
+        _ping_postgres(prod_url)
+    except ConnectionError:
+        raise
+    except Exception as exc:
+        redacted = redact_database_url(admin_url)
+        if _is_connection_error(exc):
+            raise ConnectionError(
+                "No se pudo crear el rol de production-tests "
+                f"({type(exc).__name__}). {redacted}"
+            ) from None
+        raise RuntimeError(
+            "No se pudo crear el rol de production-tests "
+            f"({type(exc).__name__}). {redacted}"
+        ) from None
+    return prod_url
+
+
 @pytest.fixture
-def production_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+def offline_production_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
+    """Production sin Postgres: DSN dummy para errores y /health/db 503."""
+
     yield from _build_client(
         monkeypatch,
-        APP_ENV="production",
-        EXPOSE_ERRORS="false",
-        ENABLE_EXAMPLE_ROUTES="false",
+        **production_settings_env(UNUSED_DATABASE_URL),
+    )
+
+
+@pytest.fixture
+def production_client(
+    monkeypatch: pytest.MonkeyPatch,
+    production_test_database_url: str,
+    migrated_test_database: None,
+) -> Iterator[TestClient]:
+    """Cliente production contra la base ``*_test``, sin credenciales por defecto.
+
+    ``APP_ENV=production``, ``AUTH_SECRET`` fuerte y DSN de ``estudiomusica_test``
+    (o ``TEST_DATABASE_URL``) con el rol ``em_prod_tests``. Reutilizable para
+    flujos que deben verse como production (auth, roles).
+    """
+
+    yield from _build_client(
+        monkeypatch,
+        **production_settings_env(production_test_database_url),
     )
 
 
@@ -548,6 +652,20 @@ def require_postgres() -> str:
                 f"En local: docker compose up -d. {exc}"
             )
     return url
+
+
+@pytest.fixture(scope="session")
+def production_test_database_url(require_postgres: str) -> str:
+    """DSN de la base ``*_test`` con rol de production (sin password por defecto)."""
+
+    try:
+        return ensure_production_test_role(require_postgres)
+    except ConnectionError as exc:
+        _skip_or_fail_postgres(
+            "No se pudo preparar el rol de production-tests. "
+            f"En local: docker compose up -d. {exc}"
+        )
+        raise AssertionError("unreachable") from exc
 
 
 @pytest.fixture(scope="session")

@@ -126,7 +126,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_default_database_credentials(self) -> Self:
-        """Las credenciales y bases de test no valen fuera de development."""
+        """Las credenciales de desarrollo no valen fuera de development."""
 
         if self.app_env == "development":
             return self
@@ -134,16 +134,10 @@ class Settings(BaseSettings):
             parsed = make_url(self.resolved_database_url())
         except Exception:
             raise ValueError("DATABASE_URL no es un DSN válido") from None
-        database = parsed.database or ""
         if parsed.password == _DEFAULT_DEV_PASSWORD:
             raise ValueError(
                 "DATABASE_URL no puede usar la contraseña por defecto "
                 "de desarrollo fuera de APP_ENV=development"
-            )
-        if database.endswith("_test"):
-            raise ValueError(
-                "DATABASE_URL no puede apuntar a una base *_test "
-                "fuera de APP_ENV=development"
             )
         return self
 

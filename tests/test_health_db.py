@@ -31,20 +31,19 @@ def test_root_health_db_alias(
 
 
 def test_health_db_ok_in_production_without_examples(
-    production_client: TestClient,
+    offline_production_client: TestClient,
 ) -> None:
     """health/db se monta siempre; /examples no.
 
-    En production Settings rechaza bases ``*_test`` y la contraseña del
-    compose, así que el cliente usa un DSN dummy: 503 es la sonda, no un
-    sobre de error.
+    Este cliente usa un DSN dummy (sin Postgres): 503 es la sonda, no un
+    sobre de error. El fixture ``production_client`` cubre production con BD.
     """
 
-    response = production_client.get("/api/v1/health/db")
+    response = offline_production_client.get("/api/v1/health/db")
 
     assert response.status_code == 503
     assert response.json() == {"db": "down"}
-    assert production_client.get("/api/v1/examples").status_code == 404
+    assert offline_production_client.get("/api/v1/examples").status_code == 404
 
 
 def test_health_db_down_without_credentials(

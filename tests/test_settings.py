@@ -130,18 +130,17 @@ def test_production_rejects_default_password_with_other_user(
     get_settings.cache_clear()
 
 
-def test_production_rejects_test_database_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv(
-        "DATABASE_URL",
-        "postgresql+asyncpg://app:s3cret@127.0.0.1:5432/estudiomusica_test",
+def test_production_accepts_test_database_with_non_default_password() -> None:
+    settings = Settings(
+        app_env="production",
+        database_url=(
+            "postgresql+asyncpg://app:s3cret@127.0.0.1:5432/estudiomusica_test"
+        ),
+        auth_secret="production-auth-secret-at-least-32ch",
+        _env_file=None,
     )
-    get_settings.cache_clear()
-    with pytest.raises(ValidationError, match=r"\*_test"):
-        Settings()
-    get_settings.cache_clear()
+    assert settings.resolved_database_url().endswith("/estudiomusica_test")
+    assert settings.auth_cookie_secure() is True
 
 
 def test_production_accepts_non_default_database_url() -> None:

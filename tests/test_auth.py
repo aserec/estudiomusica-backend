@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +13,7 @@ from app.auth.tokens import encode_session_token
 from app.config import get_settings
 from app.models import AuthSession, User
 from app.schemas.auth import SignUpRequest
+from tests.conftest import PRODUCTION_AUTH_SECRET
 
 pytestmark = pytest.mark.db
 
@@ -387,8 +389,6 @@ async def test_failed_login_does_not_log_secrets(
 
 
 def test_production_cookie_sets_secure() -> None:
-    """Production rechaza bases *_test; el flag Secure se cubre sin DSN de test."""
-
     from fastapi import Response
 
     from app.auth.cookies import attach_session_cookie
@@ -406,6 +406,65 @@ def test_production_cookie_sets_secure() -> None:
     assert "HttpOnly" in cookie
     assert "Secure" in cookie
     assert "samesite=lax" in cookie.lower()
+
+
+def test_production_auth_signup_login_me_logout(
+    production_client: TestClient,
+) -> None:
+    email = unique_email("prod")
+    created = production_client.post(
+        "/api/v1/auth/signup", json=signup_body(email=email)
+    )
+    assert created.status_code == 201
+    assert_public_user(created.json()["user"], email=email, name="Ada Lovelace")
+    cookie = set_cookie_header(created)
+    assert "session=" in cookie
+    assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    assert "samesite=lax" in cookie.lower()
+    assert PRODUCTION_AUTH_SECRET not in created.text
+
+    logged_out = production_client.post("/api/v1/auth/logout")
+    assert logged_out.status_code == 204
+
+    login = production_client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": PASSWORD},
+    )
+    assert login.status_code == 200
+    login_cookie = set_cookie_header(login)
+    assert "HttpOnly" in login_cookie
+    assert "Secure" in login_cookie
+    assert "samesite=lax" in login_cookie.lower()
+
+    me = production_client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["user"]["email"] == email
+    assert me.json()["systemRole"] == "alumno"
+    assert me.json()["isAdmin"] is False
+
+    boom = production_client.get("/api/v1/_test/boom")
+    assert boom.status_code == 500
+    assert boom.json() == {"error": "internal_error"}
+    assert "message" not in boom.json()
+    assert "secret-leak" not in boom.text
+    assert PRODUCTION_AUTH_SECRET not in boom.text
+    assert "Traceback" not in boom.text
+
+    wrong = production_client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": "wrong-password"},
+    )
+    assert wrong.status_code == 401
+    assert wrong.json() == {"error": "invalid_credentials"}
+    assert "wrong-password" not in wrong.text
+    assert "argon2" not in wrong.text
+    assert PRODUCTION_AUTH_SECRET not in wrong.text
+
+    logout = production_client.post("/api/v1/auth/logout")
+    assert logout.status_code == 204
+    assert production_client.get("/api/v1/auth/me").status_code == 401
+    assert production_client.get("/api/v1/examples").status_code == 404
 
 
 async def test_auth_session_row_is_created(
