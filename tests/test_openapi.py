@@ -33,6 +33,10 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     paths = spec["paths"]
     assert "/api/v1/health" in paths
     assert "/api/v1/health/db" in paths
+    assert "/api/v1/auth/signup" in paths
+    assert "/api/v1/auth/login" in paths
+    assert "/api/v1/auth/logout" in paths
+    assert "/api/v1/auth/me" in paths
     assert "/api/v1/examples" in paths
     assert "/api/v1/examples/denied" in paths
     assert "/api/v1/examples/too-large" in paths
@@ -77,3 +81,24 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert post_responses["400"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ErrorResponse"
     }
+
+    signup = paths["/api/v1/auth/signup"]["post"]
+    assert "201" in signup["responses"]
+    assert "400" in signup["responses"]
+    assert "409" in signup["responses"]
+    login = paths["/api/v1/auth/login"]["post"]
+    assert "200" in login["responses"]
+    assert "401" in login["responses"]
+    logout = paths["/api/v1/auth/logout"]["post"]
+    assert "204" in logout["responses"]
+    me = paths["/api/v1/auth/me"]["get"]
+    assert "200" in me["responses"]
+    assert "401" in me["responses"]
+    assert "SignUpRequest" in schemas
+    assert "LogInRequest" in schemas
+    assert "PublicUser" in schemas
+    assert "AuthMeResponse" in schemas
+    signup_props = schemas["SignUpRequest"]["properties"]
+    assert set(signup_props) >= {"name", "email", "password"}
+    me_props = schemas["AuthMeResponse"]["properties"]
+    assert set(me_props) >= {"user", "systemRole", "isAdmin"}
