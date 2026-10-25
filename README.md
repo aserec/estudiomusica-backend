@@ -104,7 +104,7 @@ postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
 docker compose up -d
 ```
 
-Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings rechaza la contraseña o el usuario por defecto, también si vienen en la query (`password`, `user`). Un `*_test` por query (`database`, `dbname`) tampoco vale; el path `*_test` sí, si las credenciales no son las de desarrollo (fixture `production_client`). Los errores de validación no muestran el DSN (`hide_input_in_errors`). Espera a que el healthcheck esté sano:
+Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings rechaza la contraseña o el usuario por defecto (también en la query: `password`, `user`) y cualquier base `*_test` en el path o en `database`/`dbname`. Los tests de production activan un opt-in (`allow_test_database`) que **no** lee el entorno: un despliegue real no puede encenderlo. `str(ValidationError)` y los logs no incluyen el DSN ni `AUTH_SECRET` (`SecretStr` + `hide_input_in_errors`); `ValidationError.errors()` y `.json()` de Pydantic sí pueden traer `input_value` — no los registres ni los devuelvas. Espera a que el healthcheck esté sano:
 
 ```bash
 docker compose ps
@@ -134,7 +134,7 @@ La inicial crea `set_updated_at()` (`clock_timestamp()`). No instala `pgcrypto`:
 uv run alembic revision -m "descripcion" --autogenerate
 ```
 
-Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. No hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext`, `users` y `auth_sessions` y monta ese trigger en ambas.
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. No hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext` si falta, `users` y `auth_sessions`, y monta ese trigger en ambas. El downgrade de 0002 **no** hace `DROP EXTENSION citext` (puede venir preinstalada o usarla otra revisión).
 
 `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
@@ -157,6 +157,16 @@ uv run pytest
 ```
 
 `uv run pytest` sin Postgres en marcha **salta** los tests de BD solo si el error es de conexión (refused, host desconocido, timeout). Un fallo de autenticación o una migración rota **falla**. En CI: `REQUIRE_POSTGRES=1 uv run pytest` (también `true`/`yes`/`on`, como Pydantic) convierte el skip en fallo; un valor desconocido aborta. Los mensajes y `--showlocals` no incluyen la contraseña. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
+
+El fixture `production_client` crea el rol `em_prod_tests` (LOGIN, **sin** SUPERUSER / CREATEDB / CREATEROLE) con contraseña aleatoria por ejecución y lo borra al terminar la suite, también si falla. Grants mínimos, los mismos que un rol de producción:
+
+- `CONNECT` en la base de test
+- `USAGE` en el esquema `public`
+- `SELECT, INSERT, UPDATE, DELETE` en las tablas de `public`
+- `USAGE, SELECT` en las secuencias de `public`
+- `USAGE` en el tipo `citext` (email)
+
+No puede migrar ni crear bases. Las filas de esos tests (`prod-%@example.com`) se borran al terminar.
 
 ## Tests, lint y types
 
