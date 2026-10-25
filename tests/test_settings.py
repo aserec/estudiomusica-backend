@@ -133,6 +133,67 @@ def test_production_accepts_default_credentials_on_test_database() -> None:
     assert settings.database_url.endswith("/estudiomusica_test")
 
 
+_DEFAULT_DEV_AUTH_SECRET = "dev-insecure-auth-secret-change-me"
+
+
+def test_default_auth_secret_rejected_outside_development(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_SECRET", _DEFAULT_DEV_AUTH_SECRET)
+    monkeypatch.setenv("APP_ENV", "production")
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="AUTH_SECRET"):
+        Settings()
+    monkeypatch.setenv("APP_ENV", "staging")
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="AUTH_SECRET"):
+        Settings()
+    get_settings.cache_clear()
+
+
+def test_short_auth_secret_rejected_outside_development() -> None:
+    with pytest.raises(ValidationError, match="32"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://app:s3cret@db.example:5432/app",
+            auth_secret="too-short-to-be-safe",
+            _env_file=None,
+        )
+
+
+def test_default_auth_secret_allowed_in_development(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_SECRET", _DEFAULT_DEV_AUTH_SECRET)
+    monkeypatch.setenv("APP_ENV", "development")
+    get_settings.cache_clear()
+    settings = Settings()
+    assert settings.auth_secret == _DEFAULT_DEV_AUTH_SECRET
+    assert settings.auth_cookie_secure() is False
+    get_settings.cache_clear()
+
+
+def test_production_auth_cookie_is_secure() -> None:
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://app:s3cret@db.example:5432/app",
+        auth_secret="production-auth-secret-at-least-32ch",
+        _env_file=None,
+    )
+    assert settings.auth_cookie_secure() is True
+
+
+def test_bootstrap_admin_email_set_normalizes() -> None:
+    settings = Settings(
+        bootstrap_admin_emails=" Ada@Example.com , , other@example.com ",
+        _env_file=None,
+    )
+    assert settings.bootstrap_admin_email_set() == {
+        "ada@example.com",
+        "other@example.com",
+    }
+
+
 def test_expose_errors_in_production_logs_warning(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

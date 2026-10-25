@@ -10,6 +10,7 @@ from sqlalchemy.engine.url import make_url
 _DEFAULT_DEV_USER = "estudiomusica"
 _DEFAULT_DEV_PASSWORD = "estudiomusica"
 _DEFAULT_DEV_DATABASE = "estudiomusica"
+DEFAULT_DEV_AUTH_SECRET = "dev-insecure-auth-secret-change-me"
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_FILE = _PROJECT_ROOT / ".env"
@@ -57,6 +58,23 @@ class Settings(BaseSettings):
     db_max_overflow: int = Field(default=10, ge=0)
     db_pool_timeout: float = Field(default=30.0, gt=0)
     db_pool_recycle: int = Field(default=1800, ge=-1)
+    auth_secret: str = Field(
+        default=DEFAULT_DEV_AUTH_SECRET,
+        min_length=1,
+        description=(
+            "Secreto HS256 de la cookie/JWT de sesión. El valor por defecto "
+            "solo vale en development."
+        ),
+    )
+    auth_cookie_name: str = Field(default="session", min_length=1)
+    auth_session_ttl_seconds: int = Field(default=60 * 60 * 24 * 7, ge=60)
+    bootstrap_admin_emails: str = Field(
+        default="",
+        description="Lista separada por comas. Esos emails salen de signup como admin.",
+    )
+    auth_argon2_time_cost: int = Field(default=3, ge=1)
+    auth_argon2_memory_cost: int = Field(default=65_536, ge=8_192)
+    auth_argon2_parallelism: int = Field(default=4, ge=1)
 
     def cors_origin_list(self) -> list[str]:
         return [
@@ -119,6 +137,34 @@ class Settings(BaseSettings):
                 "de desarrollo fuera de APP_ENV=development"
             )
         return self
+
+    @model_validator(mode="after")
+    def reject_default_auth_secret(self) -> Self:
+        """El secreto de desarrollo no vale fuera de development."""
+
+        if self.app_env == "development":
+            return self
+        if self.auth_secret == DEFAULT_DEV_AUTH_SECRET:
+            raise ValueError(
+                "AUTH_SECRET no puede usar el valor por defecto de "
+                "desarrollo fuera de APP_ENV=development"
+            )
+        if len(self.auth_secret) < 32:
+            raise ValueError(
+                "AUTH_SECRET debe tener al menos 32 caracteres fuera de "
+                "APP_ENV=development"
+            )
+        return self
+
+    def bootstrap_admin_email_set(self) -> set[str]:
+        return {
+            email.strip().lower()
+            for email in self.bootstrap_admin_emails.split(",")
+            if email.strip()
+        }
+
+    def auth_cookie_secure(self) -> bool:
+        return self.app_env != "development"
 
 
 @lru_cache

@@ -52,6 +52,13 @@ _SETTINGS_ENV = {
     "DB_MAX_OVERFLOW": "10",
     "DB_POOL_TIMEOUT": "30",
     "DB_POOL_RECYCLE": "1800",
+    "AUTH_SECRET": "test-auth-secret-not-the-dev-default",
+    "AUTH_COOKIE_NAME": "session",
+    "AUTH_SESSION_TTL_SECONDS": "604800",
+    "BOOTSTRAP_ADMIN_EMAILS": "",
+    "AUTH_ARGON2_TIME_COST": "1",
+    "AUTH_ARGON2_MEMORY_COST": "8192",
+    "AUTH_ARGON2_PARALLELISM": "1",
 }
 
 PROBE_FILE_BYTES = b"file-response-body\n" * 8
