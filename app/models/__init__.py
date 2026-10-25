@@ -9,6 +9,9 @@ from app.models.base import (
     PersistentMixin,
     PersistentModel,
     attach_updated_at_trigger,
+    qualify_table,
+    quote_ident,
+    updated_at_drop_trigger_sql,
     updated_at_trigger_name,
     updated_at_trigger_sql,
 )
@@ -18,6 +21,9 @@ __all__ = [
     "PersistentMixin",
     "PersistentModel",
     "attach_updated_at_trigger",
+    "qualify_table",
+    "quote_ident",
+    "updated_at_drop_trigger_sql",
     "updated_at_trigger_name",
     "updated_at_trigger_sql",
 ]
