@@ -1,10 +1,13 @@
 import uuid
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models import Course
+from app.models.course import CourseLevel, DefaultGroupMode
 from app.models.user import SystemRole
 from tests.test_auth import unique_email
 from tests.test_roles import (
@@ -366,28 +369,25 @@ async def test_delete_with_courses_is_category_not_empty(
 ) -> None:
     await _admin(session_client, db_session)
     category = await _create(session_client, name="Con cursos")
-    await db_session.execute(
-        text(
-            """
-            CREATE TABLE courses (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                category_id uuid NOT NULL REFERENCES categories(id),
-                deleted_at timestamptz
-            )
-            """
-        )
+    course = Course(
+        short_name="bloqueante",
+        name="Curso que ocupa la categoría",
+        category_id=uuid.UUID(category["id"]),
+        start_date=date(2026, 1, 1),
+        visible=True,
+        level=CourseLevel.BEGINNER,
+        default_group_mode=DefaultGroupMode.NONE,
     )
-    await db_session.execute(
-        text("INSERT INTO courses (category_id) VALUES (:category_id)"),
-        {"category_id": category["id"]},
-    )
+    db_session.add(course)
     await db_session.flush()
 
     blocked = await session_client.delete(f"{_ADMIN}/{category['id']}")
     assert blocked.status_code == 409
     assert blocked.json() == {"error": "category_not_empty"}
 
-    await db_session.execute(text("UPDATE courses SET deleted_at = clock_timestamp()"))
+    stored = await db_session.scalar(select(Course).where(Course.id == course.id))
+    assert stored is not None
+    stored.deleted_at = datetime.now(UTC)
     await db_session.flush()
     allowed = await session_client.delete(f"{_ADMIN}/{category['id']}")
     assert allowed.status_code == 204

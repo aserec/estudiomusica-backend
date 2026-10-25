@@ -43,6 +43,11 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert "/api/v1/admin/categories" in paths
     assert "/api/v1/admin/categories/{category_id}" in paths
     assert "/api/v1/courses/{course_id}/me/permissions" in paths
+    assert "/api/v1/courses/{course_id}" in paths
+    assert "/api/v1/courses/{course_id}/archived" in paths
+    assert "/api/v1/admin/courses" in paths
+    assert "/api/v1/admin/courses/{course_id}" in paths
+    assert "/api/v1/admin/courses/{course_id}/duplicate" in paths
     assert "/api/v1/examples" in paths
     assert "/api/v1/examples/denied" in paths
     assert "/api/v1/examples/too-large" in paths
@@ -176,3 +181,80 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert set(create_props) == {"name", "parentId", "description", "sortOrder"}
     update_props = schemas["CategoryUpdate"]["properties"]
     assert set(update_props) == {"name", "parentId", "description", "sortOrder"}
+
+    course_get = paths["/api/v1/courses/{course_id}"]["get"]
+    assert "200" in course_get["responses"]
+    assert "401" in course_get["responses"]
+    assert "403" in course_get["responses"]
+    assert "404" in course_get["responses"]
+    assert "patch" not in paths["/api/v1/courses/{course_id}"]
+    course_put = paths["/api/v1/courses/{course_id}"]["put"]
+    assert "200" in course_put["responses"]
+    assert "403" in course_put["responses"]
+    assert "409" in course_put["responses"]
+    archived_put = paths["/api/v1/courses/{course_id}/archived"]["put"]
+    assert "200" in archived_put["responses"]
+    admin_list = paths["/api/v1/admin/courses"]["get"]
+    list_params = {param["name"] for param in admin_list["parameters"]}
+    assert {"page", "pageSize", "query", "archived"} <= list_params
+    assert "limit" not in list_params
+    assert "cursor" not in list_params
+    page_size = next(
+        param for param in admin_list["parameters"] if param["name"] == "pageSize"
+    )
+    assert "maximum" not in page_size.get("schema", page_size)
+    admin_post = paths["/api/v1/admin/courses"]["post"]
+    assert "201" in admin_post["responses"]
+    assert "409" in admin_post["responses"]
+    admin_dup = paths["/api/v1/admin/courses/{course_id}/duplicate"]["post"]
+    assert "201" in admin_dup["responses"]
+    admin_delete = paths["/api/v1/admin/courses/{course_id}"]["delete"]
+    assert "204" in admin_delete["responses"]
+    assert "CourseResponse" in schemas
+    assert "CourseCreate" in schemas
+    assert "CourseUpdate" in schemas
+    assert "CourseArchive" in schemas
+    assert "CourseDuplicate" in schemas
+    course_props = schemas["CourseResponse"]["properties"]
+    assert set(course_props) >= {
+        "id",
+        "shortName",
+        "name",
+        "summary",
+        "categoryId",
+        "startDate",
+        "endDate",
+        "visible",
+        "level",
+        "defaultGroupMode",
+        "deletedAt",
+        "archivedAt",
+        "createdAt",
+        "updatedAt",
+    }
+    assert set(schemas["CourseCreate"]["properties"]) == {
+        "shortName",
+        "name",
+        "summary",
+        "categoryId",
+        "startDate",
+        "endDate",
+        "visible",
+        "level",
+        "defaultGroupMode",
+    }
+    assert set(schemas["CourseDuplicate"]["properties"]) == {
+        "shortName",
+        "name",
+        "startDate",
+    }
+    assert set(schemas["CourseArchive"]["properties"]) == {"archived"}
+    level_schema = course_props["level"]
+    level_values = level_schema.get("enum") or level_schema.get("anyOf", [{}])[0].get(
+        "enum"
+    )
+    if level_values is None:
+        ref = (level_schema.get("$ref") or "").rsplit("/", 1)[-1]
+        level_values = schemas.get(ref, {}).get("enum")
+    assert level_values is not None
+    assert set(level_values) == {"beginner", "intermediate", "advanced"}
