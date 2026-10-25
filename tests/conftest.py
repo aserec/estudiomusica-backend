@@ -6,14 +6,14 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from app.db import redact_database_url
+from app.db import get_session, redact_database_url
 from app.exceptions import Validation
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -185,6 +185,13 @@ def _mount_probes(application: FastAPI) -> None:
     def file_probe() -> FileResponse:
         _PROBE_FILE.write_bytes(PROBE_FILE_BYTES)
         return FileResponse(_PROBE_FILE, media_type="application/octet-stream")
+
+    @application.get("/api/v1/_test/session")
+    async def session_probe(
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, str]:
+        await session.execute(text("SELECT 1"))
+        return {"session": "ok"}
 
 
 def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> Iterator[TestClient]:
@@ -428,12 +435,54 @@ async def db_session(
             expire_on_commit=False,
             join_transaction_mode="create_savepoint",
         )
+
+        async def _override_session() -> AsyncIterator[AsyncSession]:
+            yield session
+
+        get_app().dependency_overrides[get_session] = _override_session
         try:
             yield session
         finally:
+            get_app().dependency_overrides.pop(get_session, None)
             await session.close()
             await transaction.rollback()
     await engine.dispose()
     await dispose_engine()
     get_settings.cache_clear()
     get_app.cache_clear()
+
+
+@pytest.fixture
+def session_client(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    require_postgres: str,
+) -> Iterator[TestClient]:
+    """Cliente HTTP con get_session ligado a la transacción de db_session."""
+
+    from app.config import get_settings
+    from app.db import clear_engine
+    from app.main import create_app, get_app
+
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("EXPOSE_ERRORS", "false")
+    monkeypatch.setenv("ENABLE_EXAMPLE_ROUTES", "true")
+    monkeypatch.setenv("DATABASE_URL", require_postgres)
+    get_settings.cache_clear()
+    get_app.cache_clear()
+    clear_engine()
+    application = create_app()
+    _mount_probes(application)
+
+    async def _override_session() -> AsyncIterator[AsyncSession]:
+        yield db_session
+
+    application.dependency_overrides[get_session] = _override_session
+    try:
+        with TestClient(application) as test_client:
+            yield test_client
+    finally:
+        application.dependency_overrides.pop(get_session, None)
+        get_settings.cache_clear()
+        get_app.cache_clear()
+        clear_engine()

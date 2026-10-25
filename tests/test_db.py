@@ -1,0 +1,187 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import String, text
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db import clear_engine, get_session, get_session_factory
+from app.models import PersistentModel
+
+
+class SessionProbe(PersistentModel):
+    """Tabla solo de test para commit/rollback reales."""
+
+    __tablename__ = "session_probes"
+
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+@pytest.mark.asyncio
+async def test_get_session_commits_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = AsyncMock()
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    @asynccontextmanager
+    async def _cm() -> AsyncIterator[AsyncMock]:
+        yield session
+
+    monkeypatch.setattr("app.db.get_session_factory", lambda: _cm)
+    agen = get_session()
+    yielded = await anext(agen)
+    assert yielded is session
+    await agen.aclose()
+    session.commit.assert_awaited_once()
+    session.rollback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_session_rollbacks_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = AsyncMock()
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    @asynccontextmanager
+    async def _cm() -> AsyncIterator[AsyncMock]:
+        yield session
+
+    monkeypatch.setattr("app.db.get_session_factory", lambda: _cm)
+    agen = get_session()
+    await anext(agen)
+    with pytest.raises(RuntimeError, match="boom"):
+        await agen.athrow(RuntimeError("boom"))
+    session.rollback.assert_awaited_once()
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.db
+def test_get_session_override_runs_select(
+    session_client: TestClient,
+) -> None:
+    response = session_client.get("/api/v1/_test/session")
+
+    assert response.status_code == 200
+    assert response.json() == {"session": "ok"}
+
+
+@pytest.mark.db
+async def test_get_session_commits_persistently(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: str,
+    migrated_test_database: None,
+) -> None:
+    from app.config import get_settings
+    from app.db import dispose_engine
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres)
+    get_settings.cache_clear()
+    clear_engine()
+    engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_conn: SessionProbe.__table__.create(
+                    sync_conn, checkfirst=True
+                )
+            )
+
+        agen = get_session()
+        session = await anext(agen)
+        session.add(SessionProbe(label="committed"))
+        await agen.aclose()
+
+        factory = get_session_factory()
+        async with factory() as other:
+            found = await other.scalar(
+                text("SELECT label FROM session_probes WHERE label = 'committed'")
+            )
+            assert found == "committed"
+    finally:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_conn: SessionProbe.__table__.drop(
+                    sync_conn, checkfirst=True
+                )
+            )
+        await engine.dispose()
+        await dispose_engine()
+        get_settings.cache_clear()
+
+
+@pytest.mark.db
+async def test_get_session_rollbacks_persistently(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: str,
+    migrated_test_database: None,
+) -> None:
+    from app.config import get_settings
+    from app.db import dispose_engine
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres)
+    get_settings.cache_clear()
+    clear_engine()
+    engine = create_async_engine(require_postgres, pool_pre_ping=True)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_conn: SessionProbe.__table__.create(
+                    sync_conn, checkfirst=True
+                )
+            )
+
+        agen = get_session()
+        session = await anext(agen)
+        session.add(SessionProbe(label="rolled-back"))
+        await session.flush()
+        with pytest.raises(RuntimeError, match="boom"):
+            await agen.athrow(RuntimeError("boom"))
+
+        factory = get_session_factory()
+        async with factory() as other:
+            found = await other.scalar(
+                text("SELECT label FROM session_probes WHERE label = 'rolled-back'")
+            )
+            assert found is None
+    finally:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_conn: SessionProbe.__table__.drop(
+                    sync_conn, checkfirst=True
+                )
+            )
+        await engine.dispose()
+        await dispose_engine()
+        get_settings.cache_clear()
+
+
+def test_clear_engine_disposes_sync_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.config import get_settings
+    from app import db as db_module
+
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused",
+    )
+    get_settings.cache_clear()
+    clear_engine()
+    engine = db_module.get_engine()
+    disposed = {"called": False}
+    original = engine.sync_engine.dispose
+
+    def _dispose() -> None:
+        disposed["called"] = True
+        original()
+
+    monkeypatch.setattr(engine.sync_engine, "dispose", _dispose)
+    clear_engine()
+    assert disposed["called"] is True
+    assert db_module._engine is None
+    get_settings.cache_clear()

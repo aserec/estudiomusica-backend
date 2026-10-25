@@ -67,11 +67,14 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 
 
 def clear_engine() -> None:
-    """Olvida el motor cacheado sin disponer conexiones (antes de un loop nuevo)."""
+    """Cierra el pool síncrono y olvida el motor cacheado."""
 
     global _engine, _session_factory
+    engine = _engine
     _engine = None
     _session_factory = None
+    if engine is not None:
+        engine.sync_engine.dispose()
 
 
 async def dispose_engine() -> None:
