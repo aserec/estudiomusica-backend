@@ -28,6 +28,8 @@ DOWN_DATABASE_URL = (
     "postgresql+asyncpg://leaky_user:supersecret-password-do-not-leak"
     "@127.0.0.1:1/no_such_db"
 )
+UNUSED_DATABASE_URL = "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused"
+
 _SETTINGS_ENV = {
     "APP_NAME": "EstudioMusica API",
     "APP_ENV": "development",
@@ -41,6 +43,14 @@ _SETTINGS_ENV = {
     "PAGINATION_MAX_PAGE": "10000",
     "PAGINATION_MAX_PAGE_SIZE": "100",
     "MAX_BODY_BYTES": "1048576",
+    "DATABASE_URL": UNUSED_DATABASE_URL,
+    "DB_HEALTH_TIMEOUT": "2",
+    "DB_CONNECT_TIMEOUT": "2",
+    "DB_COMMAND_TIMEOUT": "5",
+    "DB_POOL_SIZE": "5",
+    "DB_MAX_OVERFLOW": "10",
+    "DB_POOL_TIMEOUT": "30",
+    "DB_POOL_RECYCLE": "1800",
 }
 
 PROBE_FILE_BYTES = b"file-response-body\n" * 8

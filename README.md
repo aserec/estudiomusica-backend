@@ -85,7 +85,7 @@ postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
 docker compose up -d
 ```
 
-Eso levanta Postgres 17 en el puerto `5432` y crea dos bases: `estudiomusica` (desarrollo) y `estudiomusica_test` (pytest). Espera a que el healthcheck esté sano:
+Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Las credenciales por defecto del compose se rechazan si `APP_ENV` no es `development`. Espera a que el healthcheck esté sano:
 
 ```bash
 docker compose ps

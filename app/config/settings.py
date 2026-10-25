@@ -5,6 +5,11 @@ from urllib.parse import urlparse
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine.url import make_url
+
+_DEFAULT_DEV_USER = "estudiomusica"
+_DEFAULT_DEV_PASSWORD = "estudiomusica"
+_DEFAULT_DEV_DATABASE = "estudiomusica"
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_FILE = _PROJECT_ROOT / ".env"
@@ -92,6 +97,27 @@ class Settings(BaseSettings):
                     "Origen CORS inválido con credenciales "
                     f"(hace falta http(s)://): {origin}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def reject_default_database_credentials(self) -> Self:
+        """Las credenciales del compose no valen fuera de development."""
+
+        if self.app_env == "development":
+            return self
+        parsed = make_url(self.database_url)
+        database = parsed.database or ""
+        if database.endswith("_test"):
+            return self
+        if (
+            parsed.username == _DEFAULT_DEV_USER
+            and parsed.password == _DEFAULT_DEV_PASSWORD
+            and database == _DEFAULT_DEV_DATABASE
+        ):
+            raise ValueError(
+                "DATABASE_URL no puede usar las credenciales por defecto "
+                "de desarrollo fuera de APP_ENV=development"
+            )
         return self
 
 

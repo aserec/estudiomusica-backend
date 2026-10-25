@@ -81,6 +81,39 @@ def test_database_url_defaults_to_docker_compose(
     assert settings.database_url.endswith("/estudiomusica")
 
 
+def test_default_database_credentials_rejected_outside_development() -> None:
+    with pytest.raises(ValidationError, match="credenciales"):
+        Settings(app_env="production", _env_file=None)
+    with pytest.raises(ValidationError, match="credenciales"):
+        Settings(app_env="staging", _env_file=None)
+
+
+def test_default_database_credentials_allowed_in_development() -> None:
+    settings = Settings(app_env="development", _env_file=None)
+    assert settings.database_url.endswith("/estudiomusica")
+
+
+def test_production_accepts_non_default_database_url() -> None:
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://app:s3cret@db.example:5432/app",
+        _env_file=None,
+    )
+    assert settings.database_url.endswith("/app")
+
+
+def test_production_accepts_default_credentials_on_test_database() -> None:
+    settings = Settings(
+        app_env="production",
+        database_url=(
+            "postgresql+asyncpg://estudiomusica:estudiomusica"
+            "@127.0.0.1:5432/estudiomusica_test"
+        ),
+        _env_file=None,
+    )
+    assert settings.database_url.endswith("/estudiomusica_test")
+
+
 def test_expose_errors_in_production_logs_warning(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
