@@ -224,8 +224,11 @@ async def test_health_db_frozen_after_login_returns_503_quickly(
     parsed = make_url(require_postgres.secret())
     proxy = FreezeAfterLoginProxy(parsed.host or "127.0.0.1", parsed.port or 5432)
     await proxy.start()
-    frozen_url = parsed.set(host="127.0.0.1", port=proxy.port).render_as_string(
-        hide_password=False
+    # El proxy lee el protocolo en claro; asyncpg negocia TLS por defecto.
+    frozen_url = (
+        parsed.set(host="127.0.0.1", port=proxy.port)
+        .update_query_dict({"ssl": "disable"})
+        .render_as_string(hide_password=False)
     )
     monkeypatch.setenv("DATABASE_URL", frozen_url)
     monkeypatch.setenv("DB_HEALTH_TIMEOUT", "0.6")

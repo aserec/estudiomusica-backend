@@ -894,12 +894,14 @@ def migrated_test_database(require_postgres: RedactedDsn) -> Iterator[None]:
     """Aplica las migraciones en la BD de test. Un fallo de migración es error."""
 
     _drop_leftover_test_tables(require_postgres)
+    drop_production_test_role(require_postgres)
     apply_test_migrations(require_postgres)
     try:
         yield
     finally:
         from app.config import get_settings
 
+        drop_production_test_role(require_postgres)
         _drop_leftover_test_tables(require_postgres)
         get_settings.cache_clear()
 

@@ -122,7 +122,7 @@ def test_make_alembic_config_loads_packaged_ini() -> None:
     assert loaded == packaged_alembic_ini().resolve()
     assert loaded.parent.name == "app"
     assert "prepend_sys_path = ." not in loaded.read_text()
-    assert ScriptDirectory.from_config(config).get_heads() == ["0001_initial"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["0002_auth_users"]
 
 
 def test_alembic_config_does_not_prepend_cwd_app(
@@ -140,7 +140,7 @@ def test_alembic_config_does_not_prepend_cwd_app(
     monkeypatch.chdir(tmp_path)
     config = make_alembic_config()
     assert (config.get_main_option("prepend_sys_path") or "") == ""
-    assert ScriptDirectory.from_config(config).get_heads() == ["0001_initial"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["0002_auth_users"]
 
 
 def test_alembic_config_escapes_percent_in_password() -> None:

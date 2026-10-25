@@ -195,6 +195,23 @@ def test_allow_test_database_opt_in_is_only_via_monkeypatch(
     assert settings.auth_cookie_secure() is True
 
 
+def test_allow_test_database_still_rejects_default_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.config.settings.allow_test_database", lambda: True)
+    with pytest.raises(ValidationError, match="usuario") as caught:
+        Settings(
+            app_env="production",
+            database_url=(
+                "postgresql+asyncpg://estudiomusica:otra-clave"
+                "@db.example:5432/estudiomusica_test"
+            ),
+            auth_secret="production-auth-secret-at-least-32ch",
+            _env_file=None,
+        )
+    assert "otra-clave" not in str(caught.value)
+
+
 def test_production_accepts_non_default_database_url() -> None:
     settings = Settings(
         app_env="production",

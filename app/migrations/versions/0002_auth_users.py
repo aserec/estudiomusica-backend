@@ -4,8 +4,9 @@ Revision ID: 0002_auth_users
 Revises: 0001_initial
 Create Date: 2026-10-25
 
-Crea `citext`, `users` y `auth_sessions`, y monta el trigger
-`set_updated_at()` de 0001 en ambas tablas.
+Crea `citext` si falta, `users` y `auth_sessions`. 0001 solo crea
+la función `set_updated_at()`; esta revisión monta el trigger
+(quoted, schema `public`) en ambas tablas.
 """
 
 from collections.abc import Sequence
