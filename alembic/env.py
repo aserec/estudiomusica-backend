@@ -1,4 +1,8 @@
-"""Configuración async de Alembic. El DSN sale de Settings.database_url."""
+"""Configuración async de Alembic.
+
+El DSN sale de ``sqlalchemy.url`` (alembic.ini o ``set_main_option``)
+si está definido; si no, de ``Settings.database_url``.
+"""
 
 import asyncio
 from logging.config import fileConfig
@@ -20,6 +24,9 @@ target_metadata = Base.metadata
 
 
 def get_database_url() -> str:
+    configured = (config.get_main_option("sqlalchemy.url") or "").strip()
+    if configured:
+        return configured
     get_settings.cache_clear()
     return get_settings().database_url
 
@@ -30,6 +37,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        compare_server_default=True,
     )
 
     with context.begin_transaction():
@@ -37,7 +45,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_server_default=True,
+    )
 
     with context.begin_transaction():
         context.run_migrations()
