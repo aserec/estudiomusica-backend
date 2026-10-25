@@ -1,17 +1,21 @@
+import base64
+import json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.passwords import dummy_hash_for, hash_password, verify_password
-from app.auth.tokens import encode_session_token
+from app.auth.tokens import TokenError, decode_session_token, encode_session_token
 from app.config import get_settings
 from app.models import AuthSession, User
 from app.schemas.auth import SignUpRequest
+from tests.conftest import PRODUCTION_AUTH_SECRET
 
 pytestmark = pytest.mark.db
 
@@ -57,6 +61,30 @@ def assert_public_user(payload: dict[str, Any], *, email: str, name: str) -> Non
 def set_cookie_header(response: Any) -> str:
     header = response.headers.get("set-cookie", "")
     return header if isinstance(header, str) else str(header)
+
+
+def unsigned_alg_none_token(
+    *,
+    user_id: uuid.UUID | None = None,
+    session_id: uuid.UUID | None = None,
+) -> str:
+    def _b64url(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+    now = datetime.now(UTC)
+    header = _b64url(b'{"alg":"none","typ":"JWT"}')
+    payload = _b64url(
+        json.dumps(
+            {
+                "sub": str(user_id or uuid.uuid4()),
+                "jti": str(session_id or uuid.uuid4()),
+                "iat": int(now.timestamp()),
+                "exp": int((now + timedelta(hours=1)).timestamp()),
+            },
+            separators=(",", ":"),
+        ).encode()
+    )
+    return f"{header}.{payload}."
 
 
 async def test_signup_creates_alumno_and_session(session_client: Any) -> None:
@@ -292,7 +320,7 @@ async def test_me_rejects_expired_or_tampered_token(session_client: Any) -> None
     token = created.cookies["session"]
     tampered = token[:-2] + ("A" if token[-1] != "A" else "B")
     expired = encode_session_token(
-        secret=get_settings().auth_secret,
+        secret=get_settings().resolved_auth_secret(),
         user_id=uuid.uuid4(),
         session_id=uuid.uuid4(),
         issued_at=datetime.now(UTC) - timedelta(hours=2),
@@ -307,7 +335,7 @@ async def test_me_rejects_expired_or_tampered_token(session_client: Any) -> None
         assert response.status_code == 401
         assert response.json() == {"error": "unauthorized"}
         assert bad not in response.text
-        assert get_settings().auth_secret not in response.text
+        assert get_settings().resolved_auth_secret() not in response.text
 
 
 async def test_logout_revokes_session_and_clears_cookie(session_client: Any) -> None:
@@ -383,12 +411,10 @@ async def test_failed_login_does_not_log_secrets(
         )
     assert response.status_code == 401
     assert "secret-pass" not in caplog.text
-    assert get_settings().auth_secret not in caplog.text
+    assert get_settings().resolved_auth_secret() not in caplog.text
 
 
 def test_production_cookie_sets_secure() -> None:
-    """Production rechaza bases *_test; el flag Secure se cubre sin DSN de test."""
-
     from fastapi import Response
 
     from app.auth.cookies import attach_session_cookie
@@ -406,6 +432,84 @@ def test_production_cookie_sets_secure() -> None:
     assert "HttpOnly" in cookie
     assert "Secure" in cookie
     assert "samesite=lax" in cookie.lower()
+
+
+def test_decode_rejects_alg_none_token() -> None:
+    with pytest.raises(TokenError):
+        decode_session_token(
+            unsigned_alg_none_token(),
+            "any-secret-value-not-used-for-alg-none",
+        )
+
+
+async def test_me_rejects_alg_none_token(session_client: Any) -> None:
+    token = unsigned_alg_none_token()
+    response = await session_client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 401
+    assert response.json() == {"error": "unauthorized"}
+    assert token not in response.text
+
+
+def test_production_auth_signup_login_me_logout(
+    production_client: TestClient,
+) -> None:
+    email = unique_email("prod")
+    created = production_client.post(
+        "/api/v1/auth/signup", json=signup_body(email=email)
+    )
+    assert created.status_code == 201
+    assert_public_user(created.json()["user"], email=email, name="Ada Lovelace")
+    cookie = set_cookie_header(created)
+    assert "session=" in cookie
+    assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    assert "samesite=lax" in cookie.lower()
+    assert PRODUCTION_AUTH_SECRET not in created.text
+
+    logged_out = production_client.post("/api/v1/auth/logout")
+    assert logged_out.status_code == 204
+
+    login = production_client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": PASSWORD},
+    )
+    assert login.status_code == 200
+    login_cookie = set_cookie_header(login)
+    assert "HttpOnly" in login_cookie
+    assert "Secure" in login_cookie
+    assert "samesite=lax" in login_cookie.lower()
+
+    me = production_client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["user"]["email"] == email
+    assert me.json()["systemRole"] == "alumno"
+    assert me.json()["isAdmin"] is False
+
+    boom = production_client.get("/api/v1/_test/boom")
+    assert boom.status_code == 500
+    assert boom.json() == {"error": "internal_error"}
+    assert "message" not in boom.json()
+    assert "secret-leak" not in boom.text
+    assert PRODUCTION_AUTH_SECRET not in boom.text
+    assert "Traceback" not in boom.text
+
+    wrong = production_client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": "wrong-password"},
+    )
+    assert wrong.status_code == 401
+    assert wrong.json() == {"error": "invalid_credentials"}
+    assert "wrong-password" not in wrong.text
+    assert "argon2" not in wrong.text
+    assert PRODUCTION_AUTH_SECRET not in wrong.text
+
+    logout = production_client.post("/api/v1/auth/logout")
+    assert logout.status_code == 204
+    assert production_client.get("/api/v1/auth/me").status_code == 401
+    assert production_client.get("/api/v1/examples").status_code == 404
 
 
 async def test_auth_session_row_is_created(

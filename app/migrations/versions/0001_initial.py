@@ -5,9 +5,9 @@ Revises:
 Create Date: 2026-10-25
 
 No se instala pgcrypto: en Postgres >= 13 ``gen_random_uuid()`` es nativa.
-``PersistentModel`` monta ``BEFORE UPDATE ... set_updated_at()`` al crear
-cada tabla. Las migraciones de negocio pueden usar
-``updated_at_trigger_sql`` / ``attach_updated_at_trigger``.
+Las tablas ``PersistentModel`` montan el trigger en las revisiones
+(``op_create_updated_at_trigger`` / hook de autogenerate). ``after_create``
+solo aplica a ``create_all`` en tests.
 """
 
 from collections.abc import Sequence
@@ -21,20 +21,34 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute(
-        """
-        CREATE FUNCTION set_updated_at()
-        RETURNS trigger
-        LANGUAGE plpgsql
-        AS $$
-        BEGIN
-          NEW.updated_at = clock_timestamp();
-          RETURN NEW;
-        END;
-        $$;
-        """
-    )
+    try:
+        op.execute(
+            """
+            CREATE FUNCTION set_updated_at()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+              NEW.updated_at = clock_timestamp();
+              RETURN NEW;
+            END;
+            $$;
+            """
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "No se pudo crear set_updated_at(). Si la función ya existe, "
+            "0001 no se puede relanzar sobre una base a medio migrar: "
+            "revisa alembic_version o elimina la función a mano."
+        ) from exc
 
 
 def downgrade() -> None:
-    op.execute("DROP FUNCTION IF EXISTS set_updated_at()")
+    try:
+        op.execute("DROP FUNCTION IF EXISTS set_updated_at()")
+    except Exception as exc:
+        raise RuntimeError(
+            "No se pudo eliminar set_updated_at(). Hay triggers de negocio "
+            "que dependen de ella: haz downgrade de esas revisiones "
+            "antes de bajar a base."
+        ) from exc

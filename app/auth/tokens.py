@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import jwt
 from fastapi import Request
+from pydantic import SecretStr
 
 from app.config import Settings
 
@@ -23,9 +24,15 @@ class SessionClaims:
     expires_at: datetime
 
 
+def _raw_secret(secret: str | SecretStr) -> str:
+    if isinstance(secret, SecretStr):
+        return secret.get_secret_value()
+    return secret
+
+
 def encode_session_token(
     *,
-    secret: str,
+    secret: str | SecretStr,
     user_id: uuid.UUID,
     session_id: uuid.UUID,
     issued_at: datetime,
@@ -37,14 +44,14 @@ def encode_session_token(
         "iat": issued_at,
         "exp": expires_at,
     }
-    return jwt.encode(payload, secret, algorithm=_ALGORITHM)
+    return jwt.encode(payload, _raw_secret(secret), algorithm=_ALGORITHM)
 
 
-def decode_session_token(token: str, secret: str) -> SessionClaims:
+def decode_session_token(token: str, secret: str | SecretStr) -> SessionClaims:
     try:
         payload = jwt.decode(
             token,
-            secret,
+            _raw_secret(secret),
             algorithms=[_ALGORITHM],
             options={"require": ["sub", "jti", "exp"]},
         )

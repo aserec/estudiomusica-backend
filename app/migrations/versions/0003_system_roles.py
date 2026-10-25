@@ -5,8 +5,9 @@ Revises: 0002_auth_users
 Create Date: 2026-10-25
 
 Crea ``system_roles`` (id slug), siembra alumno/profesor/profesor_adjunto/
-admin, añade ``users.system_role_id`` y ``course_memberships``. No toca
-0001 ni 0002. Monta ``set_updated_at()`` en las tablas nuevas.
+admin con ``INSERT ... ON CONFLICT DO NOTHING``, añade
+``users.system_role_id`` y ``course_memberships``. No toca 0001 ni 0002.
+Monta ``set_updated_at()`` con ``op_create_updated_at_trigger``.
 """
 
 from collections.abc import Sequence
@@ -14,7 +15,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-from app.models import updated_at_trigger_name, updated_at_trigger_sql
+from app.migrations.ops import op_create_updated_at_trigger, op_drop_updated_at_trigger
 
 revision: str = "0003_system_roles"
 down_revision: str | None = "0002_auth_users"
@@ -62,26 +63,14 @@ def upgrade() -> None:
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_system_roles"),
     )
-    op.bulk_insert(
-        sa.table(
-            "system_roles",
-            sa.column("id", sa.String),
-            sa.column("name", sa.String),
-            sa.column("sort_order", sa.Integer),
-            sa.column("is_system", sa.Boolean),
-            sa.column("active", sa.Boolean),
-        ),
-        [
-            {
-                "id": role_id,
-                "name": name,
-                "sort_order": sort_order,
-                "is_system": True,
-                "active": True,
-            }
-            for role_id, name, sort_order in _SYSTEM_ROLES
-        ],
-    )
+    for role_id, name, sort_order in _SYSTEM_ROLES:
+        op.execute(
+            sa.text(
+                "INSERT INTO system_roles (id, name, sort_order, is_system, active) "
+                "VALUES (:id, :name, :sort_order, true, true) "
+                "ON CONFLICT (id) DO NOTHING"
+            ).bindparams(id=role_id, name=name, sort_order=sort_order)
+        )
     op.add_column(
         "users",
         sa.Column("system_role_id", sa.String(length=64), nullable=True),
@@ -165,19 +154,13 @@ def upgrade() -> None:
         WHERE deleted_at IS NULL
         """
     )
-    op.execute(updated_at_trigger_sql("system_roles"))
-    op.execute(updated_at_trigger_sql("course_memberships"))
+    op_create_updated_at_trigger("system_roles")
+    op_create_updated_at_trigger("course_memberships")
 
 
 def downgrade() -> None:
-    op.execute(
-        f"DROP TRIGGER IF EXISTS {updated_at_trigger_name('course_memberships')} "
-        "ON course_memberships"
-    )
-    op.execute(
-        f"DROP TRIGGER IF EXISTS {updated_at_trigger_name('system_roles')} "
-        "ON system_roles"
-    )
+    op_drop_updated_at_trigger("course_memberships")
+    op_drop_updated_at_trigger("system_roles")
     op.execute("DROP INDEX IF EXISTS uq_course_memberships_user_course_active")
     op.drop_index(
         "ix_course_memberships_course_id",

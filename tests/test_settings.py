@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from pydantic import ValidationError
 
@@ -128,18 +130,17 @@ def test_production_rejects_default_password_with_other_user(
     get_settings.cache_clear()
 
 
-def test_production_rejects_test_database_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv(
-        "DATABASE_URL",
-        "postgresql+asyncpg://app:s3cret@127.0.0.1:5432/estudiomusica_test",
+def test_production_accepts_test_database_with_non_default_password() -> None:
+    settings = Settings(
+        app_env="production",
+        database_url=(
+            "postgresql+asyncpg://app:s3cret@127.0.0.1:5432/estudiomusica_test"
+        ),
+        auth_secret="production-auth-secret-at-least-32ch",
+        _env_file=None,
     )
-    get_settings.cache_clear()
-    with pytest.raises(ValidationError, match=r"\*_test"):
-        Settings()
-    get_settings.cache_clear()
+    assert settings.resolved_database_url().endswith("/estudiomusica_test")
+    assert settings.auth_cookie_secure() is True
 
 
 def test_production_accepts_non_default_database_url() -> None:
@@ -167,6 +168,83 @@ def test_invalid_database_url_does_not_leak_password(
     get_settings.cache_clear()
 
 
+def test_production_rejects_query_password_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?password=estudiomusica",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="contraseña") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    assert "estudiomusica" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_production_rejects_query_user_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?user=estudiomusica",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="usuario") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_production_rejects_query_database_test_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?database=x_test",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match=r"\*_test") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_production_rejects_query_dbname_test_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?dbname=x_test",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match=r"\*_test"):
+        Settings()
+    get_settings.cache_clear()
+
+
+def test_short_dsn_password_is_hidden_in_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        f"postgresql+asyncpg://a:{_SECRET}@h/app?database=d_test",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    text = str(caught.value)
+    assert _SECRET not in text
+    assert "input_value" not in text
+    get_settings.cache_clear()
+
+
 _DEFAULT_DEV_AUTH_SECRET = "dev-insecure-auth-secret-change-me"
 
 
@@ -176,23 +254,29 @@ def test_default_auth_secret_rejected_outside_development(
     monkeypatch.setenv("AUTH_SECRET", _DEFAULT_DEV_AUTH_SECRET)
     monkeypatch.setenv("APP_ENV", "production")
     get_settings.cache_clear()
-    with pytest.raises(ValidationError, match="AUTH_SECRET"):
+    with pytest.raises(ValidationError, match="AUTH_SECRET") as caught:
         Settings()
+    assert _DEFAULT_DEV_AUTH_SECRET not in str(caught.value)
+    assert _DEFAULT_DEV_AUTH_SECRET not in repr(caught.value)
     monkeypatch.setenv("APP_ENV", "staging")
     get_settings.cache_clear()
-    with pytest.raises(ValidationError, match="AUTH_SECRET"):
+    with pytest.raises(ValidationError, match="AUTH_SECRET") as caught:
         Settings()
+    assert _DEFAULT_DEV_AUTH_SECRET not in str(caught.value)
     get_settings.cache_clear()
 
 
 def test_short_auth_secret_rejected_outside_development() -> None:
-    with pytest.raises(ValidationError, match="32"):
+    leaked = "too-short-to-be-safe"
+    with pytest.raises(ValidationError, match="32") as caught:
         Settings(
             app_env="production",
             database_url="postgresql+asyncpg://app:s3cret@db.example:5432/app",
-            auth_secret="too-short-to-be-safe",
+            auth_secret=leaked,
             _env_file=None,
         )
+    assert leaked not in str(caught.value)
+    assert leaked not in repr(caught.value)
 
 
 def test_default_auth_secret_allowed_in_development(
@@ -202,7 +286,7 @@ def test_default_auth_secret_allowed_in_development(
     monkeypatch.setenv("APP_ENV", "development")
     get_settings.cache_clear()
     settings = Settings()
-    assert settings.auth_secret == _DEFAULT_DEV_AUTH_SECRET
+    assert settings.resolved_auth_secret() == _DEFAULT_DEV_AUTH_SECRET
     assert settings.auth_cookie_secure() is False
     get_settings.cache_clear()
 
@@ -227,6 +311,25 @@ def test_assistant_media_flag_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
     settings = Settings()
     assert settings.assistant_media_and_sm3_visible is True
+    get_settings.cache_clear()
+
+
+def test_auth_secret_is_hidden_in_settings_repr() -> None:
+    leaked = "super-secret-value-that-must-not-leak-32"
+    settings = Settings(auth_secret=leaked, _env_file=None)
+    assert leaked not in repr(settings)
+    assert leaked not in str(settings)
+
+
+def test_invalid_auth_secret_is_not_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AUTH_SECRET", _DEFAULT_DEV_AUTH_SECRET)
+    get_settings.cache_clear()
+    with caplog.at_level(logging.DEBUG), pytest.raises(ValidationError):
+        Settings()
+    assert _DEFAULT_DEV_AUTH_SECRET not in caplog.text
     get_settings.cache_clear()
 
 

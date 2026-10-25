@@ -8,6 +8,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine.url import make_url
 
 _DEFAULT_DEV_PASSWORD = "estudiomusica"
+_DEFAULT_DEV_USER = "estudiomusica"
+_DATABASE_NAME_QUERY_KEYS = ("database", "dbname")
 DEFAULT_DEV_AUTH_SECRET = "dev-insecure-auth-secret-change-me"
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +26,7 @@ class Settings(BaseSettings):
         env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_name: str = "EstudioMusica API"
@@ -57,13 +60,14 @@ class Settings(BaseSettings):
     db_max_overflow: int = Field(default=10, ge=0)
     db_pool_timeout: float = Field(default=30.0, gt=0)
     db_pool_recycle: int = Field(default=1800, ge=-1)
-    auth_secret: str = Field(
-        default=DEFAULT_DEV_AUTH_SECRET,
+    auth_secret: SecretStr = Field(
+        default=SecretStr(DEFAULT_DEV_AUTH_SECRET),
         min_length=1,
         description=(
             "Secreto HS256 de la cookie/JWT de sesión. El valor por defecto "
             "solo vale en development."
         ),
+        repr=False,
     )
     auth_cookie_name: str = Field(default="session", min_length=1)
     auth_session_ttl_seconds: int = Field(default=60 * 60 * 24 * 7, ge=60)
@@ -109,6 +113,9 @@ class Settings(BaseSettings):
     def resolved_database_url(self) -> str:
         return self.database_url.get_secret_value()
 
+    def resolved_auth_secret(self) -> str:
+        return self.auth_secret.get_secret_value()
+
     @model_validator(mode="after")
     def reject_unsafe_cors(self) -> Self:
         if not self.cors_allow_credentials:
@@ -126,9 +133,28 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @staticmethod
+    def _query_value(parsed: object, *keys: str) -> str | None:
+        query = getattr(parsed, "query", {}) or {}
+        lowered = {str(key).lower(): value for key, value in query.items()}
+        for key in keys:
+            value = lowered.get(key)
+            if value is None:
+                continue
+            if isinstance(value, list | tuple):
+                return str(value[0]) if value else None
+            return str(value)
+        return None
+
     @model_validator(mode="after")
     def reject_default_database_credentials(self) -> Self:
-        """Las credenciales y bases de test no valen fuera de development."""
+        """Las credenciales de desarrollo no valen fuera de development.
+
+        asyncpg acepta ``password``, ``user``, ``database`` y ``dbname``
+        en la query; se aplican como override del DSN antes de validar.
+        Un ``*_test`` en el path se admite con credenciales no por defecto
+        (fixture ``production_client``). El override por query no.
+        """
 
         if self.app_env == "development":
             return self
@@ -136,13 +162,16 @@ class Settings(BaseSettings):
             parsed = make_url(self.resolved_database_url())
         except Exception:
             raise ValueError("DATABASE_URL no es un DSN válido") from None
-        database = parsed.database or ""
-        if parsed.password == _DEFAULT_DEV_PASSWORD:
+        query_password = self._query_value(parsed, "password")
+        query_user = self._query_value(parsed, "user")
+        query_database = self._query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
+        password = query_password or parsed.password
+        if password == _DEFAULT_DEV_PASSWORD or query_user == _DEFAULT_DEV_USER:
             raise ValueError(
-                "DATABASE_URL no puede usar la contraseña por defecto "
-                "de desarrollo fuera de APP_ENV=development"
+                "DATABASE_URL no puede usar la contraseña o el usuario "
+                "por defecto de desarrollo fuera de APP_ENV=development"
             )
-        if database.endswith("_test"):
+        if query_database and query_database.endswith("_test"):
             raise ValueError(
                 "DATABASE_URL no puede apuntar a una base *_test "
                 "fuera de APP_ENV=development"
@@ -155,12 +184,13 @@ class Settings(BaseSettings):
 
         if self.app_env == "development":
             return self
-        if self.auth_secret == DEFAULT_DEV_AUTH_SECRET:
+        secret = self.resolved_auth_secret()
+        if secret == DEFAULT_DEV_AUTH_SECRET:
             raise ValueError(
                 "AUTH_SECRET no puede usar el valor por defecto de "
                 "desarrollo fuera de APP_ENV=development"
             )
-        if len(self.auth_secret) < 32:
+        if len(secret) < 32:
             raise ValueError(
                 "AUTH_SECRET debe tener al menos 32 caracteres fuera de "
                 "APP_ENV=development"

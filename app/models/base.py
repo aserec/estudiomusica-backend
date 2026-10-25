@@ -56,10 +56,10 @@ class PersistentMixin:
     - ``id``: UUID (texto UUID en JSON; tipo UUID en Postgres).
     - ``created_at`` / ``updated_at``: ``clock_timestamp()``, no ``now()``.
       ``now()`` es la hora de inicio de transacción y el SQL crudo no
-      actualiza ``updated_at``. ``PersistentModel`` monta
-      ``BEFORE UPDATE ... EXECUTE FUNCTION set_updated_at()`` al crear
-      la tabla (evento ``after_create``). Las migraciones de negocio
-      pueden reutilizar ``updated_at_trigger_sql``.
+      actualiza ``updated_at``. En producción el trigger lo montan las
+      migraciones (``op_create_updated_at_trigger`` / hook de
+      autogenerate). El evento ``after_create`` solo cubre ``create_all``
+      en tests; no corre con ``alembic upgrade``.
     - ``deleted_at``: borrado lógico (NULL = vigente). Sin índice genérico:
       un B-tree sobre toda la columna no ayuda a listar vigentes. Quien
       filtre ``deleted_at IS NULL`` debe añadir un índice parcial.
@@ -103,4 +103,7 @@ class PersistentModel(PersistentMixin, Base):
         table = getattr(cls, "__table__", None)
         if table is None:
             return
+        # Solo ``metadata.create_all`` (tests). Alembic no dispara after_create:
+        # el hook de autogenerate / ``op_create_updated_at_trigger`` monta el
+        # mismo trigger en las revisiones.
         event.listen(table, "after_create", _after_create_updated_at_trigger)
