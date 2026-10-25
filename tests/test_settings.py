@@ -167,6 +167,83 @@ def test_invalid_database_url_does_not_leak_password(
     get_settings.cache_clear()
 
 
+def test_production_rejects_query_password_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?password=estudiomusica",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="contraseña") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    assert "estudiomusica" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_production_rejects_query_user_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?user=estudiomusica",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="usuario") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_production_rejects_query_database_test_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?database=x_test",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match=r"\*_test") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_production_rejects_query_dbname_test_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?dbname=x_test",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match=r"\*_test"):
+        Settings()
+    get_settings.cache_clear()
+
+
+def test_short_dsn_password_is_hidden_in_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        f"postgresql+asyncpg://a:{_SECRET}@h/d_test",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    text = str(caught.value)
+    assert _SECRET not in text
+    assert "input_value" not in text
+    get_settings.cache_clear()
+
+
 def test_expose_errors_in_production_logs_warning(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

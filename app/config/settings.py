@@ -8,6 +8,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine.url import make_url
 
 _DEFAULT_DEV_PASSWORD = "estudiomusica"
+_DEFAULT_DEV_USER = "estudiomusica"
+_DATABASE_NAME_QUERY_KEYS = ("database", "dbname")
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_FILE = _PROJECT_ROOT / ".env"
@@ -23,6 +25,7 @@ class Settings(BaseSettings):
         env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_name: str = "EstudioMusica API"
@@ -101,9 +104,26 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @staticmethod
+    def _query_value(parsed: object, *keys: str) -> str | None:
+        query = getattr(parsed, "query", {}) or {}
+        lowered = {str(key).lower(): value for key, value in query.items()}
+        for key in keys:
+            value = lowered.get(key)
+            if value is None:
+                continue
+            if isinstance(value, (list, tuple)):
+                return str(value[0]) if value else None
+            return str(value)
+        return None
+
     @model_validator(mode="after")
     def reject_default_database_credentials(self) -> Self:
-        """Las credenciales y bases de test no valen fuera de development."""
+        """Las credenciales y bases de test no valen fuera de development.
+
+        asyncpg acepta ``password``, ``user``, ``database`` y ``dbname``
+        en la query; se aplican como override del DSN antes de validar.
+        """
 
         if self.app_env == "development":
             return self
@@ -111,11 +131,18 @@ class Settings(BaseSettings):
             parsed = make_url(self.resolved_database_url())
         except Exception:
             raise ValueError("DATABASE_URL no es un DSN válido") from None
-        database = parsed.database or ""
-        if parsed.password == _DEFAULT_DEV_PASSWORD:
+        query_password = self._query_value(parsed, "password")
+        query_user = self._query_value(parsed, "user")
+        password = query_password or parsed.password
+        database = (
+            self._query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
+            or parsed.database
+            or ""
+        )
+        if password == _DEFAULT_DEV_PASSWORD or query_user == _DEFAULT_DEV_USER:
             raise ValueError(
-                "DATABASE_URL no puede usar la contraseña por defecto "
-                "de desarrollo fuera de APP_ENV=development"
+                "DATABASE_URL no puede usar la contraseña o el usuario "
+                "por defecto de desarrollo fuera de APP_ENV=development"
             )
         if database.endswith("_test"):
             raise ValueError(
