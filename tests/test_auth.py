@@ -1,3 +1,5 @@
+import base64
+import json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -9,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.passwords import dummy_hash_for, hash_password, verify_password
-from app.auth.tokens import encode_session_token
+from app.auth.tokens import TokenError, decode_session_token, encode_session_token
 from app.config import get_settings
 from app.models import AuthSession, User
 from app.schemas.auth import SignUpRequest
@@ -59,6 +61,30 @@ def assert_public_user(payload: dict[str, Any], *, email: str, name: str) -> Non
 def set_cookie_header(response: Any) -> str:
     header = response.headers.get("set-cookie", "")
     return header if isinstance(header, str) else str(header)
+
+
+def unsigned_alg_none_token(
+    *,
+    user_id: uuid.UUID | None = None,
+    session_id: uuid.UUID | None = None,
+) -> str:
+    def _b64url(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+    now = datetime.now(UTC)
+    header = _b64url(b'{"alg":"none","typ":"JWT"}')
+    payload = _b64url(
+        json.dumps(
+            {
+                "sub": str(user_id or uuid.uuid4()),
+                "jti": str(session_id or uuid.uuid4()),
+                "iat": int(now.timestamp()),
+                "exp": int((now + timedelta(hours=1)).timestamp()),
+            },
+            separators=(",", ":"),
+        ).encode()
+    )
+    return f"{header}.{payload}."
 
 
 async def test_signup_creates_alumno_and_session(session_client: Any) -> None:
@@ -406,6 +432,25 @@ def test_production_cookie_sets_secure() -> None:
     assert "HttpOnly" in cookie
     assert "Secure" in cookie
     assert "samesite=lax" in cookie.lower()
+
+
+def test_decode_rejects_alg_none_token() -> None:
+    with pytest.raises(TokenError):
+        decode_session_token(
+            unsigned_alg_none_token(),
+            "any-secret-value-not-used-for-alg-none",
+        )
+
+
+async def test_me_rejects_alg_none_token(session_client: Any) -> None:
+    token = unsigned_alg_none_token()
+    response = await session_client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 401
+    assert response.json() == {"error": "unauthorized"}
+    assert token not in response.text
 
 
 def test_production_auth_signup_login_me_logout(
