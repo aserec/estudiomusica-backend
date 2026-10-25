@@ -27,8 +27,11 @@ async def check_database() -> DatabaseHealthResponse:
     try:
         async with asyncio.timeout(settings.db_health_timeout):
             engine = get_engine()
-            async with engine.connect() as connection:
+            connection = await engine.connect()
+            try:
                 await connection.execute(text("SELECT 1"))
+            finally:
+                await connection.close()
     except Exception as exc:
         logger.warning("database health check failed: %s", type(exc).__name__)
         return DatabaseHealthResponse(db="down")

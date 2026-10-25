@@ -14,6 +14,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
+from app.models import updated_at_trigger_name, updated_at_trigger_sql
+
 revision: str = "0003_system_roles"
 down_revision: str | None = "0002_auth_users"
 branch_labels: str | Sequence[str] | None = None
@@ -163,27 +165,19 @@ def upgrade() -> None:
         WHERE deleted_at IS NULL
         """
     )
-    op.execute(
-        """
-        CREATE TRIGGER system_roles_set_updated_at
-        BEFORE UPDATE ON system_roles
-        FOR EACH ROW EXECUTE FUNCTION set_updated_at()
-        """
-    )
-    op.execute(
-        """
-        CREATE TRIGGER course_memberships_set_updated_at
-        BEFORE UPDATE ON course_memberships
-        FOR EACH ROW EXECUTE FUNCTION set_updated_at()
-        """
-    )
+    op.execute(updated_at_trigger_sql("system_roles"))
+    op.execute(updated_at_trigger_sql("course_memberships"))
 
 
 def downgrade() -> None:
     op.execute(
-        "DROP TRIGGER IF EXISTS course_memberships_set_updated_at ON course_memberships"
+        f"DROP TRIGGER IF EXISTS {updated_at_trigger_name('course_memberships')} "
+        "ON course_memberships"
     )
-    op.execute("DROP TRIGGER IF EXISTS system_roles_set_updated_at ON system_roles")
+    op.execute(
+        f"DROP TRIGGER IF EXISTS {updated_at_trigger_name('system_roles')} "
+        "ON system_roles"
+    )
     op.execute("DROP INDEX IF EXISTS uq_course_memberships_user_course_active")
     op.drop_index(
         "ix_course_memberships_course_id",

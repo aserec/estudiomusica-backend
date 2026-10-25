@@ -386,15 +386,22 @@ async def test_failed_login_does_not_log_secrets(
     assert get_settings().auth_secret not in caplog.text
 
 
-def test_production_cookie_sets_secure(
-    production_db_client: Any,
-) -> None:
-    email = unique_email("prod")
-    response = production_db_client.post(
-        "/api/v1/auth/signup",
-        json=signup_body(email=email),
+def test_production_cookie_sets_secure() -> None:
+    """Production rechaza bases *_test; el flag Secure se cubre sin DSN de test."""
+
+    from fastapi import Response
+
+    from app.auth.cookies import attach_session_cookie
+    from app.config import Settings
+
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://app:s3cret@db.example:5432/app",
+        auth_secret="production-auth-secret-at-least-32ch",
+        _env_file=None,
     )
-    assert response.status_code == 201
+    response = Response()
+    attach_session_cookie(response, "dummy-token", settings)
     cookie = set_cookie_header(response)
     assert "HttpOnly" in cookie
     assert "Secure" in cookie

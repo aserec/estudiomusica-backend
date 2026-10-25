@@ -19,7 +19,10 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 def redact_database_url(url: str) -> str:
     """DSN sin contraseña, para logs y mensajes de error."""
 
-    return make_url(url).render_as_string(hide_password=True)
+    try:
+        return make_url(url).render_as_string(hide_password=True)
+    except Exception:
+        return "<dsn-redactado>"
 
 
 def get_engine() -> AsyncEngine:
@@ -29,7 +32,7 @@ def get_engine() -> AsyncEngine:
     if _engine is None:
         settings = get_settings()
         _engine = create_async_engine(
-            settings.database_url,
+            settings.resolved_database_url(),
             pool_pre_ping=True,
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,

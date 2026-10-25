@@ -9,7 +9,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models import PersistentModel
+from app.models import PersistentModel, updated_at_trigger_name
 
 
 class MixinProbe(PersistentModel):
@@ -81,6 +81,62 @@ async def test_persistent_mixin_soft_delete(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.db
+async def test_persistent_model_table_has_updated_at_trigger(
+    db_session: AsyncSession,
+) -> None:
+    connection = await db_session.connection()
+    probe_table = MixinProbe.__table__
+    assert isinstance(probe_table, Table)
+    await connection.run_sync(probe_table.create)
+
+    trigger = await db_session.scalar(
+        text(
+            "SELECT tgname FROM pg_trigger "
+            "WHERE tgrelid = 'mixin_probes'::regclass "
+            "AND tgname = :name"
+        ),
+        {"name": updated_at_trigger_name("mixin_probes")},
+    )
+    assert trigger == updated_at_trigger_name("mixin_probes")
+
+
+@pytest.mark.db
+async def test_updated_at_advances_twice_in_the_same_transaction(
+    db_session: AsyncSession,
+) -> None:
+    """now() no avanzaría; clock_timestamp() sí."""
+
+    connection = await db_session.connection()
+    probe_table = MixinProbe.__table__
+    assert isinstance(probe_table, Table)
+    await connection.run_sync(probe_table.create)
+
+    probe = MixinProbe(label="a")
+    db_session.add(probe)
+    await db_session.flush()
+    await db_session.refresh(probe)
+    first = probe.updated_at
+
+    await db_session.execute(
+        text("UPDATE mixin_probes SET label = :label WHERE id = :id"),
+        {"label": "b", "id": probe.id},
+    )
+    await db_session.refresh(probe)
+    second = probe.updated_at
+
+    await db_session.execute(
+        text("UPDATE mixin_probes SET label = :label WHERE id = :id"),
+        {"label": "c", "id": probe.id},
+    )
+    await db_session.refresh(probe)
+    third = probe.updated_at
+
+    assert second > first
+    assert third > second
+    assert probe.label == "c"
+
+
+@pytest.mark.db
 async def test_updated_at_advances_across_separate_commits(
     monkeypatch: pytest.MonkeyPatch,
     require_postgres: str,
@@ -99,18 +155,6 @@ async def test_updated_at_advances_across_separate_commits(
     try:
         async with engine.begin() as connection:
             await connection.run_sync(_create_probe_table)
-            await connection.execute(
-                text(
-                    "DROP TRIGGER IF EXISTS mixin_probes_set_updated_at ON mixin_probes"
-                )
-            )
-            await connection.execute(
-                text(
-                    "CREATE TRIGGER mixin_probes_set_updated_at "
-                    "BEFORE UPDATE ON mixin_probes "
-                    "FOR EACH ROW EXECUTE FUNCTION set_updated_at()"
-                )
-            )
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:

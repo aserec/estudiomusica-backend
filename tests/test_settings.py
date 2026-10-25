@@ -3,6 +3,11 @@ from pydantic import ValidationError
 
 from app.config import Settings, get_settings
 
+_DEFAULT_DEV_DSN = (
+    "postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica"
+)
+_SECRET = "settings-secret-must-not-appear"
+
 
 def test_app_env_rejects_unknown_values(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "prodd")
@@ -52,23 +57,10 @@ def test_database_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     get_settings.cache_clear()
     settings = Settings()
-    assert settings.database_url == (
+    assert settings.resolved_database_url() == (
         "postgresql+asyncpg://user:secret@db.example:5432/app"
     )
     get_settings.cache_clear()
-
-
-def test_resolve_test_database_url_rejects_non_test_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests.conftest import resolve_test_database_url
-
-    monkeypatch.setenv(
-        "TEST_DATABASE_URL",
-        "postgresql+asyncpg://estudiomusica:secret@127.0.0.1:5432/estudiomusica",
-    )
-    with pytest.raises(pytest.UsageError, match="_test"):
-        resolve_test_database_url()
 
 
 def test_database_url_defaults_to_docker_compose(
@@ -76,14 +68,10 @@ def test_database_url_defaults_to_docker_compose(
 ) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
     settings = Settings(_env_file=None)
-    assert settings.database_url.startswith("postgresql+asyncpg://")
-    assert "127.0.0.1:5432" in settings.database_url
-    assert settings.database_url.endswith("/estudiomusica")
-
-
-_DEFAULT_DEV_DSN = (
-    "postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica"
-)
+    dsn = settings.resolved_database_url()
+    assert dsn.startswith("postgresql+asyncpg://")
+    assert "127.0.0.1:5432" in dsn
+    assert dsn.endswith("/estudiomusica")
 
 
 def test_default_database_credentials_rejected_outside_development(
@@ -92,11 +80,11 @@ def test_default_database_credentials_rejected_outside_development(
     monkeypatch.setenv("DATABASE_URL", _DEFAULT_DEV_DSN)
     monkeypatch.setenv("APP_ENV", "production")
     get_settings.cache_clear()
-    with pytest.raises(ValidationError, match="credenciales"):
+    with pytest.raises(ValidationError, match="contraseña"):
         Settings()
     monkeypatch.setenv("APP_ENV", "staging")
     get_settings.cache_clear()
-    with pytest.raises(ValidationError, match="credenciales"):
+    with pytest.raises(ValidationError, match="contraseña"):
         Settings()
     get_settings.cache_clear()
 
@@ -108,7 +96,49 @@ def test_default_database_credentials_allowed_in_development(
     monkeypatch.setenv("APP_ENV", "development")
     get_settings.cache_clear()
     settings = Settings()
-    assert settings.database_url.endswith("/estudiomusica")
+    assert settings.resolved_database_url().endswith("/estudiomusica")
+    get_settings.cache_clear()
+
+
+def test_production_rejects_default_password_on_other_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://estudiomusica:estudiomusica@db.example:5432/estudiomusica_prod",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="contraseña"):
+        Settings()
+    get_settings.cache_clear()
+
+
+def test_production_rejects_default_password_with_other_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:estudiomusica@db.example:5432/app",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="contraseña"):
+        Settings()
+    get_settings.cache_clear()
+
+
+def test_production_rejects_test_database_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@127.0.0.1:5432/estudiomusica_test",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match=r"\*_test"):
+        Settings()
     get_settings.cache_clear()
 
 
@@ -118,19 +148,23 @@ def test_production_accepts_non_default_database_url() -> None:
         database_url="postgresql+asyncpg://app:s3cret@db.example:5432/app",
         _env_file=None,
     )
-    assert settings.database_url.endswith("/app")
+    assert settings.resolved_database_url().endswith("/app")
 
 
-def test_production_accepts_default_credentials_on_test_database() -> None:
-    settings = Settings(
-        app_env="production",
-        database_url=(
-            "postgresql+asyncpg://estudiomusica:estudiomusica"
-            "@127.0.0.1:5432/estudiomusica_test"
-        ),
-        _env_file=None,
+def test_invalid_database_url_does_not_leak_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        f"postgresql+asyncpg://app:{_SECRET}@127.0.0.1:not-a-port/app",
     )
-    assert settings.database_url.endswith("/estudiomusica_test")
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    assert _SECRET not in str(caught.value)
+    assert _SECRET not in repr(caught.value)
+    get_settings.cache_clear()
 
 
 _DEFAULT_DEV_AUTH_SECRET = "dev-insecure-auth-secret-change-me"

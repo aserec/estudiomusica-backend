@@ -6,6 +6,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.models import updated_at_trigger_name
 from tests.conftest import (
     alembic_config,
     ensure_database_exists,
@@ -73,6 +74,21 @@ def test_alembic_upgrade_head_and_downgrade_base(
         )
         == 1
     )
+    for table in (
+        "users",
+        "auth_sessions",
+        "system_roles",
+        "course_memberships",
+    ):
+        name = updated_at_trigger_name(table)
+        assert (
+            _scalar(
+                url,
+                "SELECT tgname FROM pg_trigger "
+                f"WHERE tgrelid = '{table}'::regclass AND tgname = '{name}'",
+            )
+            == name
+        )
 
     command.downgrade(config, "-1")
     assert _scalar(url, "SELECT version_num FROM alembic_version") == "0002_auth_users"
