@@ -359,6 +359,42 @@ def down_db_expose_errors_client(
     )
 
 
+def ensure_database_exists(url: str) -> None:
+    """Crea la base si el volumen de compose ya existía sin init-test-db.sql."""
+
+    parsed = make_url(url)
+    db_name = parsed.database
+    if db_name is None:
+        raise RuntimeError("DSN sin nombre de base")
+
+    async def create_if_missing(admin_name: str) -> None:
+        admin = parsed.set(database=admin_name)
+        engine = create_async_engine(
+            admin.render_as_string(hide_password=False),
+            isolation_level="AUTOCOMMIT",
+        )
+        try:
+            async with engine.connect() as connection:
+                exists = await connection.scalar(
+                    text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                    {"name": db_name},
+                )
+                if exists is None:
+                    await connection.execute(text(f'CREATE DATABASE "{db_name}"'))
+        finally:
+            await engine.dispose()
+
+    last_error: Exception | None = None
+    for admin_name in ("estudiomusica", "postgres"):
+        try:
+            asyncio.run(create_if_missing(admin_name))
+            return
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+
+
 def _postgres_is_available(url: str) -> bool:
     async def ping() -> None:
         engine = create_async_engine(url, pool_pre_ping=False)
@@ -381,11 +417,20 @@ def require_postgres() -> str:
 
     url = resolve_test_database_url()
     if not _postgres_is_available(url):
-        pytest.skip(
-            "Postgres de test no está disponible. "
-            "En local: docker compose up -d. "
-            f"{redact_database_url(url)}"
-        )
+        try:
+            ensure_database_exists(url)
+        except Exception:
+            pytest.skip(
+                "Postgres de test no está disponible. "
+                "En local: docker compose up -d. "
+                f"{redact_database_url(url)}"
+            )
+        if not _postgres_is_available(url):
+            pytest.skip(
+                "Postgres de test no está disponible. "
+                "En local: docker compose up -d. "
+                f"{redact_database_url(url)}"
+            )
     return url
 
 

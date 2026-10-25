@@ -4,10 +4,13 @@ import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
-from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from tests.conftest import alembic_config, resolve_alembic_database_url
+from tests.conftest import (
+    alembic_config,
+    ensure_database_exists,
+    resolve_alembic_database_url,
+)
 
 pytestmark = pytest.mark.db
 
@@ -25,38 +28,12 @@ def _scalar(url: str, sql: str) -> object:
     return asyncio.run(run())
 
 
-def _ensure_database(url: str) -> None:
-    parsed = make_url(url)
-    db_name = parsed.database
-    if db_name is None:
-        raise RuntimeError("DSN de Alembic sin nombre de base")
-    admin = parsed.set(database="estudiomusica")
-
-    async def run() -> None:
-        engine = create_async_engine(
-            admin.render_as_string(hide_password=False),
-            isolation_level="AUTOCOMMIT",
-        )
-        try:
-            async with engine.connect() as connection:
-                exists = await connection.scalar(
-                    text("SELECT 1 FROM pg_database WHERE datname = :name"),
-                    {"name": db_name},
-                )
-                if exists is None:
-                    await connection.execute(text(f'CREATE DATABASE "{db_name}"'))
-        finally:
-            await engine.dispose()
-
-    asyncio.run(run())
-
-
 def test_alembic_upgrade_head_and_downgrade_base(
     monkeypatch: pytest.MonkeyPatch,
     require_postgres: str,
 ) -> None:
     url = resolve_alembic_database_url()
-    _ensure_database(url)
+    ensure_database_exists(url)
     monkeypatch.setenv("DATABASE_URL", url)
     config = alembic_config(url)
 

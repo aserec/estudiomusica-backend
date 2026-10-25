@@ -109,11 +109,15 @@ Las revisiones viven en `alembic/versions/`. La inicial crea `set_updated_at()` 
 uv run alembic revision -m "descripcion" --autogenerate
 ```
 
-Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`.
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE`; no hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes).
+
+El directorio `alembic/` y `alembic.ini` van en el wheel (hatch `force-include`) para poder migrar desde un paquete instalado. `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
 ### Tests con base aislada
 
 Los tests de persistencia **no** usan los JSON de `.data/` del frontend. Usan `estudiomusica_test` (y `estudiomusica_alembic_test` solo para upgrade/downgrade de Alembic) y envuelven cada caso en una transacción que se revierte al terminar. El nombre de la base de `TEST_DATABASE_URL` debe terminar en `_test`; si no, pytest aborta.
+
+`docker/postgres/init-test-db.sql` solo corre la primera vez que se crea el volumen `postgres_data`. Si el volumen ya existía, `pytest` crea las bases `*_test` al arrancar (conecta a `estudiomusica` o `postgres`). Para recrearlas a mano: `docker compose down -v && docker compose up -d`.
 
 ```bash
 docker compose up -d
@@ -235,9 +239,9 @@ app/
   services/          # Lógica de aplicación (salud + lista fija de examples)
   models/            # Base SQLAlchemy y mixin PersistentModel
 alembic/             # Migraciones (env.py async + versions/)
-docker/postgres/     # init-test-db.sql (base estudiomusica_test)
+docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
 tests/               # Tests de pytest (convenciones + BD aislada)
-docker-compose.yml   # Postgres 17 para desarrollo y tests
+docker-compose.yml   # Postgres 17 en 127.0.0.1:5432 (sin container_name fijo)
 alembic.ini          # Configuración de Alembic
 .env.example         # Plantilla de variables de entorno
 pyproject.toml       # Dependencias, ruff, pytest y mypy
