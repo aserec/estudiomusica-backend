@@ -691,9 +691,7 @@ async def test_concurrent_cross_demote_keeps_one_admin(
         )
         successes = [item for item in results if not isinstance(item, Exception)]
         denied = [
-            item
-            for item in results
-            if isinstance(item, (LastAdmin, AccessDenied))
+            item for item in results if isinstance(item, (LastAdmin, AccessDenied))
         ]
         other_errors = [
             item
