@@ -123,7 +123,11 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS auth_sessions_set_updated_at ON auth_sessions")
     op.execute("DROP TRIGGER IF EXISTS users_set_updated_at ON users")
-    op.drop_index("ix_auth_sessions_user_id", table_name="auth_sessions")
+    op.drop_index(
+        "ix_auth_sessions_user_id",
+        table_name="auth_sessions",
+        if_exists=True,
+    )
     op.drop_table("auth_sessions")
     op.drop_table("users")
     op.execute("DROP EXTENSION IF EXISTS citext")
