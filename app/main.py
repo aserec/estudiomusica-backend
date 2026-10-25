@@ -1,9 +1,11 @@
+from collections.abc import Awaitable, Callable
 from importlib.metadata import version
 from typing import Any
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
+from starlette.responses import Response
 
 from app.config import get_settings
 from app.errors import register_exception_handlers
@@ -20,8 +22,9 @@ Backend FastAPI de EstudioMusica.
 - Prefijo global: `/api/v1` (`api_router` montado en `create_app()`).
 - Claves JSON en **camelCase**. Códigos de error y valores de enum en **snake_case**.
 - Actualizaciones con **PUT**, salvo el PATCH de autoguardado del cuestionario.
-- Errores: `{ "error": "not_found", "message": "...", "fields": [...], "code": "..." }`.
+- Errores: `{ "error": "not_found", "code": "...", "fields": ["campo"] }`.
 - Listados: `{ "items": [...], "page": 1, "pageSize": 20, "total": 0 }`.
+- Versión de API: prefijo `/api/v1` y cabecera `X-API-Version: v1`.
 - CORS: orígenes en `CORS_ORIGINS` (por defecto el Next.js local).
 """
 
@@ -60,6 +63,15 @@ def create_app() -> FastAPI:
         allow_headers=settings.cors_header_list(),
     )
     register_exception_handlers(application)
+
+    @application.middleware("http")
+    async def api_version_header(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        response = await call_next(request)
+        response.headers["X-API-Version"] = "v1"
+        return response
 
     api_router = APIRouter(prefix="/api/v1")
     api_router.include_router(health_router)

@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
 
-from app.exceptions import AppError
+from app.exceptions import AccessDenied, NotFound, PayloadTooLarge
 from app.schemas.errors import ErrorResponse
 from app.schemas.examples import ExampleCreate, ExampleItem
 from app.schemas.pagination import (
@@ -17,7 +17,9 @@ router = APIRouter(prefix="/examples", tags=["examples"])
 
 ERROR_RESPONSES = {
     400: {"model": ErrorResponse, "description": "Petición inválida"},
+    403: {"model": ErrorResponse, "description": "Acceso denegado"},
     404: {"model": ErrorResponse, "description": "No encontrado"},
+    413: {"model": ErrorResponse, "description": "Cuerpo demasiado grande"},
 }
 
 
@@ -38,6 +40,26 @@ async def list_examples(
 
 
 @router.get(
+    "/denied",
+    response_model=ExampleItem,
+    summary="Demostrar AccessDenied",
+    responses={403: ERROR_RESPONSES[403]},
+)
+async def read_denied_example() -> ExampleItem:
+    raise AccessDenied()
+
+
+@router.get(
+    "/too-large",
+    response_model=ExampleItem,
+    summary="Demostrar PayloadTooLarge",
+    responses={413: ERROR_RESPONSES[413]},
+)
+async def read_too_large_example() -> ExampleItem:
+    raise PayloadTooLarge()
+
+
+@router.get(
     "/{example_id}",
     response_model=ExampleItem,
     summary="Obtener un ejemplo",
@@ -46,11 +68,7 @@ async def list_examples(
 async def read_example(example_id: str) -> ExampleItem:
     item = get_example_item(example_id)
     if item is None:
-        raise AppError(
-            status.HTTP_404_NOT_FOUND,
-            error="not_found",
-            message="No existe el ejemplo.",
-        )
+        raise NotFound()
     return item
 
 
@@ -79,9 +97,5 @@ async def create_example(body: ExampleCreate) -> ExampleItem:
 async def update_example(example_id: str, body: ExampleCreate) -> ExampleItem:
     item = get_example_item(example_id)
     if item is None:
-        raise AppError(
-            status.HTTP_404_NOT_FOUND,
-            error="not_found",
-            message="No existe el ejemplo.",
-        )
+        raise NotFound()
     return ExampleItem(id=item.id, display_name=body.display_name)
