@@ -62,7 +62,9 @@ def test_page_over_max_returns_400(client: TestClient) -> None:
 def test_pagination_limits_come_from_settings(
     tight_pagination_client: TestClient,
 ) -> None:
-    too_big_page = tight_pagination_client.get("/api/v1/examples", params={"page": 51})
+    too_big_page = tight_pagination_client.get(
+        "/api/v1/examples", params={"page": 51, "pageSize": 5}
+    )
     too_big_size = tight_pagination_client.get(
         "/api/v1/examples", params={"pageSize": 6}
     )

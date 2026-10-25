@@ -1,5 +1,6 @@
 from typing import Any, cast
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
@@ -17,7 +18,8 @@ def test_openapi_is_published_with_api_version(client: TestClient) -> None:
     assert response.status_code == 200
     spec = response.json()
     assert spec["info"]["title"] == "EstudioMusica API"
-    assert spec["info"]["version"] == client.app.version
+    app = cast(FastAPI, client.app)
+    assert spec["info"]["version"] == app.version
     assert "/api/v1" in spec["info"]["description"]
     assert "X-API-Version" in spec["info"]["description"]
     assert not spec.get("servers")
