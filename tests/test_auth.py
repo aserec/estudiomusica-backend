@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -7,15 +8,16 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.auth.passwords import dummy_hash_for, hash_password, verify_password
 from app.auth.tokens import TokenError, decode_session_token, encode_session_token
 from app.config import get_settings
+from app.db import RedactedDsn
 from app.models import AuthSession, User
 from app.schemas.auth import SignUpRequest
-from tests.conftest import PRODUCTION_AUTH_SECRET
+from tests.conftest import PRODUCTION_AUTH_SECRET, PRODUCTION_TEST_USER
 
 pytestmark = pytest.mark.db
 
@@ -510,6 +512,24 @@ def test_production_auth_signup_login_me_logout(
     assert logout.status_code == 204
     assert production_client.get("/api/v1/auth/me").status_code == 401
     assert production_client.get("/api/v1/examples").status_code == 404
+
+
+def test_production_test_role_is_not_superuser(
+    production_test_database_url: RedactedDsn,
+    require_postgres: RedactedDsn,
+) -> None:
+    async def rolsuper() -> object:
+        engine = create_async_engine(require_postgres.secret())
+        try:
+            async with engine.connect() as connection:
+                return await connection.scalar(
+                    text("SELECT rolsuper FROM pg_roles WHERE rolname = :name"),
+                    {"name": PRODUCTION_TEST_USER},
+                )
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(rolsuper()) is False
 
 
 async def test_auth_session_row_is_created(

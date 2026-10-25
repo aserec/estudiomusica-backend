@@ -1,8 +1,11 @@
 import asyncio
 import errno
 import os
+import re
+import secrets
 import socket
 from collections.abc import AsyncIterator, Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -14,7 +17,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from app.db import RedactedDsn, get_session, redact_database_url
 from app.exceptions import Validation
@@ -30,7 +33,8 @@ DOWN_DATABASE_URL = (
 UNUSED_DATABASE_URL = "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused"
 PRODUCTION_AUTH_SECRET = "production-test-auth-secret-at-least-32ch"
 PRODUCTION_TEST_USER = "em_prod_tests"
-PRODUCTION_TEST_PASSWORD = "prod-test-dsn-password-not-default"
+_PRODUCTION_TEST_EMAIL_PREFIX = "prod-"
+_SAFE_PG_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DATABASE_OVERRIDE_QUERY_KEYS = frozenset({"database", "dbname", "service", "options"})
 _PING_CONNECT_TIMEOUT = 2.0
 _PING_TOTAL_TIMEOUT = 3.0
@@ -328,7 +332,17 @@ def production_settings_env(
     return env
 
 
-def production_database_url(test_url: str | RedactedDsn) -> RedactedDsn:
+def _pg_ident(name: str) -> str:
+    if not _SAFE_PG_IDENT.match(name):
+        raise ValueError("identificador Postgres inválido")
+    return f'"{name}"'
+
+
+def _pg_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def production_database_url(test_url: str | RedactedDsn, password: str) -> RedactedDsn:
     """DSN de la base ``*_test`` con rol de production, sin password por defecto."""
 
     raw = test_url.secret() if isinstance(test_url, RedactedDsn) else test_url
@@ -336,45 +350,136 @@ def production_database_url(test_url: str | RedactedDsn) -> RedactedDsn:
     return RedactedDsn(
         parsed.set(
             username=PRODUCTION_TEST_USER,
-            password=PRODUCTION_TEST_PASSWORD,
+            password=password,
         ).render_as_string(hide_password=False)
     )
 
 
-def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
-    """Crea el rol de tests de production y devuelve el DSN reescrito."""
+def _admin_engine(admin: RedactedDsn) -> AsyncEngine:
+    return create_async_engine(
+        admin.secret(),
+        isolation_level="AUTOCOMMIT",
+        connect_args={
+            "timeout": _PING_CONNECT_TIMEOUT,
+            "command_timeout": _PING_CONNECT_TIMEOUT,
+        },
+    )
 
-    admin = admin_url if isinstance(admin_url, RedactedDsn) else RedactedDsn(admin_url)
-    prod_dsn = production_database_url(admin)
+
+async def _drop_production_test_role(admin: RedactedDsn) -> None:
+    role = _pg_ident(PRODUCTION_TEST_USER)
+    engine = _admin_engine(admin)
+    try:
+        async with engine.connect() as connection:
+            exists = await connection.scalar(
+                text("SELECT 1 FROM pg_roles WHERE rolname = :name"),
+                {"name": PRODUCTION_TEST_USER},
+            )
+            if exists is None:
+                return
+            await connection.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE usename = :name AND pid <> pg_backend_pid()"
+                ),
+                {"name": PRODUCTION_TEST_USER},
+            )
+            await connection.execute(text(f"DROP OWNED BY {role}"))
+            await connection.execute(text(f"DROP ROLE IF EXISTS {role}"))
+    finally:
+        await engine.dispose()
+
+
+async def _cleanup_production_test_rows(admin: RedactedDsn) -> None:
+    engine = _admin_engine(admin)
+    try:
+        async with engine.connect() as connection:
+            users = await connection.scalar(text("SELECT to_regclass('public.users')"))
+            if users is None:
+                return
+            await connection.execute(
+                text(
+                    "DELETE FROM auth_sessions WHERE user_id IN "
+                    "(SELECT id FROM users WHERE email LIKE :prefix)"
+                ),
+                {"prefix": f"{_PRODUCTION_TEST_EMAIL_PREFIX}%"},
+            )
+            await connection.execute(
+                text("DELETE FROM users WHERE email LIKE :prefix"),
+                {"prefix": f"{_PRODUCTION_TEST_EMAIL_PREFIX}%"},
+            )
+    finally:
+        await engine.dispose()
+
+
+def drop_production_test_role(admin_url: str | RedactedDsn) -> None:
+    admin = _as_redacted_dsn(admin_url)
+    try:
+        asyncio.run(_drop_production_test_role(admin))
+        asyncio.run(_cleanup_production_test_rows(admin))
+    except Exception as exc:
+        if _is_connection_error(exc):
+            return
+        raise RuntimeError(
+            "No se pudo borrar el rol de production-tests "
+            f"({type(exc).__name__}). {admin}"
+        ) from None
+
+
+def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
+    """Crea el rol de tests de production (sin SUPERUSER) y devuelve el DSN."""
+
+    admin = _as_redacted_dsn(admin_url)
+    password = secrets.token_urlsafe(32)
+    prod_dsn = production_database_url(admin, password)
+    parsed = make_url(admin.secret())
+    database = parsed.database or ""
+    role = _pg_ident(PRODUCTION_TEST_USER)
+    dbname = _pg_ident(database)
 
     async def create_role() -> None:
-        engine = create_async_engine(
-            admin.secret(),
-            isolation_level="AUTOCOMMIT",
-            connect_args={
-                "timeout": _PING_CONNECT_TIMEOUT,
-                "command_timeout": _PING_CONNECT_TIMEOUT,
-            },
-        )
+        await _drop_production_test_role(admin)
+        await _cleanup_production_test_rows(admin)
+        engine = _admin_engine(admin)
         try:
             async with engine.connect() as connection:
-                exists = await connection.scalar(
-                    text("SELECT 1 FROM pg_roles WHERE rolname = :name"),
-                    {"name": PRODUCTION_TEST_USER},
-                )
-                if exists is None:
-                    await connection.execute(
-                        text(
-                            f"CREATE ROLE {PRODUCTION_TEST_USER} LOGIN SUPERUSER "
-                            f"PASSWORD '{PRODUCTION_TEST_PASSWORD}'"
-                        )
+                await connection.execute(
+                    text(
+                        f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB "
+                        f"NOCREATEROLE INHERIT PASSWORD {_pg_literal(password)}"
                     )
-                else:
+                )
+                await connection.execute(
+                    text(f"GRANT CONNECT ON DATABASE {dbname} TO {role}")
+                )
+                await connection.execute(
+                    text(f"GRANT USAGE ON SCHEMA public TO {role}")
+                )
+                await connection.execute(
+                    text(
+                        "GRANT SELECT, INSERT, UPDATE, DELETE "
+                        f"ON ALL TABLES IN SCHEMA public TO {role}"
+                    )
+                )
+                await connection.execute(
+                    text(
+                        "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public "
+                        f"TO {role}"
+                    )
+                )
+                await connection.execute(
+                    text(
+                        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+                        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES "
+                        f"TO {role}"
+                    )
+                )
+                citext = await connection.scalar(
+                    text("SELECT 1 FROM pg_type WHERE typname = 'citext'")
+                )
+                if citext is not None:
                     await connection.execute(
-                        text(
-                            f"ALTER ROLE {PRODUCTION_TEST_USER} WITH LOGIN SUPERUSER "
-                            f"PASSWORD '{PRODUCTION_TEST_PASSWORD}'"
-                        )
+                        text(f"GRANT USAGE ON TYPE citext TO {role}")
                     )
         finally:
             await engine.dispose()
@@ -385,6 +490,8 @@ def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
     except ConnectionError:
         raise
     except Exception as exc:
+        with suppress(Exception):
+            asyncio.run(_drop_production_test_role(admin))
         if _is_connection_error(exc):
             raise ConnectionError(
                 "No se pudo crear el rol de production-tests "
@@ -414,6 +521,7 @@ def production_client(
     monkeypatch: pytest.MonkeyPatch,
     production_test_database_url: RedactedDsn,
     migrated_test_database: None,
+    require_postgres: RedactedDsn,
 ) -> Iterator[TestClient]:
     """Cliente production contra la base ``*_test``, sin credenciales por defecto.
 
@@ -422,11 +530,16 @@ def production_client(
     ``RedactedDsn`` para no filtrar la contraseña con ``--showlocals``.
     """
 
-    yield from _build_client(
-        monkeypatch,
-        base_url="https://testserver",
-        **production_settings_env(production_test_database_url),
-    )
+    monkeypatch.setattr("app.config.settings.allow_test_database", lambda: True)
+    try:
+        yield from _build_client(
+            monkeypatch,
+            base_url="https://testserver",
+            **production_settings_env(production_test_database_url),
+        )
+    finally:
+        with suppress(Exception):
+            asyncio.run(_cleanup_production_test_rows(require_postgres))
 
 
 @pytest.fixture
@@ -707,17 +820,27 @@ def require_postgres() -> RedactedDsn:
 
 
 @pytest.fixture(scope="session")
-def production_test_database_url(require_postgres: RedactedDsn) -> RedactedDsn:
-    """DSN de la base ``*_test`` con rol de production (sin password por defecto)."""
+def production_test_database_url(
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> Iterator[RedactedDsn]:
+    """DSN de la base ``*_test`` con rol de production (sin password por defecto).
+
+    El rol se borra al terminar la sesión, también si la suite falla.
+    """
 
     try:
-        return ensure_production_test_role(require_postgres)
+        dsn = ensure_production_test_role(require_postgres)
     except ConnectionError as exc:
         _skip_or_fail_postgres(
             "No se pudo preparar el rol de production-tests. "
             f"En local: docker compose up -d. {exc}"
         )
         raise AssertionError("unreachable") from exc
+    try:
+        yield dsn
+    finally:
+        drop_production_test_role(require_postgres)
 
 
 @pytest.fixture(scope="session")
