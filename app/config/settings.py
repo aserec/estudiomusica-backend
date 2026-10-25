@@ -37,13 +37,23 @@ class Settings(BaseSettings):
     pagination_max_page_size: int = Field(default=MAX_PAGE_SIZE)
 
     def cors_origin_list(self) -> list[str]:
-        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        return [
+            origin.strip() for origin in self.cors_origins.split(",") if origin.strip()
+        ]
 
     def cors_method_list(self) -> list[str]:
-        return [method.strip() for method in self.cors_allow_methods.split(",") if method.strip()]
+        return [
+            method.strip()
+            for method in self.cors_allow_methods.split(",")
+            if method.strip()
+        ]
 
     def cors_header_list(self) -> list[str]:
-        return [header.strip() for header in self.cors_allow_headers.split(",") if header.strip()]
+        return [
+            header.strip()
+            for header in self.cors_allow_headers.split(",")
+            if header.strip()
+        ]
 
 
 @lru_cache

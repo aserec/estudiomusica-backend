@@ -57,7 +57,9 @@ def error_body(
 def _detail_as_error(status_code: int, detail: object) -> dict[str, object]:
     if isinstance(detail, Mapping):
         payload = cast(Mapping[str, Any], detail)
-        error = str(payload.get("error") or STATUS_ERROR_CODES.get(status_code, "error"))
+        error = str(
+            payload.get("error") or STATUS_ERROR_CODES.get(status_code, "error")
+        )
         raw_fields = payload.get("fields")
         fields: list[FieldError] | None = None
         if isinstance(raw_fields, list):

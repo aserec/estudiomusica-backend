@@ -18,7 +18,7 @@ Backend FastAPI de EstudioMusica.
 
 - Prefijo global: `/api/v1` (`api_router` montado en `create_app()`).
 - Claves JSON en **camelCase**. Códigos de error y valores de enum en **snake_case**.
-- Actualizaciones con **PUT**, salvo el PATCH de autoguardado de intentos de cuestionario.
+- Actualizaciones con **PUT**, salvo el PATCH de autoguardado del cuestionario.
 - Errores: `{ "error": "not_found", "message": "...", "fields": [...], "code": "..." }`.
 - Listados: `{ "items": [...], "page": 1, "pageSize": 20, "total": 0 }`.
 - CORS: orígenes en `CORS_ORIGINS` (por defecto el Next.js local).
@@ -28,7 +28,7 @@ OPENAPI_TAGS = [
     {"name": "health", "description": "Liveness bajo `/api/v1`."},
     {
         "name": "examples",
-        "description": "Rutas de demostración de convenciones. No son lógica de negocio.",
+        "description": "Demostración de convenciones. No es lógica de negocio.",
     },
 ]
 

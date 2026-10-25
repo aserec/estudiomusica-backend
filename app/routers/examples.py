@@ -5,7 +5,12 @@ from fastapi import APIRouter, Depends, status
 from app.exceptions import AppError
 from app.schemas.errors import ErrorResponse
 from app.schemas.examples import ExampleCreate, ExampleItem
-from app.schemas.pagination import Paginated, PaginationQuery, paginate, pagination_query
+from app.schemas.pagination import (
+    Paginated,
+    PaginationQuery,
+    paginate,
+    pagination_query,
+)
 from app.services.examples import get_example_item, list_example_items
 
 router = APIRouter(prefix="/examples", tags=["examples"])
@@ -22,7 +27,7 @@ ERROR_RESPONSES = {
     summary="Listar ejemplos paginados",
     description=(
         "Fixture de convenciones: no es un recurso de negocio. "
-        "Acepta `page` y `pageSize` y responde con `items`, `page`, `pageSize` y `total`."
+        "Acepta page y pageSize; responde items, page, pageSize y total."
     ),
     responses={400: ERROR_RESPONSES[400]},
 )
@@ -65,7 +70,10 @@ async def create_example(body: ExampleCreate) -> ExampleItem:
     "/{example_id}",
     response_model=ExampleItem,
     summary="Actualizar un ejemplo (PUT)",
-    description="Las actualizaciones van por PUT. El único PATCH de la API será el autoguardado de cuestionario.",
+    description=(
+        "Las actualizaciones van por PUT. El único PATCH previsto "
+        "es el autoguardado de cuestionario."
+    ),
     responses={400: ERROR_RESPONSES[400], 404: ERROR_RESPONSES[404]},
 )
 async def update_example(example_id: str, body: ExampleCreate) -> ExampleItem:
