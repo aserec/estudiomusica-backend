@@ -14,3 +14,10 @@ def test_root_liveness_returns_ok(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_openapi_includes_versioned_health_only(client: TestClient) -> None:
+    paths = client.get("/openapi.json").json()["paths"]
+
+    assert "/api/v1/health" in paths
+    assert "/health" not in paths
