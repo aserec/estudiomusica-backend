@@ -95,7 +95,7 @@ def test_autogenerate_hook_adds_updated_at_trigger() -> None:
             )
 
     script = _Script()
-    process_revision_directives(None, None, [script])
+    process_revision_directives(None, None, [script])  # type: ignore[arg-type, list-item]
     sql_ops = [
         operation
         for operation in script.upgrade_ops.ops

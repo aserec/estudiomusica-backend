@@ -1,6 +1,9 @@
 """Hook de autogenerate: trigger ``updated_at`` en tablas PersistentModel."""
 
 from alembic.operations import ops
+from alembic.operations.ops import MigrationScript
+from alembic.runtime.migration import MigrationContext
+from alembic.script.revision import _GetRevArg
 
 from app.models import Base, PersistentModel
 from app.models.base import updated_at_trigger_sql
@@ -23,14 +26,16 @@ def persistent_model_table_names() -> set[str]:
 
 
 def process_revision_directives(
-    context: object, revision: object, directives: list[object]
+    context: MigrationContext,
+    revision: _GetRevArg,
+    directives: list[MigrationScript],
 ) -> None:
     """Añade el trigger ``updated_at`` a cada ``CreateTable`` PersistentModel."""
 
     if not directives:
         return
     script = directives[0]
-    upgrade_ops = getattr(script, "upgrade_ops", None)
+    upgrade_ops = script.upgrade_ops
     if upgrade_ops is None:
         return
     persistent = persistent_model_table_names()

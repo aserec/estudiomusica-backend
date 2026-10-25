@@ -39,7 +39,8 @@ class RedactedDsn:
         object.__setattr__(self, "_secret", url)
 
     def secret(self) -> str:
-        return object.__getattribute__(self, "_secret")
+        value: str = object.__getattribute__(self, "_secret")
+        return value
 
     def __str__(self) -> str:
         return redact_database_url(self.secret())
