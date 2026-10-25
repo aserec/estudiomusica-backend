@@ -30,7 +30,7 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert "/api/v1/examples" in paths
     assert "/api/v1/examples/denied" in paths
     assert "/api/v1/examples/too-large" in paths
-    assert "/health" in paths
+    assert "/health" not in paths
 
     examples_get = paths["/api/v1/examples"]["get"]
     param_names = {param["name"] for param in examples_get["parameters"]}

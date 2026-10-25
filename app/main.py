@@ -1,5 +1,5 @@
 from collections.abc import Awaitable, Callable
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
@@ -37,11 +37,18 @@ OPENAPI_TAGS = [
 ]
 
 
+def _package_version() -> str:
+    try:
+        return version("estudiomusica-backend")
+    except PackageNotFoundError:
+        return "0.0.0"
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     application = FastAPI(
         title=settings.app_name,
-        version=version("estudiomusica-backend"),
+        version=_package_version(),
         description=OPENAPI_DESCRIPTION,
         contact={
             "name": "EstudioMusica",
@@ -79,7 +86,7 @@ def create_app() -> FastAPI:
     application.include_router(api_router)
 
     # Liveness en la raíz para sondas. El contrato de la API es GET /api/v1/health.
-    application.include_router(health_router)
+    application.include_router(health_router, include_in_schema=False)
 
     def custom_openapi() -> dict[str, Any]:
         if application.openapi_schema:
