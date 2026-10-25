@@ -1,10 +1,10 @@
-"""Usuario persistido. La matriz de roles de sistema llega en #394."""
+"""Usuario persistido. El rol de sistema vive en ``system_role_id``."""
 
 import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import Boolean, DateTime, String, Uuid, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Uuid, text
 from sqlalchemy.dialects.postgresql import CITEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -12,7 +12,7 @@ from app.models.base import PersistentModel
 
 
 class SystemRole(StrEnum):
-    """Roles de sistema. Este ticket solo distingue alumno y admin."""
+    """Roles de sistema. Enums en snake_case (convención #91)."""
 
     ALUMNO = "alumno"
     PROFESOR = "profesor"
@@ -35,6 +35,14 @@ class User(PersistentModel):
         Uuid(as_uuid=True),
         nullable=True,
     )
+    system_role_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("system_roles.id"),
+        nullable=False,
+        default=SystemRole.ALUMNO,
+        server_default=text("'alumno'"),
+        index=True,
+    )
     is_admin: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -56,4 +64,7 @@ class User(PersistentModel):
 
     @property
     def system_role(self) -> SystemRole:
-        return SystemRole.ADMIN if self.is_admin else SystemRole.ALUMNO
+        try:
+            return SystemRole(self.system_role_id)
+        except ValueError:
+            return SystemRole.ADMIN if self.is_admin else SystemRole.ALUMNO
