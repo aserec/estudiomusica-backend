@@ -3,6 +3,7 @@ import importlib
 import importlib.util
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 from alembic import command
@@ -177,6 +178,76 @@ def test_alembic_upgrade_head_and_downgrade_base(
     )
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+
+
+def _execute(
+    dsn: RedactedDsn, sql: str, params: dict[str, object] | None = None
+) -> None:
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text(sql), params or {})
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def _rows(dsn: RedactedDsn, sql: str) -> list[Any]:
+    async def run() -> list[Any]:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.connect() as connection:
+                result = await connection.execute(text(sql))
+                return list(result.all())
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def test_0003_backfills_system_role_from_is_admin(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    """Crea un admin y un no-admin en 0002 y comprueba el backfill de 0003."""
+
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = alembic_config(dsn)
+
+    command.upgrade(config, "0002_auth_users")
+    _execute(
+        dsn,
+        "INSERT INTO users (first_name, last_name, email, password_hash, is_admin) "
+        "VALUES "
+        "('Ada', 'Admin', 'backfill-admin@example.com', 'x', true), "
+        "('Luis', 'Alumno', 'backfill-alumno@example.com', 'x', false)",
+    )
+    assert (
+        _scalar(
+            dsn,
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'users' AND column_name = 'system_role_id'",
+        )
+        is None
+    )
+
+    command.upgrade(config, "0003_system_roles")
+    by_email = {
+        row.email: (row.is_admin, row.system_role_id)
+        for row in _rows(
+            dsn,
+            "SELECT email, is_admin, system_role_id FROM users "
+            "WHERE email IN ('backfill-admin@example.com', "
+            "'backfill-alumno@example.com')",
+        )
+    }
+    assert by_email["backfill-admin@example.com"] == (True, "admin")
+    assert by_email["backfill-alumno@example.com"] == (False, "alumno")
 
 
 def test_alembic_revision_chain_is_linear() -> None:
