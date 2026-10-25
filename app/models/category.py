@@ -1,4 +1,4 @@
-"""Categoría jerárquica de cursos. ``course.category_id`` (#401) apuntará aquí."""
+"""Categoría jerárquica de cursos. ``courses.category_id`` apunta aquí."""
 
 import uuid
 
@@ -12,9 +12,8 @@ from app.models.base import PersistentModel
 class Category(PersistentModel):
     """Nodo del árbol de categorías.
 
-    El CRUD de cursos (#401) añadirá ``courses.category_id`` FK a
-    ``categories.id``. El borrado consulta ``public.courses`` si existe
-    para responder ``409 category_not_empty``.
+    ``courses.category_id`` apunta a ``categories.id``. El borrado
+    responde ``409 category_not_empty`` si hay cursos vigentes.
     """
 
     __tablename__ = "categories"

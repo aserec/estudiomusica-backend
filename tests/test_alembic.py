@@ -54,6 +54,7 @@ def _wipe_alembic_schema(dsn: RedactedDsn) -> None:
                 await connection.execute(
                     text("DROP TABLE IF EXISTS course_memberships CASCADE")
                 )
+                await connection.execute(text("DROP TABLE IF EXISTS courses CASCADE"))
                 await connection.execute(
                     text("DROP TABLE IF EXISTS categories CASCADE")
                 )
@@ -86,10 +87,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
     config = alembic_config(dsn)
 
     command.upgrade(config, "head")
-    assert (
-        _scalar(dsn, "SELECT version_num FROM alembic_version")
-        == "0004_course_categories"
-    )
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0005_courses"
     assert (
         _scalar(dsn, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
         == "set_updated_at"
@@ -103,6 +101,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
         == "course_memberships"
     )
     assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
+    assert _scalar(dsn, "SELECT to_regclass('public.courses')") == "courses"
     assert (
         _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
         == "citext"
@@ -129,6 +128,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
         "system_roles",
         "course_memberships",
         "categories",
+        "courses",
     ):
         name = updated_at_trigger_name(table)
         assert (
@@ -142,11 +142,13 @@ def test_alembic_upgrade_head_and_downgrade_base(
 
     command.downgrade(config, "-1")
     assert (
-        _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
+        _scalar(dsn, "SELECT version_num FROM alembic_version")
+        == "0004_course_categories"
     )
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
-    assert _scalar(dsn, "SELECT to_regclass('public.categories')") is None
+    assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
+    assert _scalar(dsn, "SELECT to_regclass('public.courses')") is None
     assert (
         _scalar(dsn, "SELECT to_regclass('public.course_memberships')")
         == "course_memberships"
@@ -161,12 +163,10 @@ def test_alembic_upgrade_head_and_downgrade_base(
     )
 
     command.upgrade(config, "head")
-    assert (
-        _scalar(dsn, "SELECT version_num FROM alembic_version")
-        == "0004_course_categories"
-    )
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0005_courses"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
     assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
+    assert _scalar(dsn, "SELECT to_regclass('public.courses')") == "courses"
 
     command.downgrade(config, "0001_initial")
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0001_initial"
@@ -186,20 +186,28 @@ def test_alembic_upgrade_head_and_downgrade_base(
     )
 
     command.upgrade(config, "head")
-    assert (
-        _scalar(dsn, "SELECT version_num FROM alembic_version")
-        == "0004_course_categories"
-    )
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0005_courses"
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
     assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
+    assert _scalar(dsn, "SELECT to_regclass('public.courses')") == "courses"
+    assert (
+        _scalar(
+            dsn,
+            "SELECT 1 FROM information_schema.table_constraints "
+            "WHERE table_name = 'course_memberships' "
+            "AND constraint_name = 'fk_course_memberships_course_id_courses'",
+        )
+        == 1
+    )
 
 
 def test_alembic_revision_chain_is_linear() -> None:
     config = alembic_config(resolve_alembic_database_url())
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0004_course_categories"]
+    assert heads == ["0005_courses"]
+    assert script.get_revision("0005_courses").down_revision == "0004_course_categories"
     assert (
         script.get_revision("0004_course_categories").down_revision
         == "0003_system_roles"
@@ -207,6 +215,25 @@ def test_alembic_revision_chain_is_linear() -> None:
     assert script.get_revision("0003_system_roles").down_revision == "0002_auth_users"
     assert script.get_revision("0002_auth_users").down_revision == "0001_initial"
     assert script.get_revision("0001_initial").down_revision is None
+
+
+def test_autogenerate_against_head_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    require_postgres: RedactedDsn,
+) -> None:
+    dest = tmp_path / "migrations"
+    shutil.copytree(ROOT / "app" / "migrations", dest)
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = _alembic_config_for(dest, dsn)
+    command.upgrade(config, "head")
+    before = {path.name for path in (dest / "versions").glob("*.py")}
+    command.revision(config, message="should_not_exist", autogenerate=True)
+    after = {path.name for path in (dest / "versions").glob("*.py")}
+    assert after == before
 
 
 class MigratedTriggerProbe(PersistentModel):
@@ -253,8 +280,8 @@ def test_autogenerate_hook_adds_updated_at_trigger() -> None:
 
 _PROBE_REVISION = '''"""Probe PersistentModel created via Alembic, not create_all.
 
-Revision ID: 0005_migrated_trigger
-Revises: 0004_course_categories
+Revision ID: 0006_migrated_trigger
+Revises: 0005_courses
 Create Date: 2026-10-25
 """
 
@@ -265,8 +292,8 @@ from alembic import op
 
 from app.migrations.ops import op_create_updated_at_trigger, op_drop_updated_at_trigger
 
-revision: str = "0005_migrated_trigger"
-down_revision: str | None = "0004_course_categories"
+revision: str = "0006_migrated_trigger"
+down_revision: str | None = "0005_courses"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
