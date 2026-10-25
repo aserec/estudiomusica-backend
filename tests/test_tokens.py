@@ -11,6 +11,9 @@ _SECRET = "real-auth-secret-must-be-used-32ch+"
 _PLACEHOLDER = "**********"
 
 
+@pytest.mark.filterwarnings(
+    "ignore:The HMAC key is:jwt.warnings.InsecureKeyLengthWarning"
+)
 def test_token_is_signed_with_secret_value_not_placeholder() -> None:
     secret = SecretStr(_SECRET)
     assert str(secret) == _PLACEHOLDER
