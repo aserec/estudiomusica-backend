@@ -217,6 +217,17 @@ class MigratedTriggerProbe(PersistentModel):
     label: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+def test_autogenerate_hook_drops_empty_revision() -> None:
+    class _Script:
+        def __init__(self) -> None:
+            self.upgrade_ops = ops.UpgradeOps([])
+
+    script = _Script()
+    directives: list[object] = [script]
+    process_revision_directives(None, None, directives)  # type: ignore[arg-type]
+    assert directives == []
+
+
 def test_autogenerate_hook_adds_updated_at_trigger() -> None:
     class _Script:
         def __init__(self) -> None:

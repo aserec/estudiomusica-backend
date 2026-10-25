@@ -47,3 +47,7 @@ def process_revision_directives(
         ):
             extra.append(ops.ExecuteSQLOp(updated_at_trigger_sql(operation.table_name)))
     upgrade_ops.ops.extend(extra)
+    if upgrade_ops.is_empty():
+        # Sin esto, `alembic revision --autogenerate` escribe un fichero
+        # vacío (upgrade/downgrade = pass) y abre un segundo head.
+        directives[:] = []
