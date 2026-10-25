@@ -116,7 +116,9 @@ def resolve_alembic_database_url() -> str:
 
 def alembic_config(database_url: str) -> Config:
     config = Config(str(ROOT / "alembic.ini"))
-    config.set_main_option("sqlalchemy.url", database_url)
+    # ConfigParser interpola '%'; una contraseña urlencoded (p%40ss%25w0rd)
+    # rompería con "invalid interpolation syntax" y el ValueError imprimiría el DSN.
+    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
     return config
 
 

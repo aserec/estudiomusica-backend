@@ -1,6 +1,7 @@
 import pytest
 
 from tests.conftest import (
+    alembic_config,
     derive_alembic_database_url,
     require_test_database_url,
     resolve_alembic_database_url,
@@ -77,6 +78,17 @@ def test_resolve_alembic_database_url_derives_from_test(
     monkeypatch.delenv("ALEMBIC_TEST_DATABASE_URL", raising=False)
     url = resolve_alembic_database_url()
     assert url.endswith("/app_alembic_test")
+
+
+def test_alembic_config_escapes_percent_in_password() -> None:
+    """set_main_option interpola '%'; hay que pasar '%%' para no romper el DSN."""
+
+    url = (
+        "postgresql+asyncpg://estudiomusica:p%40ss%25w0rd"
+        "@127.0.0.1:5432/estudiomusica_test"
+    )
+    config = alembic_config(url)
+    assert config.get_main_option("sqlalchemy.url") == url
 
 
 def test_resolve_alembic_database_url_rejects_explicit_dev(
