@@ -3,7 +3,7 @@
 from datetime import UTC, date, datetime
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -139,9 +139,11 @@ async def assert_course_permission(
     granted = effective_permissions(
         user.system_role, course_role, settings=get_settings()
     )
-    if permission not in granted:
+    if Permission.COURSE_VIEW not in granted:
         if not course.visible:
             raise NotFound()
+        raise AccessDenied()
+    if permission not in granted:
         raise AccessDenied()
 
 
@@ -164,7 +166,7 @@ async def list_admin_courses(
     query: str | None = None,
     archived: bool | None = None,
 ) -> Paginated[CourseResponse]:
-    filters = [Course.deleted_at.is_(None)]
+    filters: list[ColumnElement[bool]] = [Course.deleted_at.is_(None)]
     if archived is True:
         filters.append(Course.archived_at.is_not(None))
     elif archived is False:

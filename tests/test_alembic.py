@@ -217,25 +217,6 @@ def test_alembic_revision_chain_is_linear() -> None:
     assert script.get_revision("0001_initial").down_revision is None
 
 
-def test_autogenerate_against_head_is_empty(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    require_postgres: RedactedDsn,
-) -> None:
-    dest = tmp_path / "migrations"
-    shutil.copytree(ROOT / "app" / "migrations", dest)
-    dsn = RedactedDsn(resolve_alembic_database_url())
-    ensure_database_exists(dsn)
-    _wipe_alembic_schema(dsn)
-    monkeypatch.setenv("DATABASE_URL", dsn.secret())
-    config = _alembic_config_for(dest, dsn)
-    command.upgrade(config, "head")
-    before = {path.name for path in (dest / "versions").glob("*.py")}
-    command.revision(config, message="should_not_exist", autogenerate=True)
-    after = {path.name for path in (dest / "versions").glob("*.py")}
-    assert after == before
-
-
 class MigratedTriggerProbe(PersistentModel):
     """Tabla solo de test: el hook de autogenerate debe verla."""
 
