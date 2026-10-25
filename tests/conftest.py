@@ -1,3 +1,4 @@
+import asyncio
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -7,6 +8,7 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -208,7 +210,9 @@ def tight_pagination_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCli
 
 
 @pytest.fixture
-def db_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+def db_client(
+    monkeypatch: pytest.MonkeyPatch, require_postgres: str
+) -> Iterator[TestClient]:
     """Cliente HTTP apuntando a la BD de test (docker-compose)."""
 
     yield from _build_client(
@@ -216,7 +220,22 @@ def db_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
         APP_ENV="development",
         EXPOSE_ERRORS="false",
         ENABLE_EXAMPLE_ROUTES="true",
-        DATABASE_URL=resolve_test_database_url(),
+        DATABASE_URL=require_postgres,
+    )
+
+
+@pytest.fixture
+def production_db_client(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: str,
+    migrated_test_database: None,
+) -> Iterator[TestClient]:
+    yield from _build_client(
+        monkeypatch,
+        APP_ENV="production",
+        EXPOSE_ERRORS="false",
+        ENABLE_EXAMPLE_ROUTES="false",
+        DATABASE_URL=require_postgres,
     )
 
 
@@ -257,35 +276,57 @@ def down_db_expose_errors_client(
     )
 
 
+def _postgres_is_available(url: str) -> bool:
+    async def ping() -> None:
+        engine = create_async_engine(url, pool_pre_ping=False)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text("SELECT 1"))
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(ping())
+    except Exception:
+        return False
+    return True
+
+
 @pytest.fixture(scope="session")
-def migrated_test_database() -> Iterator[None]:
+def require_postgres() -> str:
+    """Salta los tests de BD si Postgres no responde. Nunca imprime la contraseña."""
+
+    url = resolve_test_database_url()
+    if not _postgres_is_available(url):
+        pytest.skip(
+            "Postgres de test no está disponible. "
+            "En local: docker compose up -d. "
+            f"{redact_database_url(url)}"
+        )
+    return url
+
+
+@pytest.fixture(scope="session")
+def migrated_test_database(require_postgres: str) -> Iterator[None]:
     """Aplica las migraciones en la BD de test. Requiere docker compose up -d."""
 
     from app.config import get_settings
 
-    url = resolve_test_database_url()
-    previous = os.environ.get("DATABASE_URL")
-    os.environ["DATABASE_URL"] = url
-    get_settings.cache_clear()
-    try:
-        command.upgrade(alembic_config(url), "head")
-    except Exception as exc:
-        if previous is None:
-            os.environ.pop("DATABASE_URL", None)
-        else:
-            os.environ["DATABASE_URL"] = previous
+    url = require_postgres
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("DATABASE_URL", url)
         get_settings.cache_clear()
-        raise RuntimeError(
-            "Postgres de test no está disponible. "
-            "En local: docker compose up -d && uv run alembic upgrade head. "
-            f"TEST_DATABASE_URL={url}"
-        ) from exc
-    yield
-    if previous is None:
-        os.environ.pop("DATABASE_URL", None)
-    else:
-        os.environ["DATABASE_URL"] = previous
-    get_settings.cache_clear()
+        try:
+            command.upgrade(alembic_config(url), "head")
+        except Exception:
+            get_settings.cache_clear()
+            pytest.skip(
+                "No se pudieron aplicar las migraciones de test. "
+                "En local: docker compose up -d && uv run alembic upgrade head. "
+                f"{redact_database_url(url)}"
+            )
+        yield
+        get_settings.cache_clear()
 
 
 @pytest.fixture

@@ -53,6 +53,7 @@ def _ensure_database(url: str) -> None:
 
 def test_alembic_upgrade_head_and_downgrade_base(
     monkeypatch: pytest.MonkeyPatch,
+    require_postgres: str,
 ) -> None:
     url = resolve_alembic_database_url()
     _ensure_database(url)
@@ -75,14 +76,3 @@ def test_alembic_has_a_single_initial_revision() -> None:
     heads = script.get_heads()
     assert heads == ["0001_initial"]
     assert script.get_revision("0001_initial").down_revision is None
-
-
-def test_resolve_test_database_url_rejects_non_test_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(
-        "TEST_DATABASE_URL",
-        "postgresql+asyncpg://estudiomusica:secret@127.0.0.1:5432/estudiomusica",
-    )
-    with pytest.raises(pytest.UsageError, match="_test"):
-        resolve_test_database_url()

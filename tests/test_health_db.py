@@ -30,15 +30,15 @@ def test_root_health_db_alias(
 
 
 def test_health_db_ok_in_production_without_examples(
-    production_client: TestClient,
+    production_db_client: TestClient,
 ) -> None:
-    """health/db se monta siempre; /examples no. SELECT 1 usa el DSN por defecto."""
+    """health/db se monta siempre; /examples no. Usa la BD de test."""
 
-    response = production_client.get("/api/v1/health/db")
+    response = production_db_client.get("/api/v1/health/db")
 
     assert response.status_code == 200
     assert response.json() == {"db": "ok"}
-    assert production_client.get("/api/v1/examples").status_code == 404
+    assert production_db_client.get("/api/v1/examples").status_code == 404
 
 
 def test_health_db_down_without_credentials(

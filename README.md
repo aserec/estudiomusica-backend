@@ -127,7 +127,7 @@ export TEST_DATABASE_URL=postgresql+asyncpg://estudiomusica:estudiomusica@127.0.
 uv run pytest
 ```
 
-`uv run pytest` sin Postgres en marcha falla en los tests de BD con un mensaje que recuerda `docker compose up -d`. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
+`uv run pytest` sin Postgres en marcha **salta** los tests de BD (mensaje sin contraseña) y sigue pasando el resto. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
 
 ## Tests, lint y types
 
