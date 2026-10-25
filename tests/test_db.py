@@ -232,7 +232,9 @@ async def test_db_session_commit_does_not_leave_rows_for_the_next_test(
     connection = await db_session.connection()
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
-    await connection.run_sync(lambda sync_conn: probe_table.create(sync_conn, checkfirst=True))
+    await connection.run_sync(
+        lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
+    )
     db_session.add(SessionProbe(label=_DB_SESSION_LEAK_LABEL))
     await db_session.commit()
     found = await db_session.scalar(
@@ -249,7 +251,9 @@ async def test_db_session_next_test_does_not_see_previous_commit(
     connection = await db_session.connection()
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
-    await connection.run_sync(lambda sync_conn: probe_table.create(sync_conn, checkfirst=True))
+    await connection.run_sync(
+        lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
+    )
     leftover = await db_session.scalar(
         text("SELECT label FROM session_probes WHERE label = :label"),
         {"label": _DB_SESSION_LEAK_LABEL},

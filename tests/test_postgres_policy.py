@@ -121,9 +121,7 @@ def test_apply_test_migrations_raises_not_skips(
     monkeypatch.delenv("REQUIRE_POSTGRES", raising=False)
     with pytest.raises(RuntimeError, match="migraciones de test"):
         apply_test_migrations(
-            RedactedDsn(
-                "postgresql+asyncpg://u:p@127.0.0.1:5432/estudiomusica_test"
-            )
+            RedactedDsn("postgresql+asyncpg://u:p@127.0.0.1:5432/estudiomusica_test")
         )
 
 

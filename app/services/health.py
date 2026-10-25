@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 
 from sqlalchemy import text
@@ -34,14 +35,10 @@ def _abandon_health_connection(connection: AsyncConnection) -> None:
         dbapi = raw
     terminate = getattr(dbapi, "terminate", None)
     if callable(terminate):
-        try:
+        with contextlib.suppress(Exception):
             terminate()
-        except Exception:
-            pass
-    try:
+    with contextlib.suppress(Exception):
         sync_connection.invalidate()
-    except Exception:
-        pass
 
 
 async def check_database() -> DatabaseHealthResponse:

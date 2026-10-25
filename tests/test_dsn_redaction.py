@@ -100,9 +100,8 @@ def _assert_failed_without_sentinel(result: subprocess.CompletedProcess[str]) ->
     output = f"{result.stdout}\n{result.stderr}"
     assert SENTINEL not in output
     assert result.returncode != 0
-    skipped_only = (
-        result.returncode == 0
-        or ("skipped" in output.lower() and "failed" not in output.lower())
+    skipped_only = result.returncode == 0 or (
+        "skipped" in output.lower() and "failed" not in output.lower()
     )
     assert not skipped_only
     return output

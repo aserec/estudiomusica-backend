@@ -118,9 +118,7 @@ def alembic_config(database_url: str | RedactedDsn) -> Config:
     from app.migrations.config import make_alembic_config
 
     raw = (
-        database_url.secret()
-        if isinstance(database_url, RedactedDsn)
-        else database_url
+        database_url.secret() if isinstance(database_url, RedactedDsn) else database_url
     )
     return make_alembic_config(raw)
 
