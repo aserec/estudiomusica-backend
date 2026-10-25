@@ -2,7 +2,7 @@
 
 Backend FastAPI de EstudioMusica. Sustituye los almacenes JSON del frontend Next.js.
 
-Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS), la persistencia (Postgres, SQLAlchemy 2 async y Alembic), la API de autenticación (`/api/v1/auth`) y la matriz de roles/permisos (`/api/v1/admin/system-roles`, `/api/v1/courses/{courseId}/me/permissions`).
+Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS), la persistencia (Postgres, SQLAlchemy 2 async y Alembic), la API de autenticación (`/api/v1/auth`), la matriz de roles/permisos (`/api/v1/admin/system-roles`, `/api/v1/courses/{courseId}/me/permissions`) y la administración de usuarios (`/api/v1/admin/users`, `/api/v1/users/search`).
 
 ## Requisitos
 
@@ -108,6 +108,34 @@ GET    /api/v1/courses/{courseId}/me/permissions
 Dependencias reutilizables: `require_site_permission(...)` y `require_course_permission(...)` (leen `course_id` del path). La asignación de matrícula queda fuera de este ticket (#403). El TODO(#306) de visibilidad multimedia/SM3 del profesor adjunto es el flag `ASSISTANT_MEDIA_AND_SM3_VISIBLE` (por defecto `false`); no se ha inventado un permiso nuevo.
 
 `0003_system_roles` (en `app/migrations/versions/`) crea `system_roles` y `course_memberships`, siembra los cuatro roles y añade `users.system_role_id`. `is_admin` se mantiene sincronizado para no romper `/auth/me`. Usa `updated_at_trigger_sql` para el trigger.
+
+## Administración de usuarios
+
+Reutiliza `users` (suspensión y borrado lógico de #93) y `assign_system_role` / `site:manage-admins` de #94. No hay migración nueva: el modelo ya tenía los campos. Autorización por permiso, denegación por defecto.
+
+```text
+GET    /api/v1/admin/users?query=&status=&page=&pageSize=
+PUT    /api/v1/admin/users/{userId}              {firstName?, lastName?, email?}
+PUT    /api/v1/admin/users/{userId}/admin        {isAdmin}
+PUT    /api/v1/admin/users/{userId}/suspension   {suspended}
+DELETE /api/v1/admin/users/{userId}              204 (borrado lógico)
+GET    /api/v1/users/search?q=&page=&pageSize=
+```
+
+`AdminUserView` = `PublicUser` + `suspendedAt` + `deletedAt` + `systemRoleId`. Nunca incluye el hash de contraseña.
+
+Errores (snake_case, convención #91):
+
+- sin sesión / token inválido o caducado → `401 {"error":"unauthorized"}`
+- alumno, profesor o profesor adjunto en `/admin/users` → `403 {"error":"forbidden"}`
+- usuario suspendido con sesión → `403 {"error":"account_suspended"}`
+- email ya usado → `409 {"error":"email_taken"}`
+- quitarse el admin o borrarse a uno mismo → `409 {"error":"cannot_modify_self"}`
+- la operación dejaría el sitio sin un admin vigente → `409 {"error":"last_admin"}` (incluye la carrera del último admin; se bloquea con `SELECT ... FOR UPDATE` ordenado por id)
+
+`GET /admin/users` pagina con `page`/`pageSize` (no `limit`/`cursor`: el ticket #395 los pedía; se mantiene el helper de #91, pendiente de decisión de Danel). Sin `status` lista vigentes, **incluidos suspendidos**; `status=all` añade borrados. `query` filtra por nombre o email.
+
+`PUT` de identidad (no PATCH): la convención #91 usa PUT para actualizar. `isAdmin: true` asigna el rol `admin`; `false` vuelve a `alumno` vía `assign_system_role`. `GET /users/search` lo puede usar un admin o un profesor con membresía `teacher` en algún curso; no devuelve suspendidos ni borrados. `q` vacío no vuelca el directorio.
 
 ## Postgres, migraciones y tests con BD
 
@@ -279,9 +307,9 @@ app/
   errors.py          # Sobre de error y handlers (validación, HTTP)
   exceptions.py      # AccessDenied, NotFound, Validation, PayloadTooLarge
   config/            # Ajustes por variables de entorno (pydantic-settings)
-  routers/           # Rutas HTTP (health, auth, admin, courses y examples)
-  schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth, roles)
-  services/          # Lógica de aplicación (salud, auth, roles, examples)
+  routers/           # Rutas HTTP (health, auth, admin, users, courses y examples)
+  schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth, roles, users)
+  services/          # Lógica de aplicación (salud, auth, roles, users, examples)
   permissions/       # Matriz versionada y dependencias require_*_permission
   auth/              # Hash argon2, JWT HS256 y cookie de sesión
   models/            # PersistentModel, User, AuthSession, SystemRoleRow, CourseMembership
