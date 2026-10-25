@@ -403,12 +403,22 @@ def down_db_expose_errors_client(
     )
 
 
+_PYDANTIC_TRUE = frozenset({"1", "true", "t", "yes", "y", "on"})
+_PYDANTIC_FALSE = frozenset({"0", "false", "f", "no", "n", "off", ""})
+
+
 def _postgres_required() -> bool:
-    return os.environ.get("REQUIRE_POSTGRES", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    """Los mismos booleanos que Pydantic; un valor desconocido aborta."""
+
+    raw = os.environ.get("REQUIRE_POSTGRES", "").strip().lower()
+    if raw in _PYDANTIC_TRUE:
+        return True
+    if raw in _PYDANTIC_FALSE:
+        return False
+    raise pytest.UsageError(
+        "REQUIRE_POSTGRES no es un booleano válido "
+        f"(true/false, 1/0, yes/no, on/off, y/n, t/f). Recibido: {raw!r}"
+    )
 
 
 class _MissingDatabase(RuntimeError):

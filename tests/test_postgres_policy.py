@@ -50,16 +50,44 @@ def test_wrapped_refused_is_connection_error() -> None:
     assert _is_connection_error(outer)
 
 
-@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "YES"])
+@pytest.mark.parametrize(
+    "value", ["1", "true", "TRUE", "yes", "YES", "on", "ON", "y", "t"]
+)
 def test_postgres_required_truthy(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("REQUIRE_POSTGRES", value)
     assert _postgres_required() is True
 
 
-@pytest.mark.parametrize("value", ["0", "false", "no", ""])
+@pytest.mark.parametrize(
+    "value", ["0", "false", "FALSE", "no", "off", "OFF", "n", "f", ""]
+)
 def test_postgres_required_falsy(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("REQUIRE_POSTGRES", value)
     assert _postgres_required() is False
+
+
+def test_postgres_required_unknown_value_aborts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REQUIRE_POSTGRES", "maybe")
+    with pytest.raises(pytest.UsageError, match="REQUIRE_POSTGRES"):
+        _postgres_required()
+
+
+def test_skip_or_fail_fails_when_required_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REQUIRE_POSTGRES", "on")
+    with pytest.raises(pytest.fail.Exception, match="no está disponible"):
+        _skip_or_fail_postgres("Postgres de test no está disponible")
+
+
+def test_skip_or_fail_fails_when_required_TRUE(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REQUIRE_POSTGRES", "TRUE")
+    with pytest.raises(pytest.fail.Exception, match="no está disponible"):
+        _skip_or_fail_postgres("Postgres de test no está disponible")
 
 
 def test_postgres_required_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
