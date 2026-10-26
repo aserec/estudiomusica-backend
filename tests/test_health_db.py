@@ -1729,9 +1729,7 @@ def test_health_sslrootcert_good_ca_up_bad_ca_down(
                     )
                 if not existed["table"]:
                     await connection.run_sync(
-                        lambda sync_conn: probe_table.create(
-                            sync_conn, checkfirst=True
-                        )
+                        lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
                     )
         finally:
             await engine.dispose()
@@ -1746,9 +1744,7 @@ def test_health_sslrootcert_good_ca_up_bad_ca_down(
                     )
                 else:
                     await connection.run_sync(
-                        lambda sync_conn: probe_table.drop(
-                            sync_conn, checkfirst=True
-                        )
+                        lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
                     )
                 if not existed["function"]:
                     await connection.execute(
@@ -1964,9 +1960,7 @@ _ALTA_MIX_QUERIES = (
 )
 
 
-def _exercise_ssl_path(
-    path: str, url: str, monkeypatch: pytest.MonkeyPatch
-) -> str:
+def _exercise_ssl_path(path: str, url: str, monkeypatch: pytest.MonkeyPatch) -> str:
     """App (Settings+engine), alembic-url y alembic-env. No importa env.py."""
 
     from alembic import command

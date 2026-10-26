@@ -359,7 +359,7 @@ def route_allows_streaming_session(route: object) -> bool:
     if endpoint is not None:
         try:
             returned = get_type_hints(endpoint).get("return")
-        except (NameError, TypeError):
+        except NameError, TypeError:
             returned = None
         if returned is not None:
             if get_origin(returned) is not None:
