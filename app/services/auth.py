@@ -23,8 +23,8 @@ from app.exceptions import (
     Validation,
 )
 from app.models import AuthSession, User
-from app.models.user import SystemRole
-from app.schemas.auth import PERSON_NAME_MAX, LogInRequest, PublicUser, SignUpRequest
+from app.models.user import PERSON_NAME_MAX, SystemRole
+from app.schemas.auth import LogInRequest, PublicUser, SignUpRequest
 from app.services.roles import assert_role_assignable
 
 

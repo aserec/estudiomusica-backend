@@ -5,8 +5,8 @@ from enum import StrEnum
 
 from pydantic import EmailStr, Field, StrictBool, field_validator, model_validator
 
+from app.models.user import PERSON_NAME_MAX
 from app.schemas.auth import (
-    PERSON_NAME_MAX,
     PERSON_NAME_RAW_MAX,
     PublicUser,
     normalize_email,
