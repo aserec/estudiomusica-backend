@@ -337,6 +337,43 @@ def test_dsn_secret_values_keeps_all_repeated_passwords() -> None:
     assert "third-pw" in values
 
 
+def test_dsn_secret_values_make_url_sslpassword_uppercase() -> None:
+    """S4a: rama make_url; ``SSLPASSWORD`` exige ``str(key).lower()``."""
+
+    from tests.conftest import _dsn_secret_values
+
+    dsn = RedactedDsn(
+        "postgresql+asyncpg://u:netloc-pw@127.0.0.1:1/db_test"
+        "?SSLPASSWORD=make-url-ssl-pw"
+    )
+    values = _dsn_secret_values(dsn)
+    assert "make-url-ssl-pw" in values
+    assert "netloc-pw" in values
+
+
+def test_dsn_secret_values_make_url_password_uppercase() -> None:
+    """S2a: rama make_url; ``PASSWORD`` exige ``.lower()`` en la clave."""
+
+    from tests.conftest import _dsn_secret_values
+
+    dsn = RedactedDsn(
+        "postgresql+asyncpg://u:netloc-pw@127.0.0.1:1/db_test?PASSWORD=make-url-pw"
+    )
+    values = _dsn_secret_values(dsn)
+    assert "make-url-pw" in values
+
+
+def test_dsn_secret_values_parse_qs_when_make_url_fails() -> None:
+    """S7: rama parse_qs solo si make_url falla; ``SSLPASSWORD`` en mayúsculas."""
+
+    from tests.conftest import _dsn_secret_values
+
+    dsn = RedactedDsn("::::?SSLPASSWORD=parse-qs-ssl-pw&PASSWORD=parse-qs-pw")
+    values = _dsn_secret_values(dsn)
+    assert "parse-qs-ssl-pw" in values
+    assert "parse-qs-pw" in values
+
+
 def test_drop_database_from_none_includes_redacted_cause() -> None:
     with pytest.raises(ConnectionError) as caught:
         drop_database_if_exists(_DOWN_DSN)

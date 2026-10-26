@@ -567,15 +567,16 @@ def _dsn_secret_values(dsn: RedactedDsn) -> tuple[str, ...]:
                 continue
             if raw:
                 values.append(str(raw))
-    try:
-        raw_query = urlparse(dsn.secret()).query
-    except Exception:
-        raw_query = ""
-    if raw_query:
-        for key, items in parse_qs(raw_query, keep_blank_values=True).items():
-            if key.lower() not in {"password", "sslpassword"}:
-                continue
-            values.extend(item for item in items if item)
+    else:
+        try:
+            raw_query = urlparse(dsn.secret()).query
+        except Exception:
+            raw_query = ""
+        if raw_query:
+            for key, items in parse_qs(raw_query, keep_blank_values=True).items():
+                if key.lower() not in {"password", "sslpassword"}:
+                    continue
+                values.extend(item for item in items if item)
     unique: list[str] = []
     seen: set[str] = set()
     for item in values:
