@@ -6,11 +6,12 @@ from pathlib import Path
 import pytest
 from sqlalchemy import String, Table, inspect, select, text
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import RedactedDsn
 from app.models import PersistentModel, updated_at_trigger_name
+from tests.conftest import _create_async_engine
 
 
 class MixinProbe(PersistentModel):
@@ -150,7 +151,7 @@ async def test_updated_at_advances_across_separate_commits(
 
     monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
-    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = MixinProbe.__table__
     assert isinstance(probe_table, Table)
     try:

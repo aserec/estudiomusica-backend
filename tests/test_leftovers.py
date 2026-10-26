@@ -9,11 +9,11 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.db import RedactedDsn
 from tests.conftest import (
     ROOT,
+    _create_async_engine,
     _drop_leftover_test_databases,
     _drop_leftover_test_tables,
     drop_database_if_exists,
@@ -31,7 +31,7 @@ def _leftover_db(require_postgres: RedactedDsn) -> RedactedDsn:
 
 
 async def _table_exists(dsn: RedactedDsn) -> object:
-    engine = create_async_engine(dsn.secret())
+    engine = _create_async_engine(dsn.secret())
     try:
         async with engine.connect() as connection:
             return await connection.scalar(
@@ -43,7 +43,7 @@ async def _table_exists(dsn: RedactedDsn) -> object:
 
 async def _database_exists(require_postgres: RedactedDsn, name: str) -> object:
     parsed = make_url(require_postgres.secret())
-    engine = create_async_engine(
+    engine = _create_async_engine(
         parsed.set(database="postgres").render_as_string(hide_password=False)
     )
     try:
@@ -61,7 +61,7 @@ def test_drop_leftover_test_tables_removes_known_names(
     require_postgres: RedactedDsn,
 ) -> None:
     async def create() -> None:
-        engine = create_async_engine(require_postgres.secret())
+        engine = _create_async_engine(require_postgres.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(
@@ -75,7 +75,7 @@ def test_drop_leftover_test_tables_removes_known_names(
     _drop_leftover_test_tables(require_postgres)
 
     async def leftover() -> tuple[object, object]:
-        engine = create_async_engine(require_postgres.secret())
+        engine = _create_async_engine(require_postgres.secret())
         try:
             async with engine.connect() as connection:
                 table = await connection.scalar(
@@ -111,7 +111,7 @@ def _plant_session_leftovers(require_postgres: RedactedDsn) -> None:
     ensure_database_exists(leftover)
 
     async def plant_table() -> None:
-        engine = create_async_engine(require_postgres.secret())
+        engine = _create_async_engine(require_postgres.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(
@@ -158,15 +158,14 @@ import asyncio
 
 from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.db import RedactedDsn
-from tests.conftest import resolve_test_database_url
+from tests.conftest import _create_async_engine, resolve_test_database_url
 
 
 def test_setup_cleared_then_plant(migrated_test_database, require_postgres):
     async def leftover():
-        engine = create_async_engine(require_postgres.secret())
+        engine = _create_async_engine(require_postgres.secret())
         try:
             async with engine.connect() as connection:
                 table = await connection.scalar(
@@ -185,7 +184,7 @@ def test_setup_cleared_then_plant(migrated_test_database, require_postgres):
     assert db is None
 
     async def plant_table():
-        engine = create_async_engine(resolve_test_database_url())
+        engine = _create_async_engine(resolve_test_database_url())
         try:
             async with engine.begin() as connection:
                 await connection.execute(

@@ -14,7 +14,6 @@ from alembic.config import Config
 from alembic.operations import ops
 from alembic.script import ScriptDirectory
 from sqlalchemy import String, Table, text
-from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import RedactedDsn
@@ -23,6 +22,7 @@ from app.models import PersistentModel
 from app.models.base import updated_at_trigger_name
 from tests.conftest import (
     ROOT,
+    _create_async_engine,
     alembic_config,
     drop_database_if_exists,
     ensure_database_exists,
@@ -34,7 +34,7 @@ pytestmark = pytest.mark.db
 
 def _scalar(dsn: RedactedDsn, sql: str) -> object:
     async def run() -> object:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.connect() as connection:
                 result = await connection.execute(text(sql))
@@ -239,7 +239,7 @@ def test_migrated_database_has_updated_at_trigger_without_create_all(
         assert tables_without_trigger == 0
 
         async def advance() -> None:
-            engine = create_async_engine(dsn.secret())
+            engine = _create_async_engine(dsn.secret())
             try:
                 async with engine.begin() as connection:
                     inserted = await connection.execute(
@@ -427,7 +427,7 @@ def test_0001_upgrade_after_stamp_base_is_clear(
     finally:
 
         async def cleanup() -> None:
-            engine = create_async_engine(dsn.secret())
+            engine = _create_async_engine(dsn.secret())
             try:
                 async with engine.begin() as connection:
                     await connection.execute(
@@ -453,7 +453,7 @@ def test_0001_downgrade_with_business_trigger_is_clear(
     command.upgrade(config, "head")
 
     async def add_dependent_trigger() -> None:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(
@@ -470,7 +470,7 @@ def test_0001_downgrade_with_business_trigger_is_clear(
     finally:
 
         async def cleanup() -> None:
-            engine = create_async_engine(dsn.secret())
+            engine = _create_async_engine(dsn.secret())
             try:
                 async with engine.begin() as connection:
                     await connection.execute(text("DROP TABLE IF EXISTS dep_trig"))
@@ -520,7 +520,7 @@ def test_updated_at_trigger_quotes_uppercase_reserved_and_schema(
     )
 
     async def run() -> None:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(text("CREATE SCHEMA IF NOT EXISTS catalogo"))
@@ -664,7 +664,7 @@ def test_create_all_and_ops_mount_schema_trigger(
     command.upgrade(alembic_config(dsn), "head")
 
     async def run() -> None:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(text("CREATE SCHEMA IF NOT EXISTS catalogo"))
@@ -885,7 +885,7 @@ def test_alembic_check_ignores_foreign_schema(
     command.upgrade(alembic_config(dsn), "head")
 
     async def add_foreign() -> None:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(text("CREATE SCHEMA IF NOT EXISTS ajeno"))
@@ -921,7 +921,7 @@ def test_alembic_check_ignores_foreign_schema(
     finally:
 
         async def drop_foreign() -> None:
-            engine = create_async_engine(dsn.secret())
+            engine = _create_async_engine(dsn.secret())
             try:
                 async with engine.begin() as connection:
                     await connection.execute(

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import String, Table, text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import (
@@ -16,6 +16,7 @@ from app.db import (
     get_session_factory,
 )
 from app.models import PersistentModel
+from tests.conftest import _create_async_engine
 
 
 async def _finish(agen: AsyncIterator[object]) -> None:
@@ -114,7 +115,7 @@ async def test_get_session_commits_persistently(
     monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     try:
@@ -156,7 +157,7 @@ async def test_get_session_rollbacks_persistently(
     monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     try:
@@ -237,7 +238,7 @@ _DB_SESSION_LEAK_LABEL = "db-session-must-not-leak"
 async def leak_probe_table(require_postgres: RedactedDsn) -> AsyncIterator[Table]:
     """Crea la tabla fuera de db_session y la borra después del rollback."""
 
-    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = LeakProbe.__table__
     assert isinstance(probe_table, Table)
     async with engine.begin() as connection:
@@ -271,7 +272,7 @@ async def test_db_session_commit_is_not_visible_outside_the_fixture(
     )
     assert found == _DB_SESSION_LEAK_LABEL
 
-    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     try:
         async with engine.connect() as connection:
             leftover = await connection.scalar(
@@ -413,7 +414,7 @@ async def test_http_posts_are_visible_from_another_session_before_response(
     monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    setup_engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    setup_engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     await _create_probe_table(setup_engine, probe_table)
@@ -458,7 +459,7 @@ async def test_http_session_commit_error_is_not_2xx(
     monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    setup_engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    setup_engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     await _create_probe_table(setup_engine, probe_table)
@@ -484,26 +485,19 @@ async def test_http_session_commit_error_is_not_2xx(
 
 
 async def _count_idle_in_transaction(dsn: RedactedDsn) -> int:
-    import asyncpg  # type: ignore[import-untyped]
-    from sqlalchemy.engine.url import make_url
-
-    parsed = make_url(dsn.secret())
-    connection = await asyncpg.connect(
-        host=parsed.host,
-        port=parsed.port or 5432,
-        user=parsed.username,
-        password=parsed.password,
-        database=parsed.database,
-        timeout=2,
-    )
+    engine = _create_async_engine(dsn.secret())
     try:
-        value = await connection.fetchval(
-            "SELECT count(*) FROM pg_stat_activity "
-            "WHERE state = 'idle in transaction' AND pid <> pg_backend_pid()"
-        )
-        return int(value or 0)
+        async with engine.connect() as connection:
+            value = await connection.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE state = 'idle in transaction' "
+                    "AND pid <> pg_backend_pid()"
+                )
+            )
+            return int(value or 0)
     finally:
-        await connection.close()
+        await engine.dispose()
 
 
 @pytest.mark.db

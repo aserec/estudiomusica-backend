@@ -204,14 +204,17 @@ def _inspector_connect_kwargs(dsn: RedactedDsn) -> dict[str, Any]:
     from sqlalchemy.dialects.postgresql.asyncpg import PGDialect_asyncpg
     from sqlalchemy.engine.url import make_url
 
+    from app.db import prepare_asyncpg_connect_kwargs
+
     dialect = PGDialect_asyncpg()  # type: ignore[no-untyped-call]
     _args, opts = dialect.create_connect_args(  # type: ignore[no-untyped-call]
         make_url(dsn.secret())
     )
+    prepared = prepare_asyncpg_connect_kwargs(opts)
     kwargs = {
-        key: opts[key]
+        key: prepared[key]
         for key in ("host", "port", "user", "password", "database", "ssl")
-        if key in opts and opts[key] is not None
+        if key in prepared and prepared[key] is not None
     }
     if "port" not in kwargs:
         kwargs["port"] = 5432
@@ -1588,11 +1591,34 @@ def test_health_sslrootcert_good_ca_up_bad_ca_down(
 ) -> None:
     """B-2: ``?sslrootcert=`` con CA buena da 200 y con CA mala 503."""
 
-    from tests.conftest import _build_client
+    from alembic import command
+    from sqlalchemy import text
+
+    from app.db import clear_engine
+    from tests.conftest import _build_client, _create_async_engine, alembic_config
 
     cafile, bad_ca, dsn = tls_postgres
     good = _dsn_with_query(dsn, ssl="verify-full", sslrootcert=str(cafile))
     bad = _dsn_with_query(dsn, ssl="verify-full", sslrootcert=str(bad_ca))
+
+    async def _ensure_session_probes() -> None:
+        engine = _create_async_engine(good, pool_pre_ping=True)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS session_probes ("
+                        "id uuid PRIMARY KEY,"
+                        "label varchar(64) NOT NULL,"
+                        "created_at timestamptz NOT NULL,"
+                        "updated_at timestamptz NOT NULL,"
+                        "deleted_at timestamptz)"
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_ensure_session_probes())
     good_iter = _build_client(
         monkeypatch,
         APP_ENV="development",
@@ -1606,10 +1632,18 @@ def test_health_sslrootcert_good_ca_up_bad_ca_down(
         response = good_client.get("/api/v1/health/db")
         assert response.status_code == 200
         assert response.json() == {"db": "ok"}
+        created = good_client.post("/api/v1/_test/session/sslroot")
+        assert created.status_code == 201, created.text
+        assert created.json() == {"label": "sslroot"}
+        visible = good_client.get("/api/v1/_test/session/sslroot")
+        assert visible.status_code == 200, visible.text
+        assert visible.json() == {"label": "sslroot"}
     finally:
         close = getattr(good_iter, "close", None)
         if callable(close):
             close()
+    command.current(alembic_config(RedactedDsn(good)))
+    clear_engine()
     bad_iter = _build_client(
         monkeypatch,
         APP_ENV="development",
