@@ -1,8 +1,9 @@
 """Configuración de Alembic usable desde el paquete instalado.
 
 La fuente de verdad es ``app/alembic.ini`` (viaja en el wheel).
-El ``alembic.ini`` de la raíz es un enlace a ese fichero para que
-``uv run alembic`` siga funcionando en el repo.
+El ``alembic.ini`` de la raíz es un fichero regular (no un enlace)
+con las mismas claves para que ``uv run alembic`` funcione en el repo
+y el sdist no lleve symlinks.
 """
 
 from importlib.resources import files
@@ -18,10 +19,12 @@ def packaged_alembic_ini() -> Path:
 def make_alembic_config(database_url: str | None = None) -> Config:
     """Config de Alembic leyendo el ini empaquetado.
 
-    No añade el CWD a ``sys.path``: un directorio ``app/`` local no
-    puede sustituir al paquete instalado.
+    No añade el CWD a ``sys.path``. ``python -c`` / ``python -m alembic``
+    desde un directorio con un ``app/`` local sí importan ese ``app``
+    (``sys.path[0]``); hay que invocarlos desde un CWD sin ese paquete,
+    o usar ``alembic -c app/alembic.ini`` / el ini empaquetado.
 
-    Desde el paquete instalado::
+    Desde el paquete instalado, en un directorio sin ``app/`` local::
 
         from alembic import command
         from app.migrations.config import make_alembic_config

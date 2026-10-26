@@ -1,10 +1,13 @@
-"""Proxy TCP async que congela el tráfico tras el login de Postgres."""
+"""Proxy TCP async que congela tráfico PG después de inicializar el dialecto."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import struct
+from typing import Literal
+
+FreezeOn = Literal["select_1", "pre_ping", "rollback"]
 
 
 def _buffer_has_ready_for_query(buf: bytes) -> bool:
@@ -27,12 +30,23 @@ def _buffer_has_ready_for_query(buf: bytes) -> bool:
     return False
 
 
-class FreezeAfterLoginProxy:
-    """Acepta clientes, habla con PG real y deja de reenviar el SELECT."""
+def _client_sql(data: bytes) -> str:
+    return data.decode("utf-8", "replace").lower()
 
-    def __init__(self, target_host: str, target_port: int) -> None:
+
+class FreezeAfterLoginProxy:
+    """Habla con PG real y congela SELECT 1, pre_ping o ROLLBACK de reset."""
+
+    def __init__(
+        self,
+        target_host: str,
+        target_port: int,
+        *,
+        freeze_on: FreezeOn = "select_1",
+    ) -> None:
         self.target_host = target_host
         self.target_port = int(target_port)
+        self.freeze_on: FreezeOn = freeze_on
         self.port = 0
         self._server: asyncio.AbstractServer | None = None
         self._writers: list[asyncio.StreamWriter] = []
@@ -56,6 +70,28 @@ class FreezeAfterLoginProxy:
                 await asyncio.wait_for(writer.wait_closed(), timeout=0.5)
         self._writers.clear()
 
+    def _should_freeze(
+        self,
+        data: bytes,
+        *,
+        dialect_ready: bool,
+        seen_select_1: bool,
+        first_cycle_done: bool,
+    ) -> bool:
+        sql = _client_sql(data)
+        is_version = "pg_catalog.version" in sql or "version()" in sql
+        is_select_1 = "select 1" in sql and not is_version
+        is_rollback = "rollback" in sql
+        is_empty_ping = ";" in sql and "select" not in sql and not is_rollback
+
+        if self.freeze_on == "select_1":
+            return dialect_ready and is_select_1
+        if self.freeze_on == "rollback":
+            return dialect_ready and seen_select_1 and is_rollback
+        if self.freeze_on == "pre_ping":
+            return first_cycle_done and (is_empty_ping or is_select_1 or is_rollback)
+        return False
+
     async def _handle(
         self,
         client_reader: asyncio.StreamReader,
@@ -67,8 +103,14 @@ class FreezeAfterLoginProxy:
         self._writers.extend((client_writer, pg_writer))
         logged_in = asyncio.Event()
         frozen = asyncio.Event()
+        dialect_ready = False
+        seen_select_1 = False
+        seen_reset = False
+        first_cycle_done = False
+        ready_count = 0
 
         async def client_to_server() -> None:
+            nonlocal seen_select_1, seen_reset
             try:
                 while True:
                     data = await client_reader.read(65536)
@@ -76,10 +118,19 @@ class FreezeAfterLoginProxy:
                         break
                     if frozen.is_set():
                         continue
-                    # Tras el login, no reenviar la primera consulta (SELECT 1).
-                    if logged_in.is_set() and (b"SELECT" in data or b"select" in data):
+                    sql = _client_sql(data)
+                    if self._should_freeze(
+                        data,
+                        dialect_ready=dialect_ready,
+                        seen_select_1=seen_select_1,
+                        first_cycle_done=first_cycle_done,
+                    ):
                         frozen.set()
                         continue
+                    if "select 1" in sql and "version" not in sql:
+                        seen_select_1 = True
+                    if "rollback" in sql and seen_select_1:
+                        seen_reset = True
                     pg_writer.write(data)
                     await pg_writer.drain()
             except Exception:
@@ -88,6 +139,7 @@ class FreezeAfterLoginProxy:
                 pg_writer.close()
 
         async def server_to_client() -> None:
+            nonlocal dialect_ready, first_cycle_done, ready_count
             buf = b""
             try:
                 while True:
@@ -100,7 +152,14 @@ class FreezeAfterLoginProxy:
                     await client_writer.drain()
                     buf += data
                     if _buffer_has_ready_for_query(buf):
+                        ready_count += 1
                         logged_in.set()
+                        # Auth = 1er Z; version() del dialecto = 2º Z.
+                        if ready_count >= 2:
+                            dialect_ready = True
+                        if seen_reset:
+                            first_cycle_done = True
+                        buf = b""
             except Exception:
                 return
             finally:

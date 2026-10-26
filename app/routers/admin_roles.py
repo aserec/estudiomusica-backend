@@ -54,13 +54,15 @@ async def get_system_roles(
     description=(
         "Requiere ``site:manage-admins``. Acepta name, active y sortOrder. "
         "Desactivar un rol impide asignarlo a usuarios nuevos; los que ya "
-        "lo tienen lo conservan. No cambia isSystem ni el id."
+        "lo tienen lo conservan. No cambia isSystem ni el id. "
+        "Desactivar ``admin`` responde 409 system_role_protected."
     ),
     responses={
         400: ERROR_RESPONSES[400],
         401: ERROR_RESPONSES[401],
         403: ERROR_RESPONSES[403],
         404: ERROR_RESPONSES[404],
+        409: ERROR_RESPONSES[409],
     },
 )
 async def patch_system_role(

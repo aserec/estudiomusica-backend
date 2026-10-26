@@ -91,6 +91,8 @@ async def update_system_role(
     row = await get_system_role_row(session, role_id)
     if row is None:
         raise NotFound()
+    if body.active is False and row.id == SystemRole.ADMIN:
+        raise SystemRoleProtected()
     if body.name is not None:
         row.name = body.name
     if body.active is not None:

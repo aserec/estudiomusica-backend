@@ -11,7 +11,8 @@ from alembic import command
 from alembic.config import Config
 from alembic.operations import ops
 from alembic.script import ScriptDirectory
-from sqlalchemy import String, text
+from sqlalchemy import String, Table, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,6 +23,7 @@ from app.models.base import updated_at_trigger_name
 from tests.conftest import (
     ROOT,
     alembic_config,
+    drop_database_if_exists,
     ensure_database_exists,
     resolve_alembic_database_url,
 )
@@ -88,11 +90,13 @@ def test_alembic_upgrade_head_and_downgrade_base(
     _wipe_alembic_schema(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = alembic_config(dsn)
+    script = ScriptDirectory.from_config(config)
+    head = script.get_current_head()
+    assert head is not None
+    parent = script.get_revision(head).down_revision
 
     command.upgrade(config, "head")
-    assert (
-        _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
-    )
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
     assert (
         _scalar(dsn, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
         == "set_updated_at"
@@ -140,9 +144,10 @@ def test_alembic_upgrade_head_and_downgrade_base(
             )
             == name
         )
+    _assert_is_admin_check_rejects_incoherent_and_null(dsn)
 
     command.downgrade(config, "-1")
-    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0002_auth_users"
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == parent
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") is None
     assert _scalar(dsn, "SELECT to_regclass('public.course_memberships')") is None
@@ -156,10 +161,9 @@ def test_alembic_upgrade_head_and_downgrade_base(
     )
 
     command.upgrade(config, "head")
-    assert (
-        _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
-    )
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+    _assert_is_admin_check_rejects_incoherent_and_null(dsn)
 
     command.downgrade(config, "0001_initial")
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0001_initial"
@@ -183,11 +187,67 @@ def test_alembic_upgrade_head_and_downgrade_base(
     )
 
     command.upgrade(config, "head")
-    assert (
-        _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
-    )
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+
+
+def _assert_is_admin_check_rejects_incoherent_and_null(dsn: RedactedDsn) -> None:
+    """El CHECK existe en la BD migrada y no admite is_admin incoherente ni NULL."""
+
+    assert (
+        _scalar(
+            dsn,
+            "SELECT conname FROM pg_constraint "
+            "WHERE conname = 'ck_users_is_admin_matches_system_role'",
+        )
+        == "ck_users_is_admin_matches_system_role"
+    )
+    definition = str(
+        _scalar(
+            dsn,
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'ck_users_is_admin_matches_system_role'",
+        )
+    )
+    assert "IS NOT NULL" in definition
+
+    async def probe() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.connect() as connection:
+                transaction = await connection.begin()
+                try:
+                    inserted = await connection.execute(
+                        text(
+                            "INSERT INTO users "
+                            "(first_name, last_name, email, password_hash) "
+                            "VALUES ('Chk', 'User', 'check-probe@example.com', 'x') "
+                            "RETURNING id"
+                        )
+                    )
+                    user_id = inserted.scalar_one()
+                    with pytest.raises(IntegrityError):
+                        async with connection.begin_nested():
+                            await connection.execute(
+                                text("UPDATE users SET is_admin = true WHERE id = :id"),
+                                {"id": user_id},
+                            )
+                    await connection.execute(
+                        text("ALTER TABLE users ALTER COLUMN is_admin DROP NOT NULL")
+                    )
+                    with pytest.raises(IntegrityError):
+                        async with connection.begin_nested():
+                            await connection.execute(
+                                text("UPDATE users SET is_admin = NULL WHERE id = :id"),
+                                {"id": user_id},
+                            )
+                finally:
+                    await transaction.rollback()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(probe())
 
 
 def _execute(
@@ -298,10 +358,19 @@ def test_alembic_revision_chain_is_linear() -> None:
     config = alembic_config(resolve_alembic_database_url())
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0003_system_roles"]
-    assert script.get_revision("0003_system_roles").down_revision == "0002_auth_users"
-    assert script.get_revision("0002_auth_users").down_revision == "0001_initial"
-    assert script.get_revision("0001_initial").down_revision is None
+    bases = script.get_bases()
+    assert len(heads) == 1
+    assert len(bases) == 1
+    current: str | list[str] | tuple[str, ...] | None = heads[0]
+    seen: list[str] = []
+    while current is not None:
+        if isinstance(current, list | tuple):
+            raise AssertionError(f"revisión ramificada: {current}")
+        assert current not in seen
+        seen.append(current)
+        current = script.get_revision(current).down_revision
+    assert seen[-1] == bases[0]
+    assert script.get_revision(bases[0]).down_revision is None
 
 
 class MigratedTriggerProbe(PersistentModel):
@@ -357,12 +426,17 @@ def test_env_wires_autogen_hook_offline_and_online() -> None:
     online = _configure_keywords("do_run_migrations")
     assert "process_revision_directives" in offline
     assert "process_revision_directives" in online
+    assert "include_schemas" in offline
+    assert "include_schemas" in online
+    assert "include_name" in offline
+    assert "include_name" in online
 
 
-_PROBE_REVISION = '''"""Probe PersistentModel created via Alembic, not create_all.
+def _probe_revision(parent: str) -> str:
+    return f'''"""Probe PersistentModel created via Alembic, not create_all.
 
 Revision ID: 0004_migrated_trigger
-Revises: 0003_system_roles
+Revises: {parent}
 Create Date: 2026-10-25
 """
 
@@ -374,7 +448,7 @@ from alembic import op
 from app.migrations.ops import op_create_updated_at_trigger, op_drop_updated_at_trigger
 
 revision: str = "0004_migrated_trigger"
-down_revision: str | None = "0003_system_roles"
+down_revision: str | None = {parent!r}
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -426,7 +500,13 @@ def test_migrated_database_has_updated_at_trigger_without_create_all(
 ) -> None:
     dest = tmp_path / "migrations"
     shutil.copytree(ROOT / "app" / "migrations", dest)
-    (dest / "versions" / "0004_migrated_trigger_probe.py").write_text(_PROBE_REVISION)
+    parent = ScriptDirectory.from_config(
+        _alembic_config_for(dest, require_postgres)
+    ).get_current_head()
+    assert parent is not None
+    (dest / "versions" / "0004_migrated_trigger_probe.py").write_text(
+        _probe_revision(parent)
+    )
 
     dsn = RedactedDsn(resolve_alembic_database_url())
     ensure_database_exists(dsn)
@@ -576,28 +656,31 @@ def test_autogenerate_revision_imports_sqlalchemy(
     ensure_database_exists(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = _alembic_config_for(dest, dsn)
-    command.revision(config, message="sa_probe", autogenerate=True)
-
-    generated = list((dest / "versions").glob("*.py"))
-    assert generated
-    source = generated[0].read_text()
-    assert "import sqlalchemy as sa" in source
-    assert "sa." in source
-
-    spec = importlib.util.spec_from_file_location("sa_probe_rev", generated[0])
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
     try:
-        module.upgrade()
-    except NameError:
-        raise AssertionError(
-            "la revisión autogenerada no importa sqlalchemy as sa"
-        ) from None
-    except Exception:
-        pass
-    assert callable(module.upgrade)
-    assert callable(module.downgrade)
+        command.revision(config, message="sa_probe", autogenerate=True)
+
+        generated = list((dest / "versions").glob("*.py"))
+        assert generated
+        source = generated[0].read_text()
+        assert "import sqlalchemy as sa" in source
+        assert "sa." in source
+
+        spec = importlib.util.spec_from_file_location("sa_probe_rev", generated[0])
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        try:
+            module.upgrade()
+        except NameError:
+            raise AssertionError(
+                "la revisión autogenerada no importa sqlalchemy as sa"
+            ) from None
+        except Exception:
+            pass
+        assert callable(module.upgrade)
+        assert callable(module.downgrade)
+    finally:
+        drop_database_if_exists(dsn)
 
 
 def test_0001_upgrade_duplicate_function_has_clear_message(
@@ -798,3 +881,277 @@ def test_updated_at_trigger_quotes_uppercase_reserved_and_schema(
             await engine.dispose()
 
     asyncio.run(run())
+
+
+class SchemaTriggerProbe(PersistentModel):
+    """Tabla con schema para create_all / ops / autogen."""
+
+    __tablename__ = "schema_trigger_probes"
+    __table_args__ = {"schema": "catalogo"}
+
+    label: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+def test_autogenerate_hook_quotes_schema_on_create_table() -> None:
+    class _Script:
+        def __init__(self) -> None:
+            self.upgrade_ops = ops.UpgradeOps(
+                [ops.CreateTableOp("schema_trigger_probes", [], schema="catalogo")]
+            )
+
+    script = _Script()
+    process_revision_directives(None, None, [script])  # type: ignore[arg-type, list-item]
+    sql_ops = [
+        operation
+        for operation in script.upgrade_ops.ops
+        if isinstance(operation, ops.ExecuteSQLOp)
+    ]
+    assert len(sql_ops) == 1
+    sql = str(sql_ops[0].sqltext)
+    assert '"catalogo"' in sql
+    assert '"schema_trigger_probes"' in sql
+
+
+def _schema_trigger_lookup_sql(*, leftover: bool = False) -> str:
+    from app.models.base import updated_at_trigger_name
+
+    name = updated_at_trigger_name("schema_trigger_probes")
+    extra = " AND NOT t.tgisinternal" if leftover else ""
+    return (
+        "SELECT tgname FROM pg_trigger t "
+        "JOIN pg_class c ON c.oid = t.tgrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE c.relname = 'schema_trigger_probes' "
+        f"AND n.nspname = 'catalogo' AND t.tgname = '{name}'{extra}"
+    )
+
+
+def test_create_all_and_ops_mount_schema_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    """K4/K6/K7: create_all y ops montan y borran el trigger con schema."""
+
+    from app.migrations.ops import (
+        op_create_updated_at_trigger,
+        op_drop_updated_at_trigger,
+    )
+    from app.models.base import updated_at_trigger_name
+
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    command.upgrade(alembic_config(dsn), "head")
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text("CREATE SCHEMA IF NOT EXISTS catalogo"))
+                await connection.execute(
+                    text('DROP TABLE IF EXISTS "catalogo"."schema_trigger_probes"')
+                )
+                probe_table = SchemaTriggerProbe.__table__
+                assert isinstance(probe_table, Table)
+                await connection.run_sync(
+                    lambda sync_conn: probe_table.create(sync_conn)
+                )
+                trigger = await connection.scalar(text(_schema_trigger_lookup_sql()))
+                assert trigger == updated_at_trigger_name("schema_trigger_probes")
+                inserted = await connection.execute(
+                    text(
+                        'INSERT INTO "catalogo"."schema_trigger_probes" (label) '
+                        "VALUES ('first') RETURNING id, updated_at"
+                    )
+                )
+                row = inserted.one()
+                await connection.execute(
+                    text(
+                        'UPDATE "catalogo"."schema_trigger_probes" '
+                        "SET label = 'second' WHERE id = :id"
+                    ),
+                    {"id": row.id},
+                )
+                second = await connection.scalar(
+                    text(
+                        'SELECT updated_at FROM "catalogo"."schema_trigger_probes" '
+                        "WHERE id = :id"
+                    ),
+                    {"id": row.id},
+                )
+                assert second is not None
+                assert second > row.updated_at
+                await connection.execute(
+                    text('DROP TABLE "catalogo"."schema_trigger_probes"')
+                )
+                qualified = '"catalogo"."schema_trigger_probes"'
+                await connection.execute(text(_TABLE_DDL.format(qualified=qualified)))
+
+                def _ops(sync_conn: object) -> None:
+                    from alembic.migration import MigrationContext
+                    from alembic.operations import Operations
+
+                    ctx = MigrationContext.configure(sync_conn)  # type: ignore[arg-type]
+                    with Operations.context(ctx):
+                        op_create_updated_at_trigger(
+                            "schema_trigger_probes", schema="catalogo"
+                        )
+
+                await connection.run_sync(_ops)
+                trigger = await connection.scalar(text(_schema_trigger_lookup_sql()))
+                assert trigger == updated_at_trigger_name("schema_trigger_probes")
+
+                def _drop(sync_conn: object) -> None:
+                    from alembic.migration import MigrationContext
+                    from alembic.operations import Operations
+
+                    ctx = MigrationContext.configure(sync_conn)  # type: ignore[arg-type]
+                    with Operations.context(ctx):
+                        op_drop_updated_at_trigger(
+                            "schema_trigger_probes", schema="catalogo"
+                        )
+
+                await connection.run_sync(_drop)
+                leftover = await connection.scalar(
+                    text(_schema_trigger_lookup_sql(leftover=True))
+                )
+                assert leftover is None
+                await connection.execute(
+                    text('DROP TABLE "catalogo"."schema_trigger_probes"')
+                )
+                await connection.execute(text("DROP SCHEMA IF EXISTS catalogo CASCADE"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_autogenerate_from_env_adds_trigger_not_lambda(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    require_postgres: RedactedDsn,
+) -> None:
+    """K2b: el hook real añade el trigger; un lambda *a: None no lo haría."""
+
+    from sqlalchemy.engine.url import make_url
+
+    dest = tmp_path / "migrations"
+    shutil.copytree(ROOT / "app" / "migrations", dest)
+    parsed = make_url(resolve_alembic_database_url())
+    dsn = RedactedDsn(
+        parsed.set(database="autogen_hook_probe_test").render_as_string(
+            hide_password=False
+        )
+    )
+    ensure_database_exists(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = _alembic_config_for(dest, dsn)
+    existing = {path.name for path in (dest / "versions").glob("*.py")}
+    try:
+        command.upgrade(config, "head")
+        command.revision(config, message="hook_probe", autogenerate=True)
+        generated = [
+            path
+            for path in (dest / "versions").glob("*.py")
+            if path.name not in existing
+        ]
+        assert generated
+        source = generated[0].read_text()
+        assert "CREATE TRIGGER" in source
+        assert "schema_trigger_probes" in source
+        assert '"catalogo"' in source or "catalogo" in source
+        assert "set_updated_at" in source
+    finally:
+        drop_database_if_exists(dsn)
+
+
+def test_alembic_check_is_clean_after_schema_table(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    require_postgres: RedactedDsn,
+) -> None:
+    """K12: include_schemas hace que check no vuelva a ver catalogo.piezas."""
+
+    from sqlalchemy.engine.url import make_url
+
+    dest = tmp_path / "migrations"
+    shutil.copytree(ROOT / "app" / "migrations", dest)
+    parent = ScriptDirectory.from_config(
+        _alembic_config_for(dest, require_postgres)
+    ).get_current_head()
+    assert parent is not None
+    (dest / "versions" / "0003_schema_probe.py").write_text(
+        f'''"""schema probe
+
+Revision ID: 0003_schema_probe
+Revises: {parent}
+Create Date: 2026-10-26
+"""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+from app.migrations.ops import op_create_updated_at_trigger, op_drop_updated_at_trigger
+
+revision: str = "0003_schema_probe"
+down_revision: str | None = {parent!r}
+branch_labels: str | Sequence[str | None] | None = None
+depends_on: str | Sequence[str | None] | None = None
+
+
+def upgrade() -> None:
+    op.execute("CREATE SCHEMA IF NOT EXISTS catalogo")
+    op.create_table(
+        "schema_trigger_probes",
+        sa.Column(
+            "id", sa.Uuid(),
+            server_default=sa.text("gen_random_uuid()"),
+            primary_key=True,
+        ),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("label", sa.String(32), nullable=False),
+        schema="catalogo",
+    )
+    op_create_updated_at_trigger("schema_trigger_probes", schema="catalogo")
+
+
+def downgrade() -> None:
+    op_drop_updated_at_trigger("schema_trigger_probes", schema="catalogo")
+    op.drop_table("schema_trigger_probes", schema="catalogo")
+'''
+    )
+    parsed = make_url(resolve_alembic_database_url())
+    dsn = RedactedDsn(
+        parsed.set(database="schema_autogen_probe_test").render_as_string(
+            hide_password=False
+        )
+    )
+    ensure_database_exists(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = _alembic_config_for(dest, dsn)
+    existing = {path.name for path in (dest / "versions").glob("*.py")}
+    try:
+        command.upgrade(config, "head")
+        command.revision(config, message="after_schema", autogenerate=True)
+        generated = [
+            path
+            for path in (dest / "versions").glob("*.py")
+            if path.name not in existing
+        ]
+        assert generated
+        source = generated[0].read_text()
+        assert "schema_trigger_probes" not in source
+    finally:
+        drop_database_if_exists(dsn)
