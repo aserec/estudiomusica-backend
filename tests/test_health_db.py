@@ -1623,10 +1623,15 @@ def test_hostssl_helper_reraises_other_errors(
     import asyncpg
 
     monkeypatch.setattr(asyncpg, "connect", _boom)
-    with pytest.raises(_Other):
+    try:
         _skip_if_hostssl_rejects_plain(
             RedactedDsn("postgresql+asyncpg://u:p@127.0.0.1:1/db_test")
         )
+    except pytest.skip.Exception as skipped:
+        raise AssertionError("K2: un error distinto no debe saltar") from skipped
+    except _Other:
+        return
+    raise AssertionError("se esperaba el error de autenticación, no un skip")
 
 
 @pytest.fixture(scope="session")
@@ -1834,6 +1839,12 @@ def test_sslrootcert_and_sslmode_are_case_insensitive(tmp_path: Any) -> None:
     )
     assert "sslrootcert" not in {str(key).lower() for key in kwargs}
     assert isinstance(kwargs["ssl"], ssl_mod.SSLContext)
+    mode_only = prepare_asyncpg_connect_kwargs(
+        {"host": "127.0.0.1", "SSLMODE": "require"}
+    )
+    assert "sslmode" not in {str(key).lower() for key in mode_only}
+    assert "SSLMODE" not in mode_only
+    assert mode_only.get("ssl") == "require"
     url, args = asyncpg_url_and_connect_args(
         "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test"
         f"?SSLMODE=verify-full&SSLROOTCERT={cafile}"
@@ -1841,6 +1852,11 @@ def test_sslrootcert_and_sslmode_are_case_insensitive(tmp_path: Any) -> None:
     assert "sslmode=" not in url.lower()
     assert "sslrootcert=" not in url.lower()
     assert isinstance(args.get("ssl"), ssl_mod.SSLContext)
+    disable_url, disable_args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?SSLMODE=disable"
+    )
+    assert "sslmode=" not in disable_url.lower()
+    assert disable_args.get("ssl") is False
 
 
 def test_ssl_require_with_rootcert_checks_hostname(tmp_path: Any) -> None:
