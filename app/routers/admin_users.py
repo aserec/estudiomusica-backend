@@ -2,6 +2,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response, status
+from pydantic import AfterValidator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -16,6 +17,7 @@ from app.schemas.users import (
     AdminUserStatus,
     AdminUserView,
     SuspensionUpdate,
+    reject_nul,
 )
 from app.services.users import (
     list_admin_users,
@@ -68,6 +70,7 @@ async def get_admin_users(
             description="Texto libre sobre nombre o email. Máximo 200 caracteres.",
             examples=["ada"],
         ),
+        AfterValidator(reject_nul),
     ] = None,
     status_filter: Annotated[
         AdminUserStatus | None,

@@ -131,15 +131,16 @@ Errores (snake_case, convención #91):
 - usuario suspendido con sesión → `403 {"error":"account_suspended"}`
 - email ya usado → `409 {"error":"email_taken"}`
 - quitarse el admin, suspenderse o borrarse a uno mismo → `409 {"error":"cannot_modify_self"}` (aunque haya otros admins)
-- la operación dejaría el sitio sin un admin vigente → `409 {"error":"last_admin"}` (incluye la carrera del último admin; `SELECT ... FOR UPDATE` de actor, destino y admins vigentes, ordenado por id; un admin suspendido o borrado no cuenta)
+- la operación dejaría el sitio sin un admin vigente → `409 {"error":"last_admin"}` (incluye la carrera del último admin; `SELECT ... FOR UPDATE` de actor, destino y admins vigentes, ordenado por id, con `populate_existing` para refrescar el actor ya cargado en la sesión; un admin suspendido o borrado no cuenta y no se bloquea; un actor que ya no es admin vigente recibe `403` antes de `last_admin`)
 - `isAdmin`/`suspended` no aceptan `"yes"` (booleanos estrictos; validación 400)
+- byte NUL en `query`, `q`, `firstName`, `lastName` o `email` → `400 {"error":"validation"}` (no 422; convención #91; Postgres rechazaría el NUL con 500)
 - si el rol `alumno` está desactivado, quitar el admin → `409 {"error":"role_not_assignable"}` (limitación: `assign_system_role` no puede degradar)
 
 `GET /admin/users` pagina con `page`/`pageSize` (no `limit`/`cursor`: el ticket #395 los pedía; se mantiene el helper de #91, pendiente de decisión de Danel). Sin `status` lista vigentes, **incluidos suspendidos**; `status=all` añade borrados. `query` (máximo 200) filtra por nombre o email; los comodines LIKE se escapan.
 
 `PUT` de identidad (no PATCH): la convención #91 usa PUT para actualizar. `isAdmin: true` asigna el rol `admin` y el espejo `is_admin`; `false` vuelve a `alumno` vía `assign_system_role` (los dos campos a la vez: `CHECK (is_admin = (system_role_id = 'admin'))`). DELETE revoca todas las `auth_sessions` del usuario; suspender no las revoca (al reactivar, el token viejo vuelve a valer; lo decide Danel). El email de un usuario borrado queda bloqueado (pendiente de decisión; no se reutiliza).
 
-`GET /users/search` (`q` documentado en OpenAPI, máximo 200): admin (`site:manage-admins`) busca por nombre y email. Un no-admin con `site:manage-courses` o membresía `teacher` vigente (no borrada) necesita al menos 3 caracteres distintos de `%`/`_`, recibe como máximo 10 resultados, solo coincide por nombre y la respuesta no incluye el email salvo que `q` sea el email completo (sin distinguir mayúsculas). `q` vacío no vuelca el directorio. Cuando existan #401/#403 se podrá limitar a matricular en un curso concreto.
+`GET /users/search` (`q` documentado en OpenAPI, máximo 200): admin (`site:manage-admins`) busca por nombre y email. Un no-admin con membresía `teacher` vigente (no borrada) necesita al menos 3 caracteres distintos de `%`/`_`, recibe como máximo 10 resultados, solo coincide por nombre y la respuesta no incluye el email salvo que `q` sea el email completo (misma normalización `lower()` a ambos lados; la igualdad de email usa el índice único citext). `q` vacío no vuelca el directorio. Cuando existan #401/#403 se podrá limitar a matricular en un curso concreto. Seguimiento (no en este PR): unaccent (`jose` vs `José`) y rendimiento ~300 ms con 100k usuarios (`pg_trgm`; hoy hay count+listado en la búsqueda admin).
 
 ## Postgres, migraciones y tests con BD
 

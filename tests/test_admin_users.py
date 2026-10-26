@@ -15,12 +15,15 @@ from app.exceptions import AccessDenied, LastAdmin
 from app.models import AuthSession, CourseMembership, SystemRoleRow, User
 from app.models.user import SystemRole
 from app.permissions.types import CourseRole
+from app.schemas.users import AdminUserIdentityUpdate
 from app.services.roles import assign_system_role
 from app.services.users import (
     _active_admin_clause,
+    _ensure_admin_remains,
     set_user_admin,
     set_user_suspended,
     soft_delete_user,
+    update_user_identity,
 )
 from tests.conftest import resolve_test_database_url
 from tests.test_auth import PASSWORD, unique_email
@@ -684,19 +687,6 @@ async def test_last_admin_delete_of_other_admin_when_actor_remains(
     assert leftover.is_admin is True
 
 
-def _stale_admin_actor(user_id: UUID) -> User:
-    actor = User(
-        first_name="Stale",
-        last_name="Actor",
-        email=unique_email("stale-ns"),
-        password_hash="x",
-        system_role_id=SystemRole.ADMIN,
-        is_admin=True,
-    )
-    actor.id = user_id
-    return actor
-
-
 async def _park_existing_admins(
     session: AsyncSession,
 ) -> list[tuple[UUID, str, bool]]:
@@ -750,14 +740,48 @@ async def _has_waiting_lock(engine: Any) -> bool:
     return int(waiting or 0) > 0
 
 
-async def test_held_lock_demote_of_last_admin_is_last_admin(
+def _apply_fate(user: User, fate: str) -> None:
+    if fate == "demote":
+        user.is_admin = False
+        user.system_role_id = SystemRole.ALUMNO
+        return
+    if fate == "suspend":
+        user.suspended_at = datetime.now(UTC)
+        return
+    user.deleted_at = datetime.now(UTC)
+
+
+async def test_ensure_admin_remains_raises_last_admin_when_target_is_alone() -> None:
+    target = User(
+        first_name="Only",
+        last_name="Admin",
+        email=unique_email("alone-tgt"),
+        password_hash="x",
+        system_role_id=SystemRole.ADMIN,
+        is_admin=True,
+    )
+    target.id = uuid.uuid4()
+    actor = User(
+        first_name="Other",
+        last_name="Actor",
+        email=unique_email("alone-act"),
+        password_hash="x",
+        system_role_id=SystemRole.ALUMNO,
+        is_admin=False,
+    )
+    actor.id = uuid.uuid4()
+    with pytest.raises(LastAdmin):
+        _ensure_admin_remains([target], actor=actor, target=target)
+
+
+async def test_held_lock_refreshes_same_session_actor(
     require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
-    """El actor no es B ni C: retiene el lock de B+C y exige 409 last_admin.
+    """A se carga con session.get; otra conexión degrada A y C bajo lock.
 
-    Mata K1 (LastAdmin→return acaba en AccessDenied) y K3 (sin FOR UPDATE
-    el actor no espera y tampoco recibe LastAdmin).
+    Sin ``populate_existing`` el actor caducado cuenta como admin y B cae.
+    Mata el mutante del lock y K3 (sin FOR UPDATE no espera).
     """
 
     dsn = RedactedDsn(resolve_test_database_url())
@@ -771,16 +795,14 @@ async def test_held_lock_demote_of_last_admin_is_last_admin(
             target_id = await _insert_admin(session, "lock-target")
             peer_id = await _insert_admin(session, "lock-peer")
             ids = [actor_id, target_id, peer_id]
-            actor_row = await session.get(User, actor_id)
-            assert actor_row is not None
-            actor_row.is_admin = False
-            actor_row.system_role_id = SystemRole.ALUMNO
 
+        actor_loaded = asyncio.Event()
         lock_ready = asyncio.Event()
         actor_started = asyncio.Event()
         demote_task: asyncio.Task[None] | None = None
 
         async def _hold_peer_and_target() -> None:
+            await actor_loaded.wait()
             async with AsyncSession(engine) as session, session.begin():
                 await session.scalars(
                     select(User)
@@ -788,10 +810,11 @@ async def test_held_lock_demote_of_last_admin_is_last_admin(
                     .order_by(User.id)
                     .with_for_update()
                 )
-                peer = await session.get(User, peer_id)
-                assert peer is not None
-                peer.is_admin = False
-                peer.system_role_id = SystemRole.ALUMNO
+                for user_id in (actor_id, peer_id):
+                    row = await session.get(User, user_id)
+                    assert row is not None
+                    row.is_admin = False
+                    row.system_role_id = SystemRole.ALUMNO
                 await session.flush()
                 lock_ready.set()
                 await actor_started.wait()
@@ -804,12 +827,16 @@ async def test_held_lock_demote_of_last_admin_is_last_admin(
                     await asyncio.sleep(0.05)
 
         async def _demote_target() -> None:
-            await lock_ready.wait()
-            actor_started.set()
             async with AsyncSession(engine) as session, session.begin():
+                actor = await session.get(User, actor_id)
+                assert actor is not None
+                assert actor.is_site_admin
+                actor_loaded.set()
+                await lock_ready.wait()
+                actor_started.set()
                 await set_user_admin(
                     session,
-                    actor=_stale_admin_actor(actor_id),
+                    actor=actor,
                     user_id=target_id,
                     is_admin=False,
                 )
@@ -818,8 +845,8 @@ async def test_held_lock_demote_of_last_admin_is_last_admin(
         demote_task = asyncio.create_task(_demote_target())
         try:
             await asyncio.wait_for(asyncio.shield(demote_task), timeout=8)
-            pytest.fail("expected LastAdmin")
-        except LastAdmin:
+            pytest.fail("expected AccessDenied")
+        except AccessDenied:
             pass
         finally:
             await hold_task
@@ -827,11 +854,14 @@ async def test_held_lock_demote_of_last_admin_is_last_admin(
         async with AsyncSession(engine) as session:
             target = await session.get(User, target_id)
             peer = await session.get(User, peer_id)
+            actor = await session.get(User, actor_id)
             assert target is not None
             assert peer is not None
+            assert actor is not None
             assert target.is_admin is True
             assert target.system_role_id == SystemRole.ADMIN
             assert peer.is_admin is False
+            assert actor.is_admin is False
     finally:
         async with AsyncSession(engine) as session, session.begin():
             await _restore_parked_admins(session, extras, ids)
@@ -844,7 +874,7 @@ async def test_actor_revalidated_after_lock_when_degraded(
     migrated_test_database: None,
     fate: str,
 ) -> None:
-    """Tres admins: B se degrada/suspende/borra mientras actúa sobre C."""
+    """Tres admins: B se carga en la sesión y se degrada desde otra conexión."""
 
     dsn = RedactedDsn(resolve_test_database_url())
     engine = create_async_engine(dsn.secret(), pool_size=4, max_overflow=0)
@@ -858,11 +888,13 @@ async def test_actor_revalidated_after_lock_when_degraded(
             admin_c = await _insert_admin(session, "toc-c")
             ids = [admin_a, admin_b, admin_c]
 
+        actor_loaded = asyncio.Event()
         lock_ready = asyncio.Event()
         actor_started = asyncio.Event()
         act_task: asyncio.Task[None] | None = None
 
         async def _degrade_b() -> None:
+            await actor_loaded.wait()
             async with AsyncSession(engine) as session, session.begin():
                 await session.scalars(
                     select(User)
@@ -872,13 +904,7 @@ async def test_actor_revalidated_after_lock_when_degraded(
                 )
                 actor = await session.get(User, admin_b)
                 assert actor is not None
-                if fate == "demote":
-                    actor.is_admin = False
-                    actor.system_role_id = SystemRole.ALUMNO
-                elif fate == "suspend":
-                    actor.suspended_at = datetime.now(UTC)
-                else:
-                    actor.deleted_at = datetime.now(UTC)
+                _apply_fate(actor, fate)
                 await session.flush()
                 lock_ready.set()
                 await actor_started.wait()
@@ -891,28 +917,21 @@ async def test_actor_revalidated_after_lock_when_degraded(
                     await asyncio.sleep(0.05)
 
         async def _act_on_c() -> None:
-            await lock_ready.wait()
-            actor_started.set()
             async with AsyncSession(engine) as session, session.begin():
+                actor = await session.get(User, admin_b)
+                assert actor is not None
+                actor_loaded.set()
+                await lock_ready.wait()
+                actor_started.set()
                 if fate == "delete":
-                    await soft_delete_user(
-                        session,
-                        actor=_stale_admin_actor(admin_b),
-                        user_id=admin_c,
-                    )
+                    await soft_delete_user(session, actor=actor, user_id=admin_c)
                 elif fate == "suspend":
                     await set_user_suspended(
-                        session,
-                        actor=_stale_admin_actor(admin_b),
-                        user_id=admin_c,
-                        suspended=True,
+                        session, actor=actor, user_id=admin_c, suspended=True
                     )
                 else:
                     await set_user_admin(
-                        session,
-                        actor=_stale_admin_actor(admin_b),
-                        user_id=admin_c,
-                        is_admin=False,
+                        session, actor=actor, user_id=admin_c, is_admin=False
                     )
 
         hold_task = asyncio.create_task(_degrade_b())
@@ -940,24 +959,166 @@ async def test_actor_revalidated_after_lock_when_degraded(
         await engine.dispose()
 
 
-async def test_stale_actor_cannot_remove_last_active_admin(
-    session_client: Any, db_session: AsyncSession
+@pytest.mark.parametrize("action", ("identity", "unsuspend"))
+async def test_stale_same_session_actor_cannot_edit_or_unsuspend(
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+    action: str,
 ) -> None:
-    admin = await _signup_role(
-        session_client, db_session, SystemRole.ADMIN, prefix="seq-last"
-    )
-    stale = await _signup(session_client, email=unique_email("seq-stale"))
-    await _demote_foreign_admins(db_session, {admin["id"]})
-    with pytest.raises(LastAdmin):
-        await set_user_admin(
-            db_session,
-            actor=_stale_admin_actor(stale["id"]),
-            user_id=admin["id"],
-            is_admin=False,
+    """session.get en la misma sesión; otra conexión degrada al actor.
+
+    Mata N4 (identidad) y N6 (reactivar) si el lock no refresca.
+    """
+
+    dsn = RedactedDsn(resolve_test_database_url())
+    engine = create_async_engine(dsn.secret(), pool_size=4, max_overflow=0)
+    extras: list[tuple[UUID, str, bool]] = []
+    ids: list[UUID] = []
+    try:
+        async with AsyncSession(engine) as session, session.begin():
+            extras = await _park_existing_admins(session)
+            actor_id = await _insert_admin(session, f"{action}-act")
+            target_id = await _insert_admin(session, f"{action}-tgt")
+            ids = [actor_id, target_id]
+            target = await session.get(User, target_id)
+            assert target is not None
+            target.suspended_at = datetime.now(UTC)
+
+        async with AsyncSession(engine) as session, session.begin():
+            actor = await session.get(User, actor_id)
+            assert actor is not None
+            async with AsyncSession(engine) as other, other.begin():
+                row = await other.get(User, actor_id)
+                assert row is not None
+                row.is_admin = False
+                row.system_role_id = SystemRole.ALUMNO
+            with pytest.raises(AccessDenied):
+                if action == "identity":
+                    await update_user_identity(
+                        session,
+                        actor=actor,
+                        user_id=target_id,
+                        body=AdminUserIdentityUpdate(first_name="N4"),
+                    )
+                else:
+                    await set_user_suspended(
+                        session, actor=actor, user_id=target_id, suspended=False
+                    )
+
+        async with AsyncSession(engine) as session:
+            target = await session.get(User, target_id)
+            assert target is not None
+            if action == "identity":
+                assert target.first_name != "N4"
+            else:
+                assert target.suspended_at is not None
+    finally:
+        async with AsyncSession(engine) as session, session.begin():
+            await _restore_parked_admins(session, extras, ids)
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("fate", ("demote", "suspend", "delete"))
+async def test_concurrent_mutual_admin_ops_leave_one_admin(
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+    fate: str,
+) -> None:
+    """Dos conexiones cargan al actor con session.get y se degradan a la vez."""
+
+    dsn = RedactedDsn(resolve_test_database_url())
+    engine = create_async_engine(dsn.secret(), pool_size=4, max_overflow=0)
+    extras: list[tuple[UUID, str, bool]] = []
+    ids: list[UUID] = []
+    try:
+        async with AsyncSession(engine) as session, session.begin():
+            extras = await _park_existing_admins(session)
+            admin_a = await _insert_admin(session, f"race-a-{fate}")
+            admin_b = await _insert_admin(session, f"race-b-{fate}")
+            ids = [admin_a, admin_b]
+
+        async def _act(actor_id: UUID, target_id: UUID) -> None:
+            async with AsyncSession(engine) as session, session.begin():
+                actor = await session.get(User, actor_id)
+                assert actor is not None
+                if fate == "delete":
+                    await soft_delete_user(session, actor=actor, user_id=target_id)
+                elif fate == "suspend":
+                    await set_user_suspended(
+                        session, actor=actor, user_id=target_id, suspended=True
+                    )
+                else:
+                    await set_user_admin(
+                        session, actor=actor, user_id=target_id, is_admin=False
+                    )
+
+        results = await asyncio.gather(
+            _act(admin_a, admin_b),
+            _act(admin_b, admin_a),
+            return_exceptions=True,
         )
-    leftover = await db_session.get(User, admin["id"])
-    assert leftover is not None
-    assert leftover.is_admin is True
+        denied = [item for item in results if isinstance(item, AccessDenied)]
+        failures = [
+            item
+            for item in results
+            if isinstance(item, BaseException) and not isinstance(item, AccessDenied)
+        ]
+        assert not failures, failures
+        assert len(denied) == 1
+        assert results.count(None) == 1
+
+        async with AsyncSession(engine) as session:
+            remaining = [
+                user
+                for user_id in ids
+                if (user := await session.get(User, user_id)) is not None
+                and user.is_site_admin
+                and user.deleted_at is None
+                and user.suspended_at is None
+            ]
+            assert len(remaining) == 1
+    finally:
+        async with AsyncSession(engine) as session, session.begin():
+            await _restore_parked_admins(session, extras, ids)
+        await engine.dispose()
+
+
+async def test_stale_same_session_actor_cannot_remove_last_active_admin(
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    dsn = RedactedDsn(resolve_test_database_url())
+    engine = create_async_engine(dsn.secret(), pool_size=4, max_overflow=0)
+    extras: list[tuple[UUID, str, bool]] = []
+    ids: list[UUID] = []
+    try:
+        async with AsyncSession(engine) as session, session.begin():
+            extras = await _park_existing_admins(session)
+            actor_id = await _insert_admin(session, "seq-stale")
+            target_id = await _insert_admin(session, "seq-last")
+            ids = [actor_id, target_id]
+
+        async with AsyncSession(engine) as session, session.begin():
+            actor = await session.get(User, actor_id)
+            assert actor is not None
+            async with AsyncSession(engine) as other, other.begin():
+                row = await other.get(User, actor_id)
+                assert row is not None
+                row.is_admin = False
+                row.system_role_id = SystemRole.ALUMNO
+            with pytest.raises(AccessDenied):
+                await set_user_admin(
+                    session, actor=actor, user_id=target_id, is_admin=False
+                )
+
+        async with AsyncSession(engine) as session:
+            leftover = await session.get(User, target_id)
+            assert leftover is not None
+            assert leftover.is_admin is True
+    finally:
+        async with AsyncSession(engine) as session, session.begin():
+            await _restore_parked_admins(session, extras, ids)
+        await engine.dispose()
 
 
 async def test_suspended_admin_does_not_count_as_active(
@@ -979,27 +1140,29 @@ async def test_suspended_admin_does_not_count_as_active(
         json={"suspended": True},
     )
     assert parked.status_code == 200
-    await _demote_foreign_admins(db_session, {target["id"], suspended["id"]})
-    stale = await _signup(session_client, email=unique_email("k11-stale"))
-    with pytest.raises(LastAdmin):
-        await set_user_admin(
-            db_session,
-            actor=_stale_admin_actor(stale["id"]),
-            user_id=target["id"],
-            is_admin=False,
-        )
-    still = await db_session.get(User, target["id"])
-    assert still is not None
-    assert still.is_admin is True
+    await _demote_foreign_admins(
+        db_session, {actor["id"], target["id"], suspended["id"]}
+    )
+    demoted = await session_client.put(
+        f"/api/v1/admin/users/{target['id']}/admin",
+        json={"isAdmin": False},
+    )
+    assert demoted.status_code == 200
+    still_actor = await db_session.get(User, actor["id"])
+    still_target = await db_session.get(User, target["id"])
+    assert still_actor is not None
+    assert still_target is not None
+    assert still_actor.is_admin is True
+    assert still_target.is_admin is False
     active_ids = set(
         await db_session.scalars(
             select(User.id).where(
                 _active_admin_clause(),
-                User.id.in_((target["id"], suspended["id"])),
+                User.id.in_((actor["id"], target["id"], suspended["id"])),
             )
         )
     )
-    assert active_ids == {target["id"]}
+    assert active_ids == {actor["id"]}
 
 
 async def test_self_suspend_is_cannot_modify_self_even_with_other_admins(
@@ -1190,6 +1353,63 @@ async def test_admin_and_search_query_reject_overlong_and_strict_bool(
     )
     assert yes_sus.status_code == 400
     assert yes_sus.json()["error"] == "validation"
+
+
+async def test_nul_bytes_in_user_text_fields_are_validation(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    admin = await _signup_role(
+        session_client, db_session, SystemRole.ADMIN, prefix="nul-admin"
+    )
+    listed = await session_client.get(
+        "/api/v1/admin/users", params={"query": "ada\x00"}
+    )
+    assert listed.status_code == 400
+    assert listed.json()["error"] == "validation"
+    search = await session_client.get("/api/v1/users/search", params={"q": "ada\x00"})
+    assert search.status_code == 400
+    assert search.json()["error"] == "validation"
+    for field, value in (
+        ("firstName", "Ada\x00"),
+        ("lastName", "Lovelace\x00"),
+        ("email", "ada\x00@example.com"),
+    ):
+        response = await session_client.put(
+            f"/api/v1/admin/users/{admin['id']}",
+            json={field: value},
+        )
+        assert response.status_code == 400
+        assert response.json()["error"] == "validation"
+
+
+async def test_teacher_exact_email_uses_lower_not_casefold(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    marker = uuid.uuid4().hex[:8]
+    teacher = await _signup(session_client, email=unique_email("tea-esz"))
+    await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, teacher["id"], _COURSE, CourseRole.TEACHER)
+    email = f"{marker}ßname@example.com"
+    db_session.add(
+        User(
+            first_name="Eszett",
+            last_name=marker,
+            email=email,
+            password_hash="x",
+            system_role_id=SystemRole.ALUMNO,
+        )
+    )
+    await db_session.flush()
+    found = await session_client.get("/api/v1/users/search", params={"q": email})
+    assert found.status_code == 200
+    items = found.json()["items"]
+    assert len(items) == 1
+    assert items[0]["email"].lower() == email.lower()
+    folded = await session_client.get(
+        "/api/v1/users/search", params={"q": email.casefold()}
+    )
+    assert folded.status_code == 200
+    assert folded.json()["items"] == []
 
 
 async def test_deactivated_alumno_cannot_demote_admin(

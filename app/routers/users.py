@@ -1,6 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import AfterValidator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -8,7 +9,7 @@ from app.models import User
 from app.permissions.deps import get_current_user
 from app.schemas.errors import ErrorResponse
 from app.schemas.pagination import Paginated, PaginationQuery, pagination_query
-from app.schemas.users import UserSearchHit
+from app.schemas.users import UserSearchHit, reject_nul
 from app.services.users import search_users
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -26,7 +27,7 @@ ERROR_RESPONSES = {
     response_model_exclude_none=True,
     summary="Buscar usuarios para matricular",
     description=(
-        "Admin (``site:manage-admins`` o ``site:manage-courses``) o "
+        "Admin (``site:manage-admins``) o "
         "profesor con membresía ``teacher`` vigente (no borrada). No "
         "devuelve suspendidos, borrados ni el hash de contraseña. "
         "``q`` (máximo 200): vacío no lista a nadie. Un admin busca por "
@@ -61,6 +62,7 @@ async def get_users_search(
             ),
             examples=["ada"],
         ),
+        AfterValidator(reject_nul),
     ] = "",
 ) -> Paginated[UserSearchHit]:
     return await search_users(session, actor=actor, q=q, pagination=pagination)

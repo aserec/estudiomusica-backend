@@ -8,6 +8,14 @@ from app.schemas.auth import PublicUser, normalize_email
 from app.schemas.base import APIModel
 
 
+def reject_nul(value: str | None) -> str | None:
+    """Postgres rechaza U+0000 en texto; FastAPI lo convertiría en 500."""
+
+    if value is not None and "\x00" in value:
+        raise ValueError("must not contain NUL")
+    return value
+
+
 class AdminUserStatus(StrEnum):
     """Filtro de listado. Enums en snake_case (convención #91)."""
 
@@ -37,6 +45,7 @@ class AdminUserIdentityUpdate(APIModel):
     def strip_first_name(cls, value: str | None) -> str | None:
         if value is None:
             return None
+        reject_nul(value)
         stripped = value.strip()
         if not stripped:
             raise ValueError("firstName required")
@@ -47,11 +56,14 @@ class AdminUserIdentityUpdate(APIModel):
     def strip_last_name(cls, value: str | None) -> str | None:
         if value is None:
             return None
+        reject_nul(value)
         return value.strip()
 
     @field_validator("email", mode="before")
     @classmethod
     def normalize_identity_email(cls, value: object) -> object:
+        if isinstance(value, str):
+            reject_nul(value)
         return normalize_email(value)
 
     @model_validator(mode="after")
