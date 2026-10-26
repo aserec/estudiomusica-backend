@@ -2383,6 +2383,122 @@ def test_sslmode_require_fails_when_server_refuses_ssl(
     get_settings.cache_clear()
 
 
+def test_asyncpg_url_normalizes_uppercase_ssl_key() -> None:
+    """N11: ``asyncpg_url_and_connect_args`` dobla ``SSL=`` a ``ssl=``."""
+
+    from app.db import asyncpg_url_and_connect_args
+
+    url, args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?SSL=disable"
+    )
+    assert "SSL=" not in url
+    assert "sslmode=" not in url.lower()
+    assert args.get("ssl") is False
+
+
+def test_prepare_rejects_mixed_ssl_and_sslmode() -> None:
+    """N13: ``prepare_asyncpg_connect_kwargs`` rechaza ssl+sslmode."""
+
+    from app.db import _SSL_CONFLICT_MSG, prepare_asyncpg_connect_kwargs
+
+    with pytest.raises(ValueError, match="mezclar ni repetir") as mixed:
+        prepare_asyncpg_connect_kwargs(
+            {"host": "127.0.0.1", "ssl": "disable", "sslmode": "verify-full"}
+        )
+    assert str(mixed.value) == _SSL_CONFLICT_MSG
+    with pytest.raises(ValueError, match="mezclar ni repetir"):
+        prepare_asyncpg_connect_kwargs(
+            {"host": "127.0.0.1", "SSL": "disable", "sslmode": "require"}
+        )
+
+
+def test_alembic_normalizes_configured_url_before_connect_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N9: ``sqlalchemy.url`` llega a ``asyncpg_url`` ya normalizado."""
+
+    from alembic import command
+
+    from app.migrations.config import make_alembic_config
+
+    captured: list[str] = []
+
+    import sys
+
+    from app.db import asyncpg_url_and_connect_args as original
+
+    def spy(raw: str) -> tuple[str, dict[str, Any]]:
+        captured.append(raw)
+        return original(raw)
+
+    monkeypatch.setattr("app.db.asyncpg_url_and_connect_args", spy)
+    for name in ("app.migrations.env", "env"):
+        module = sys.modules.get(name)
+        if module is not None:
+            monkeypatch.setattr(module, "asyncpg_url_and_connect_args", spy)
+
+    raw = "postgresql+asyncpg://u:p@127.0.0.1:1/db_test?SSL=disable"
+    try:
+        command.current(make_alembic_config(raw))
+    except Exception:
+        pass
+    else:
+        raise AssertionError("alembic-url debía fallar")
+    assert captured
+    assert "SSL=" not in captured[0]
+    from sqlalchemy.engine.url import make_url
+
+    assert make_url(captured[0]).query.get("ssl") == "disable"
+
+
+def test_alembic_normalizes_settings_url_before_connect_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N10: env.py vuelve a normalizar el DSN de Settings."""
+
+    from alembic import command
+
+    from app.config import get_settings
+    from app.config.settings import Settings
+    from app.migrations.config import make_alembic_config
+
+    raw = "postgresql+asyncpg://u:p@127.0.0.1:1/db_test?SSL=disable"
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("DATABASE_URL", raw)
+    monkeypatch.setattr(Settings, "resolved_database_url", lambda self: raw)
+    get_settings.cache_clear()
+
+    captured: list[str] = []
+    import sys
+
+    from app.db import asyncpg_url_and_connect_args as original
+
+    def spy(raw_url: str) -> tuple[str, dict[str, Any]]:
+        captured.append(raw_url)
+        return original(raw_url)
+
+    monkeypatch.setattr("app.db.asyncpg_url_and_connect_args", spy)
+    for name in ("app.migrations.env", "env"):
+        module = sys.modules.get(name)
+        if module is not None:
+            monkeypatch.setattr(module, "asyncpg_url_and_connect_args", spy)
+
+    try:
+        try:
+            command.current(make_alembic_config())
+        except Exception:
+            pass
+        else:
+            raise AssertionError("alembic-env debía fallar")
+        assert captured
+        assert "SSL=" not in captured[0]
+        from sqlalchemy.engine.url import make_url
+
+        assert make_url(captured[0]).query.get("ssl") == "disable"
+    finally:
+        get_settings.cache_clear()
+
+
 def test_prepare_translates_uppercase_sslmode_alone() -> None:
     """S4a: ``SSLMODE`` se traduce a ``ssl`` sin mezclar hostname ni CA."""
 

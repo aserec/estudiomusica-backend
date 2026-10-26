@@ -32,7 +32,6 @@ _ADAPTER_CALLABLE_KEYS = frozenset(
     }
 )
 _SSLROOTCERT_KEYS = frozenset({"sslrootcert"})
-_SSLMODE_KEYS = frozenset({"sslmode"})
 _SSL_QUERY_KEYS = frozenset({"ssl", "sslmode"})
 _SSL_CONFLICT_MSG = "DATABASE_URL no puede mezclar ni repetir ssl y sslmode"
 
@@ -230,9 +229,10 @@ def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def asyncpg_url_and_connect_args(raw: str) -> tuple[str, dict[str, Any]]:
-    """Quita ``sslrootcert`` / ``sslmode`` de la URL (asyncpg no los acepta).
+    """Quita ``sslrootcert`` de la URL (asyncpg no lo acepta).
 
-    El SSL lo decide ``asyncpg_ssl_connect_arg``, la misma función que la sonda.
+    ``sslmode`` ya no llega: ``normalize_asyncpg_ssl_url`` lo dobla a
+    ``ssl``. El SSL lo decide ``asyncpg_ssl_connect_arg``.
     """
 
     raw = normalize_asyncpg_ssl_url(raw)
@@ -240,11 +240,7 @@ def asyncpg_url_and_connect_args(raw: str) -> tuple[str, dict[str, Any]]:
     query = dict(parsed.query or {})
     prepared = prepare_asyncpg_connect_kwargs(query)
     connect_args: dict[str, Any] = {}
-    drop = {
-        key
-        for key in query
-        if str(key).lower() in _SSLROOTCERT_KEYS or str(key).lower() in _SSLMODE_KEYS
-    }
+    drop = {key for key in query if str(key).lower() in _SSLROOTCERT_KEYS}
     if drop:
         query = {key: value for key, value in query.items() if key not in drop}
         raw = parsed.set(query=query).render_as_string(hide_password=False)
