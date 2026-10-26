@@ -94,7 +94,7 @@ def _name_match(term: str) -> ColumnElement[bool]:
     """
 
     pattern = f"%{_escape_like(term)}%"
-    display_name = User.first_name + " " + User.last_name
+    display_name = User.first_name + literal_column("' '") + User.last_name
     return _nfc_text(display_name).ilike(pattern, escape="\\")
 
 

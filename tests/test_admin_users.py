@@ -24,6 +24,7 @@ from app.services.users import (
     _email_term,
     _ensure_admin_remains,
     _exact_email_clause,
+    _name_match,
     _visible_user_filters,
     set_user_admin,
     set_user_suspended,
@@ -2259,6 +2260,13 @@ async def test_admin_search_fallback_keeps_nfc_not_nfkc_ligature(
     )
     assert missed.status_code == 200
     assert missed.json()["items"] == []
+
+
+def test_name_match_compiles_without_concat() -> None:
+    compiled = _name_match("ana").compile(compile_kwargs={"literal_binds": True})
+    sql = str(compiled)
+    assert "concat(" not in sql.lower()
+    assert "||" in sql
 
 
 async def test_teacher_exact_email_query_uses_unique_index(
