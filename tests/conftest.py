@@ -19,7 +19,13 @@ from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
-from app.db import RedactedDsn, get_session, redact_database_url
+from app.db import (
+    RedactedDsn,
+    SessionDep,
+    asyncpg_url_and_connect_args,
+    get_session,
+    redact_database_url,
+)
 from app.exceptions import Validation
 from app.models import User
 from app.permissions.deps import require_course_permission, require_site_permission
@@ -120,16 +126,24 @@ def derive_alembic_database_url(test_url: str) -> str:
 
 
 def resolve_test_database_url() -> str:
-    return require_test_database_url(
-        os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
+    from app.config.settings import _normalize_sslmode
+
+    return _normalize_sslmode(
+        require_test_database_url(
+            os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
+        )
     )
 
 
 def resolve_alembic_database_url() -> str:
+    from app.config.settings import _normalize_sslmode
+
     raw = os.environ.get("ALEMBIC_TEST_DATABASE_URL")
     if raw is None:
         raw = derive_alembic_database_url(resolve_test_database_url())
-    return require_test_database_url(raw, env_name="ALEMBIC_TEST_DATABASE_URL")
+    return _normalize_sslmode(
+        require_test_database_url(raw, env_name="ALEMBIC_TEST_DATABASE_URL")
+    )
 
 
 def alembic_config(database_url: str | RedactedDsn) -> Config:
@@ -272,9 +286,7 @@ def _mount_probes(application: FastAPI) -> None:
         return FileResponse(_PROBE_FILE, media_type="application/octet-stream")
 
     @application.get("/api/v1/_test/session")
-    async def session_probe(
-        session: Annotated[AsyncSession, Depends(get_session)],
-    ) -> dict[str, str]:
+    async def session_probe(session: SessionDep) -> dict[str, str]:
         await session.execute(text("SELECT 1"))
         return {"session": "ok"}
 
@@ -295,6 +307,29 @@ def _mount_probes(application: FastAPI) -> None:
         ],
     ) -> dict[str, bool]:
         return {"ok": True}
+
+    @application.post("/api/v1/_test/session/{label}", status_code=201)
+    async def session_create(label: str, session: SessionDep) -> dict[str, str]:
+        await session.execute(
+            text(
+                "INSERT INTO session_probes "
+                "(id, label, created_at, updated_at) "
+                "VALUES ("
+                "gen_random_uuid(), :label, "
+                "clock_timestamp(), clock_timestamp()"
+                ")"
+            ),
+            {"label": label},
+        )
+        return {"label": label}
+
+    @application.get("/api/v1/_test/session/{label}")
+    async def session_get(label: str, session: SessionDep) -> dict[str, str | None]:
+        found = await session.scalar(
+            text("SELECT label FROM session_probes WHERE label = :label"),
+            {"label": label},
+        )
+        return {"label": found}
 
 
 def _build_client(
@@ -756,6 +791,73 @@ def _as_redacted_dsn(database_url: str | RedactedDsn) -> RedactedDsn:
     return RedactedDsn(database_url)
 
 
+def _dsn_secret_values(dsn: RedactedDsn) -> tuple[str, ...]:
+    """Contraseñas del netloc y de ``password`` / ``sslpassword`` en la query."""
+
+    from urllib.parse import parse_qs, urlparse
+
+    values: list[str] = []
+    try:
+        parsed = make_url(dsn.secret())
+    except Exception:
+        parsed = None
+    if parsed is not None:
+        if parsed.password:
+            values.append(parsed.password)
+        for key, raw in (parsed.query or {}).items():
+            if str(key).lower() not in {"password", "sslpassword"}:
+                continue
+            if isinstance(raw, (list, tuple)):
+                values.extend(str(item) for item in raw if item)
+                continue
+            if raw:
+                values.append(str(raw))
+    try:
+        raw_query = urlparse(dsn.secret()).query
+    except Exception:
+        raw_query = ""
+    if raw_query:
+        for key, items in parse_qs(raw_query, keep_blank_values=True).items():
+            if key.lower() not in {"password", "sslpassword"}:
+                continue
+            values.extend(item for item in items if item)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return tuple(unique)
+
+
+def _redacted_exception_detail(exc: BaseException, dsn: RedactedDsn) -> str:
+    """Texto de la causa sin la contraseña del DSN."""
+
+    from urllib.parse import quote
+
+    text = str(exc)
+    secret = dsn.secret()
+    if secret:
+        text = text.replace(secret, str(dsn))
+    for password in _dsn_secret_values(dsn):
+        text = text.replace(password, "***")
+        text = text.replace(quote(password, safe=""), "***")
+    text = " ".join(text.split())
+    if len(text) > 240:
+        text = text[:240] + "…"
+    return text
+
+
+def _create_async_engine(database_url: str, **kwargs: Any) -> AsyncEngine:
+    """``create_async_engine`` con ``sslrootcert`` → ``SSLContext``."""
+
+    url, ssl_args = asyncpg_url_and_connect_args(database_url)
+    connect_args = dict(kwargs.pop("connect_args", {}) or {})
+    connect_args.update(ssl_args)
+    return create_async_engine(url, connect_args=connect_args, **kwargs)
+
+
 def ensure_database_exists(database_url: str | RedactedDsn) -> None:
     """Crea la base conectando a la BD de mantenimiento ``postgres``."""
 
@@ -766,7 +868,7 @@ def ensure_database_exists(database_url: str | RedactedDsn) -> None:
         raise RuntimeError(f"DSN sin nombre de base. {dsn}") from None
 
     async def create_if_missing() -> None:
-        engine = create_async_engine(
+        engine = _create_async_engine(
             parsed.set(database="postgres").render_as_string(hide_password=False),
             isolation_level="AUTOCOMMIT",
             connect_args={
@@ -802,16 +904,17 @@ def drop_database_if_exists(database_url: str | RedactedDsn) -> None:
     """Borra una base de test. Conecta a la BD de mantenimiento ``postgres``."""
 
     dsn = _as_redacted_dsn(database_url)
-    parsed = make_url(dsn.secret())
-    db_name = parsed.database
+    db_name = make_url(dsn.secret()).database
     if db_name is None:
         raise RuntimeError(f"DSN sin nombre de base. {dsn}") from None
     if not db_name.endswith("_test"):
         raise RuntimeError(f"Solo se pueden borrar bases *_test. {dsn}") from None
 
     async def drop() -> None:
-        engine = create_async_engine(
-            parsed.set(database="postgres").render_as_string(hide_password=False),
+        engine = _create_async_engine(
+            make_url(dsn.secret())
+            .set(database="postgres")
+            .render_as_string(hide_password=False),
             isolation_level="AUTOCOMMIT",
             connect_args={
                 "timeout": _PING_CONNECT_TIMEOUT,
@@ -837,21 +940,25 @@ def drop_database_if_exists(database_url: str | RedactedDsn) -> None:
     try:
         asyncio.run(drop())
     except Exception as exc:
+        detail = _redacted_exception_detail(exc, dsn)
         if _is_connection_error(exc):
             raise ConnectionError(
-                f"No se pudo borrar la base de test ({type(exc).__name__}). {dsn}"
-            ) from exc
+                f"No se pudo borrar la base de test "
+                f"({type(exc).__name__}: {detail}). {dsn}"
+            ) from None
         raise RuntimeError(
-            f"No se pudo borrar la base de test ({type(exc).__name__}). {dsn}"
-        ) from exc
+            f"No se pudo borrar la base de test ({type(exc).__name__}: {detail}). {dsn}"
+        ) from None
 
 
 def _ping_postgres(database_url: str | RedactedDsn) -> None:
+    from app.config.settings import _normalize_sslmode
+
     dsn = _as_redacted_dsn(database_url)
 
     async def ping() -> None:
-        engine = create_async_engine(
-            dsn.secret(),
+        engine = _create_async_engine(
+            _normalize_sslmode(dsn.secret()),
             pool_pre_ping=False,
             connect_args={
                 "timeout": _PING_CONNECT_TIMEOUT,
@@ -941,7 +1048,7 @@ _LEFTOVER_TEST_DATABASES = (
 
 def _drop_leftover_test_tables(dsn: RedactedDsn) -> None:
     async def drop() -> None:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 for name in _LEFTOVER_TEST_TABLES:
@@ -1031,7 +1138,7 @@ async def db_session(
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     get_settings.cache_clear()
     get_app.cache_clear()
-    engine = create_async_engine(dsn.secret(), pool_pre_ping=True)
+    engine = _create_async_engine(dsn.secret(), pool_pre_ping=True)
     try:
         async with engine.connect() as connection:
             transaction = await connection.begin()

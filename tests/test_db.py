@@ -8,7 +8,13 @@ from sqlalchemy import String, Table, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db import RedactedDsn, clear_engine, get_session, get_session_factory
+from app.db import (
+    RedactedDsn,
+    SessionDep,
+    clear_engine,
+    get_session,
+    get_session_factory,
+)
 from app.models import PersistentModel
 
 
@@ -311,6 +317,125 @@ async def test_db_session_next_test_does_not_see_previous_commit(
         {"label": _DB_SESSION_LEAK_LABEL},
     )
     assert leftover is None
+
+
+def test_session_dep_commits_before_response() -> None:
+    """FastAPI 0.162: scope=function sale del yield antes de enviar."""
+
+    from typing import get_args
+
+    from fastapi.params import Depends as DependsParam
+
+    args = get_args(SessionDep)
+    assert args[0] is AsyncSession
+    dep = args[1]
+    assert isinstance(dep, DependsParam)
+    assert dep.dependency is get_session
+    assert dep.scope == "function"
+
+
+async def _create_probe_table(engine: Any, probe_table: Table) -> None:
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
+        )
+        await connection.execute(text("DELETE FROM session_probes"))
+
+
+async def _drop_probe_table(engine: Any, probe_table: Table) -> None:
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
+        )
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_http_posts_are_visible_from_another_session_before_response(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """400 POST 201: otra sesión (GET) ve la fila en cuanto responde el POST."""
+
+    from httpx2 import ASGITransport, AsyncClient
+
+    from app.config import get_settings
+    from app.db import dispose_engine
+    from app.main import create_app
+    from tests.conftest import _mount_probes
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    get_settings.cache_clear()
+    clear_engine()
+    setup_engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
+    await _create_probe_table(setup_engine, probe_table)
+    application = create_app()
+    _mount_probes(application)
+    try:
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            for index in range(400):
+                label = f"vis-{index:03d}"
+                created = await client.post(f"/api/v1/_test/session/{label}")
+                assert created.status_code == 201, created.text
+                assert created.json() == {"label": label}
+                read = await client.get(f"/api/v1/_test/session/{label}")
+                assert read.status_code == 200, read.text
+                assert read.json() == {"label": label}
+    finally:
+        await _drop_probe_table(setup_engine, probe_table)
+        await setup_engine.dispose()
+        await dispose_engine()
+        get_settings.cache_clear()
+        clear_engine()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_http_session_commit_error_is_not_2xx(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """Un fallo de commit no puede devolver 2xx (scope=function)."""
+
+    from httpx2 import ASGITransport, AsyncClient
+    from sqlalchemy.ext.asyncio import AsyncSession as SAAsyncSession
+
+    from app.config import get_settings
+    from app.db import dispose_engine
+    from app.main import create_app
+    from tests.conftest import _mount_probes
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    get_settings.cache_clear()
+    clear_engine()
+    setup_engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
+    await _create_probe_table(setup_engine, probe_table)
+    application = create_app()
+    _mount_probes(application)
+
+    async def _boom(self: SAAsyncSession) -> None:
+        raise RuntimeError("commit-failed")
+
+    monkeypatch.setattr(SAAsyncSession, "commit", _boom)
+    try:
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/api/v1/_test/session/commit-boom")
+            assert not (200 <= response.status_code < 300)
+            assert response.status_code >= 400
+    finally:
+        await _drop_probe_table(setup_engine, probe_table)
+        await setup_engine.dispose()
+        await dispose_engine()
+        get_settings.cache_clear()
+        clear_engine()
 
 
 def test_clear_engine_disposes_sync_engine(monkeypatch: pytest.MonkeyPatch) -> None:

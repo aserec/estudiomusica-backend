@@ -1,11 +1,8 @@
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, Request, Response, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Request, Response, status
 
 from app.auth.cookies import attach_session_cookie, clear_session_cookie
 from app.config import get_settings
-from app.db import get_session
+from app.db import SessionDep
 from app.schemas.auth import (
     AuthMeResponse,
     AuthSessionResponse,
@@ -46,7 +43,7 @@ ERROR_RESPONSES = {
 async def signup(
     body: SignUpRequest,
     response: Response,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: SessionDep,
 ) -> AuthSessionResponse:
     settings = get_settings()
     user, token = await register_user(session, settings, body)
@@ -72,7 +69,7 @@ async def signup(
 async def login(
     body: LogInRequest,
     response: Response,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: SessionDep,
 ) -> AuthSessionResponse:
     settings = get_settings()
     user, token = await login_user(session, settings, body)
@@ -92,7 +89,7 @@ async def login(
 async def logout(
     request: Request,
     response: Response,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: SessionDep,
 ) -> None:
     settings = get_settings()
     await revoke_current_session(request, session, settings)
@@ -112,7 +109,7 @@ async def logout(
 )
 async def me(
     request: Request,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: SessionDep,
 ) -> AuthMeResponse:
     settings = get_settings()
     user = await resolve_current_user(request, session, settings)
