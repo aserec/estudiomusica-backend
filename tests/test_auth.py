@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.db import RedactedDsn
 from app.models import AuthSession, User
 from app.schemas.auth import SignUpRequest
+from app.services.auth import split_display_name
 from tests.conftest import PRODUCTION_AUTH_SECRET, PRODUCTION_TEST_USER
 
 pytestmark = pytest.mark.db
@@ -258,6 +259,11 @@ async def test_signup_name_bounds_after_nfc_and_raw(session_client: Any) -> None
     assert over.status_code == 400, over.text
     assert over.json()["error"] == "validation"
     assert "name" in over.json()["fields"]
+
+
+def test_split_display_name_separates_on_tab_and_ideographic_space() -> None:
+    assert split_display_name("Ada\tLovelace") == ("Ada", "Lovelace")
+    assert split_display_name("Ada\u3000Lovelace") == ("Ada", "Lovelace")
 
 
 def test_signup_request_normalizes_email() -> None:
