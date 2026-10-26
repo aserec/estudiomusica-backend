@@ -1,4 +1,5 @@
 import asyncio
+import unicodedata
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -1716,6 +1717,54 @@ async def test_teacher_search_normalizes_istanbul_email_like_login(
     listed_items = listed.json()["items"]
     assert len(listed_items) == 1
     assert listed_items[0]["email"] == stored
+
+
+@pytest.mark.parametrize("local_part", ("ñandú", "σοφία", "émile"))
+async def test_search_nfd_email_matches_nfc_stored(
+    session_client: Any, db_session: AsyncSession, local_part: str
+) -> None:
+    nfc_local = unicodedata.normalize("NFC", local_part)
+    nfd_local = unicodedata.normalize("NFD", local_part)
+    assert nfc_local != nfd_local
+    marker = uuid.uuid4().hex[:8]
+    stored = unicodedata.normalize(
+        "NFC", normalize_email(f"{nfc_local}-{marker}@example.com")
+    )
+    assert isinstance(stored, str)
+    typed_nfd = unicodedata.normalize("NFD", stored)
+    assert typed_nfd != stored
+    assert _email_term(typed_nfd) == stored
+
+    teacher = await _signup(session_client, email=unique_email("tea-nfd"))
+    await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, teacher["id"], _COURSE, CourseRole.TEACHER)
+    db_session.add(
+        User(
+            first_name="Nfd",
+            last_name=marker,
+            email=stored,
+            password_hash="x",
+            system_role_id=SystemRole.ALUMNO,
+        )
+    )
+    await db_session.flush()
+
+    found = await session_client.get("/api/v1/users/search", params={"q": typed_nfd})
+    assert found.status_code == 200
+    items = found.json()["items"]
+    assert len(items) == 1
+    assert items[0]["email"] == stored
+
+    session_client.cookies.clear()
+    await _signup_role(session_client, db_session, SystemRole.ADMIN, prefix="nfd-admin")
+    admin_search = await session_client.get(
+        "/api/v1/users/search", params={"q": typed_nfd}
+    )
+    assert admin_search.status_code == 200
+    assert admin_search.json()["items"][0]["email"] == stored
+    listed = await session_client.get("/api/v1/admin/users", params={"query": typed_nfd})
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["email"] == stored
 
 
 async def test_teacher_exact_email_query_uses_unique_index(

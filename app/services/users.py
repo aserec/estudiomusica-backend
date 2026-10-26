@@ -1,5 +1,6 @@
 """Administración de usuarios: listar, identidad, admin, suspensión y borrado."""
 
+import unicodedata
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -82,10 +83,12 @@ def _name_match(term: str) -> ColumnElement[bool]:
 
 
 def _email_term(term: str) -> str:
-    """Misma normalización que el login (``strip`` + ``lower``)."""
+    """Misma normalización que el login (``strip`` + ``lower`` + NFC)."""
 
     normalized = normalize_email(term)
-    return normalized if isinstance(normalized, str) else term
+    if not isinstance(normalized, str):
+        return term
+    return unicodedata.normalize("NFC", normalized)
 
 
 def _visible_user_filters() -> list[ColumnElement[bool]]:
