@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import os
 import shutil
 import subprocess
@@ -29,6 +30,8 @@ from app.schemas.categories import (
 )
 from app.services.categories import (
     _CATEGORY_TREE_LOCK_KEY,
+    NameKeyAudit,
+    NameKeyCollision,
     _citext_fold,
     _dup_name,
     _integrity_name,
@@ -596,6 +599,9 @@ _NAME_KEY_CASES: tuple[tuple[str, str], ...] = (
     (_TECHNOLOGIST, _TECHNOLOGIST),
     (_TRANS_FLAG, _TRANS_FLAG),
     (_PIRATE_FLAG, _PIRATE_FLAG),
+    ("©\u200d\U0001f3fd", "©\U0001f3fd"),
+    ("😀\u200d❤\ufe0f\ufe0e", "😀❤\ufe0f\ufe0e"),
+    ("😀\u200d❤\ufe0e\ufe0f", "😀\u200d❤\ufe0e\ufe0f"),
 )
 
 _LEGITIMATE_CF_NAMES: tuple[tuple[str, str], ...] = (
@@ -792,6 +798,18 @@ def test_z_tono_tambien_derecha() -> None:
     stripped = "😀\u200d©\U0001f3fd"
     assert category_name_key(stripped) == "😀©\U0001f3fd"
     assert "\u200d" not in category_name_key(stripped)
+    tone_right = "©\u200d\U0001f3fd"
+    assert category_name_key(tone_right) == category_name_key("©\U0001f3fd")
+    assert "\u200d" not in category_name_key(tone_right)
+
+
+def test_two_variation_selectors_after_right_pictograph() -> None:
+    vs16_then_15 = "😀\u200d❤\ufe0f\ufe0e"
+    vs15_then_16 = "😀\u200d❤\ufe0e\ufe0f"
+    assert category_name_key(vs16_then_15) == "😀❤\ufe0f\ufe0e"
+    assert "\u200d" not in category_name_key(vs16_then_15)
+    assert category_name_key(vs15_then_16) == vs15_then_16
+    assert "\u200d" in category_name_key(vs15_then_16)
 
 
 def test_z_sin_bound_tras_tono() -> None:
@@ -1186,8 +1204,12 @@ async def test_name_taken_solo_raiz_sin_padre(
     parent = await _create(session_client, name="OtroPadre")
     child = await _create(session_client, name="Compartido", parent_id=parent["id"])
     assert child["parentId"] == parent["id"]
+    assert await _name_taken(db_session, "OtroPadre", None) is True
     assert await _name_taken(db_session, "Compartido", None) is False
     assert await _name_taken(db_session, "Compartido", uuid.UUID(parent["id"])) is True
+    root = await _create(session_client, name="Compartido")
+    assert root["parentId"] is None
+    assert await _name_taken(db_session, "Compartido", None) is True
 
 
 async def test_put_sort_order_repairs_desynced_name_key(
@@ -1238,6 +1260,18 @@ async def test_unassigned_code_point_is_validation(
             _ADMIN, json={"name": "CnDesc2", "description": raw}
         )
         assert desc.status_code == 400
+
+
+def test_audit_ok_sees_collisions_without_mismatches() -> None:
+    empty = NameKeyAudit(mismatches=(), collisions=())
+    assert empty.ok()
+    collision = NameKeyCollision(
+        key="piano",
+        parent_id=None,
+        ids=(uuid.UUID(int=1), uuid.UUID(int=2)),
+    )
+    only_collisions = NameKeyAudit(mismatches=(), collisions=(collision,))
+    assert only_collisions.ok() is False
 
 
 async def test_audit_category_name_keys_reports_diff_and_collision(
@@ -1349,14 +1383,11 @@ async def test_audit_groups_with_citext_not_python_lower(
         fold_right = await db_session.scalar(
             text("SELECT lower(CAST(:v AS citext))"), {"v": category_name_key(right)}
         )
-        if pg_same:
-            assert fold_left in collided
-            assert fold_right in collided
-        else:
-            assert fold_left not in collided
-            assert fold_right not in collided
-        if python_same != pg_same:
-            assert (fold_left in collided) == pg_same
+        assert fold_left is not None
+        assert fold_right is not None
+        assert (fold_left in collided) == pg_same
+        assert (fold_right in collided) == pg_same
+        assert (fold_left in collided) == pg_same or python_same == pg_same
 
 
 async def test_fix_odos_nandu_follow_citext_not_python(
@@ -1377,12 +1408,13 @@ async def test_fix_odos_nandu_follow_citext_not_python(
         row.name
         for row in (await db_session.execute(text("SELECT name FROM categories"))).all()
     }
-    if not await _citext_equal(db_session, "ΟΔΟΣ", "Οδος"):
-        assert "ΟΔΟΣ" in names
-        assert "Οδος" in names
-    if not await _citext_equal(db_session, "Ñandú", "ñandú"):
-        assert "Ñandú" in names
-        assert "ñandú" in names
+    assert len(names) == 4
+    folded = await _citext_fold(db_session, [category_name_key(name) for name in names])
+    assert len(set(folded)) == 4
+    odos_same = await _citext_equal(db_session, "ΟΔΟΣ", "Οδος")
+    nandu_same = await _citext_equal(db_session, "Ñandú", "ñandú")
+    assert ("ΟΔΟΣ" in names and "Οδος" in names) == (not odos_same)
+    assert ("Ñandú" in names and "ñandú" in names) == (not nandu_same)
 
 
 async def test_fix_category_name_keys_renames_duplicates(
@@ -1484,11 +1516,10 @@ async def test_fix_izmir_citext_without_integrity_error(
         row.name
         for row in (await db_session.execute(text("SELECT name FROM categories"))).all()
     }
-    if same:
-        assert len(names) == 2
-        assert names != {"İzmir", "izmir"}
-    else:
-        assert names == {"İzmir", "izmir"}
+    assert len(names) == 2
+    folded = await _citext_fold(db_session, [category_name_key(name) for name in names])
+    assert len(set(folded)) == 2
+    assert ("İzmir" in names and "izmir" in names) == (not same)
 
 
 async def test_fix_second_run_does_not_touch_updated_at(
@@ -1766,6 +1797,80 @@ async def test_fix_takes_advisory_lock(db_session: AsyncSession) -> None:
         ).all()
     }
     assert "ExclusiveLock" in modes
+
+
+def test_fix_locks_before_select() -> None:
+    source = inspect.getsource(fix_category_name_keys)
+    lock_at = source.index("LOCK TABLE categories IN EXCLUSIVE MODE")
+    advisory_at = source.index("_lock_category_tree")
+    select_at = source.index("select(Category)")
+    assert lock_at < select_at
+    assert advisory_at < select_at
+
+
+async def test_fix_two_phase_swaps_keys(db_session: AsyncSession) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('Piano', :viola, 0), "
+            "('Viola', :piano, 1)"
+        ),
+        {
+            "viola": category_name_key("Viola"),
+            "piano": category_name_key("Piano"),
+        },
+    )
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    rows = (
+        await db_session.execute(
+            text("SELECT name, name_key FROM categories ORDER BY sort_order")
+        )
+    ).all()
+    assert rows[0].name == "Piano"
+    assert rows[0].name_key == category_name_key("Piano")
+    assert rows[1].name == "Viola"
+    assert rows[1].name_key == category_name_key("Viola")
+
+
+async def test_fix_candidate_and_oldkey_use_citext_not_python(
+    db_session: AsyncSession,
+) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('izmir', 'iz-a', 0), "
+            "('İzmir', 'iz-b', 1), "
+            "('izmir (dup 1)', 'iz-c', 2), "
+            "('ΟΔΟΣ', 'od-a', 3), "
+            "('Οδος', 'od-b', 4), "
+            "('Οδος (dup 1)', 'od-c', 5)"
+        )
+    )
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    names = {
+        row.name
+        for row in (await db_session.execute(text("SELECT name FROM categories"))).all()
+    }
+    assert len(names) == 6
+    keys = [
+        row.name_key
+        for row in (
+            await db_session.execute(text("SELECT name_key FROM categories"))
+        ).all()
+    ]
+    folded = await _citext_fold(db_session, keys)
+    assert len(set(folded)) == 6
+    python_iz = category_name_key("İzmir (dup 1)").lower()
+    citext_iz = (await _citext_fold(db_session, [category_name_key("İzmir (dup 1)")]))[
+        0
+    ]
+    citext_taken = (
+        await _citext_fold(db_session, [category_name_key("izmir (dup 1)")])
+    )[0]
+    if python_iz != citext_taken and citext_iz == citext_taken:
+        assert "İzmir (dup 1)" not in names
 
 
 def test_fix_does_not_clobber_concurrent_put_or_post(
