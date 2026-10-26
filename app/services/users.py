@@ -87,14 +87,13 @@ def _nfc_text(column: Any) -> Any:
 
 
 def _name_match(term: str) -> ColumnElement[bool]:
-    """Un solo ``normalize(concat(first, ' ', last))``: los ILIKE de
-    ``first_name`` y ``last_name`` son redundantes con el de concat y
-    multiplican el Seq Scan (~2×). Sin índice de expresión (no chocar
-    con la 0004 de #96).
+    """Un solo ``normalize(first || ' ' || last)``: ``concat()`` es STABLE
+    y no admite índice de expresión; ``||`` sobre columnas NOT NULL sí.
+    Sin migración ni índice aquí (no chocar con la 0004 de #96).
     """
 
     pattern = f"%{_escape_like(term)}%"
-    display_name = func.concat(User.first_name, " ", User.last_name)
+    display_name = User.first_name + " " + User.last_name
     return cast(
         ColumnElement[bool],
         _nfc_text(display_name).ilike(pattern, escape="\\"),
