@@ -42,7 +42,8 @@ PRODUCTION_AUTH_SECRET = "production-test-auth-secret-at-least-32ch"
 # Sufijo con pid: el pytest hijo de leftovers ejecuta migrated_test_database
 # y haría DROP ROLE. #94 (46ec42b) cambia el fixture a scope=function; aquí
 # el padre y el hijo no comparten nombre, así no chocan.
-PRODUCTION_TEST_USER = f"em_prod_tests_{os.getpid()}"
+_PRODUCTION_TEST_ROLE_PREFIX = "em_prod_tests_"
+PRODUCTION_TEST_USER = f"{_PRODUCTION_TEST_ROLE_PREFIX}{os.getpid()}"
 _PRODUCTION_TEST_EMAIL_PREFIX = "prod-"
 _SAFE_PG_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DATABASE_OVERRIDE_QUERY_KEYS = frozenset({"database", "dbname", "service", "options"})
@@ -451,26 +452,60 @@ def _admin_engine(admin: RedactedDsn) -> AsyncEngine:
     )
 
 
+def _orphan_production_test_role(name: str) -> bool:
+    """True si el rol es ``em_prod_tests_<pid>`` y ese pid ya no existe."""
+
+    if not name.startswith(_PRODUCTION_TEST_ROLE_PREFIX):
+        return False
+    suffix = name[len(_PRODUCTION_TEST_ROLE_PREFIX) :]
+    if not suffix.isdigit():
+        return False
+    pid = int(suffix)
+    if pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+async def _drop_named_production_test_role(connection: Any, name: str) -> None:
+    role = _pg_ident(name)
+    exists = await connection.scalar(
+        text("SELECT 1 FROM pg_roles WHERE rolname = :name"),
+        {"name": name},
+    )
+    if exists is None:
+        return
+    await connection.execute(
+        text(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            "WHERE usename = :name AND pid <> pg_backend_pid()"
+        ),
+        {"name": name},
+    )
+    await connection.execute(text(f"DROP OWNED BY {role}"))
+    await connection.execute(text(f"DROP ROLE IF EXISTS {role}"))
+
+
 async def _drop_production_test_role(admin: RedactedDsn) -> None:
-    role = _pg_ident(PRODUCTION_TEST_USER)
     engine = _admin_engine(admin)
     try:
         async with engine.connect() as connection:
-            exists = await connection.scalar(
-                text("SELECT 1 FROM pg_roles WHERE rolname = :name"),
-                {"name": PRODUCTION_TEST_USER},
-            )
-            if exists is None:
-                return
-            await connection.execute(
-                text(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    "WHERE usename = :name AND pid <> pg_backend_pid()"
-                ),
-                {"name": PRODUCTION_TEST_USER},
-            )
-            await connection.execute(text(f"DROP OWNED BY {role}"))
-            await connection.execute(text(f"DROP ROLE IF EXISTS {role}"))
+            rows = (
+                await connection.execute(
+                    text(
+                        "SELECT rolname FROM pg_roles "
+                        "WHERE rolname LIKE 'em_prod_tests_%'"
+                    )
+                )
+            ).all()
+            for (name,) in rows:
+                if name == PRODUCTION_TEST_USER or _orphan_production_test_role(name):
+                    await _drop_named_production_test_role(connection, name)
     finally:
         await engine.dispose()
 
@@ -1033,6 +1068,7 @@ _LEFTOVER_TEST_TABLES = (
     "ListaCanciones",
     "order",
     "schema_trigger_probes",
+    "orphan_owned_by_dead_pid",
 )
 _LEFTOVER_TEST_DATABASES = (
     "autogen_sa_probe_test",
