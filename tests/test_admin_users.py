@@ -1216,7 +1216,7 @@ async def test_held_lock_actor_target_kills_k3a_and_n5(
             extras = await _park_existing_admins(session)
             actor_id = await _insert_admin(session, f"k3a-{action}-a")
             if action == "promote_new":
-                target = User(
+                new_user = User(
                     first_name="K3a",
                     last_name="Alumno",
                     email=unique_email(f"k3a-{action}-t"),
@@ -1224,9 +1224,9 @@ async def test_held_lock_actor_target_kills_k3a_and_n5(
                     system_role_id=SystemRole.ALUMNO,
                     is_admin=False,
                 )
-                session.add(target)
+                session.add(new_user)
                 await session.flush()
-                target_id = target.id
+                target_id = new_user.id
             else:
                 target_id = await _insert_admin(session, f"k3a-{action}-t")
             ids = [actor_id, target_id]
