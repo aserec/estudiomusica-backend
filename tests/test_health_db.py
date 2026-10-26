@@ -235,11 +235,7 @@ def _skip_if_hostssl_rejects_plain(require_postgres: RedactedDsn) -> None:
     exc = error[0]
     name = type(exc).__name__.lower()
     text = str(exc).lower()
-    if (
-        "invalidauthorizationspecification" in name
-        or "ssl" in text
-        or "pg_hba" in text
-    ):
+    if "invalidauthorizationspecification" in name or "ssl" in text or "pg_hba" in text:
         pytest.skip(
             "el servidor rechaza ssl=disable (hostssl); "
             "el proxy de freeze habla en claro"
