@@ -118,11 +118,14 @@ async def _lock_categories_ordered(
 
     found: dict[UUID, Category | None] = {}
     try:
+        self_id = category_ids[0] if category_ids else None
+        parents = set(category_ids[1:])
         for category_id in sorted(set(category_ids)):
+            share = category_id in parents and category_id != self_id
             found[category_id] = await session.scalar(
                 select(Category)
                 .where(Category.id == category_id, Category.deleted_at.is_(None))
-                .with_for_update()
+                .with_for_update(read=share)
             )
     except DBAPIError as exc:
         _raise_from_db(exc)

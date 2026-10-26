@@ -3002,6 +3002,84 @@ def test_update_locks_row_before_name_check(
         asyncio.run(_cleanup_ids(dsn.secret(), tracked))
 
 
+def test_reparent_locks_parent_for_share(
+    require_postgres: Any,
+    migrated_test_database: None,
+) -> None:
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+    from app.services import categories as categories_svc
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_name_taken(*_args: object, **_kwargs: object) -> bool:
+        started.set()
+        await release.wait()
+        return False
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret(), pool_size=3, max_overflow=0)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        original = categories_svc._name_taken
+        try:
+            async with factory() as setup:
+                child = await create_category(
+                    setup, CategoryCreate(name=f"sharec-{suffix}")
+                )
+                parent = await create_category(
+                    setup, CategoryCreate(name=f"sharep-{suffix}")
+                )
+                tracked.extend([child.id, parent.id])
+                await setup.commit()
+
+            categories_svc._name_taken = blocked_name_taken
+            async with factory() as holder:
+
+                async def do_update() -> None:
+                    await update_category(
+                        holder, child.id, CategoryUpdate(parent_id=parent.id)
+                    )
+                    await holder.commit()
+
+                pending = asyncio.create_task(do_update())
+                await asyncio.wait_for(started.wait(), timeout=2)
+                async with factory() as probe:
+                    with pytest.raises(DBAPIError):
+                        await probe.execute(
+                            text(
+                                "SELECT id FROM categories "
+                                "WHERE id = :id FOR UPDATE NOWAIT"
+                            ),
+                            {"id": parent.id},
+                        )
+                    await probe.rollback()
+                    shared = await probe.scalar(
+                        text(
+                            "SELECT id FROM categories WHERE id = :id FOR SHARE NOWAIT"
+                        ),
+                        {"id": parent.id},
+                    )
+                    assert shared == parent.id
+                    await probe.rollback()
+                release.set()
+                await pending
+        finally:
+            categories_svc._name_taken = original
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
 def test_category_dump_restore_preserves_rows(
     require_postgres: Any,
     migrated_test_database: None,
