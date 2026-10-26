@@ -330,8 +330,48 @@ def test_skip_or_fail_skips_when_postgres_is_optional(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("REQUIRE_POSTGRES", raising=False)
+    monkeypatch.delenv("REQUIRE_TLS_TESTS", raising=False)
     with pytest.raises(pytest.skip.Exception, match="no está disponible"):
         _skip_or_fail_postgres("Postgres de test no está disponible")
+
+
+def test_skip_or_fail_postgres_fails_when_tls_is_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("REQUIRE_POSTGRES", raising=False)
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
+    with pytest.raises(BaseException, match="no está disponible") as caught:
+        _skip_or_fail_postgres("Postgres de test no está disponible")
+    assert type(caught.value) is pytest.fail.Exception
+
+
+@pytest.mark.timeout(90)
+def test_require_tls_without_postgres_fails_the_suite() -> None:
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("REQUIRE_POSTGRES", None)
+    env.pop("TLS_TEST_DATABASE_URL", None)
+    env.pop("TLS_TEST_CAFILE", None)
+    env["REQUIRE_TLS_TESTS"] = "1"
+    env["TEST_DATABASE_URL"] = "postgresql+asyncpg://u:p@127.0.0.1:1/estudiomusica_test"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--tb=short",
+            "-p",
+            "no:cacheprovider",
+            "tests/test_health_db.py::test_health_db_ok_when_postgres_is_up",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
 
 
 def test_apply_test_migrations_raises_not_skips(

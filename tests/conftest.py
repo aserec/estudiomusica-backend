@@ -1027,7 +1027,7 @@ class _MissingDatabase(RuntimeError):
 
 
 def _skip_or_fail_postgres(message: str) -> None:
-    if _postgres_required():
+    if _postgres_required() or _tls_required():
         raise pytest.fail.Exception(message) from None
     raise pytest.skip.Exception(message) from None
 
