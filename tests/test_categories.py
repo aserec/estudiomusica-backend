@@ -1713,11 +1713,17 @@ async def test_create_retries_transient_then_succeeds(
     calls = {"n": 0}
     original = categories_svc._name_taken
 
-    async def flaky(*args: object, **kwargs: object) -> bool:
+    async def flaky(
+        session: AsyncSession,
+        name: str,
+        parent_id: uuid.UUID | None,
+        *,
+        exclude_id: uuid.UUID | None = None,
+    ) -> bool:
         calls["n"] += 1
         if calls["n"] == 1:
             raise TransientDbConflict()
-        return await original(*args, **kwargs)
+        return await original(session, name, parent_id, exclude_id=exclude_id)
 
     monkeypatch.setattr(categories_svc, "_name_taken", flaky)
     row = await create_category(
@@ -1733,7 +1739,13 @@ async def test_create_exhausts_transient_and_session_stays_clean(
     from app.exceptions import TransientDbConflict
     from app.services import categories as categories_svc
 
-    async def always(*_args: object, **_kwargs: object) -> bool:
+    async def always(
+        _session: AsyncSession,
+        _name: str,
+        _parent_id: uuid.UUID | None,
+        *,
+        exclude_id: uuid.UUID | None = None,
+    ) -> bool:
         raise TransientDbConflict()
 
     monkeypatch.setattr(categories_svc, "_name_taken", always)
