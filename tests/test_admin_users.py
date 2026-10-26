@@ -1728,10 +1728,9 @@ async def test_search_nfd_email_matches_nfc_stored(
     nfd_local = unicodedata.normalize("NFD", local_part)
     assert nfc_local != nfd_local
     marker = uuid.uuid4().hex[:8]
-    stored = unicodedata.normalize(
-        "NFC", normalize_email(f"{nfc_local}-{marker}@example.com")
-    )
-    assert isinstance(stored, str)
+    raw_stored = normalize_email(f"{nfc_local}-{marker}@example.com")
+    assert isinstance(raw_stored, str)
+    stored = unicodedata.normalize("NFC", raw_stored)
     typed_nfd = unicodedata.normalize("NFD", stored)
     assert typed_nfd != stored
     assert _email_term(typed_nfd) == stored
