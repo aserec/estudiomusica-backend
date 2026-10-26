@@ -2046,6 +2046,43 @@ def test_sslrootcert_and_pgsslrootcert_accept_ca_without_keyusage(
         _tls_handshake(bad_ctx, server_ctx, "localhost")
 
 
+def test_ssl_context_from_rootcert_trusts_only_given_ca(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """X4/X5: una CA (no las del sistema), TLS ≥1.2 y sin SECLEVEL=0."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import ssl_context_from_rootcert
+
+    ours = Path(str(tmp_path)) / "ours"
+    other = Path(str(tmp_path)) / "other"
+    cafile, server_crt, server_key = _write_ca_without_keyusage_and_leaf(ours)
+    other_ca, other_crt, other_key = _write_ca_without_keyusage_and_leaf(other)
+    monkeypatch.setenv("SSL_CERT_FILE", str(other_ca))
+    monkeypatch.setenv("SSL_CERT_DIR", str(other))
+    ctx = ssl_context_from_rootcert(str(cafile), "verify-full")
+    assert len(ctx.get_ca_certs()) == 1
+    assert ctx.minimum_version >= ssl_mod.TLSVersion.TLSv1_2
+    weak = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_CLIENT)
+    weak.minimum_version = ssl_mod.TLSVersion.MINIMUM_SUPPORTED
+    weak.set_ciphers("DEFAULT@SECLEVEL=0")
+    assert ctx.minimum_version > weak.minimum_version
+    ours_ciphers = {item.get("name") for item in ctx.get_ciphers()}
+    weak_ciphers = {item.get("name") for item in weak.get_ciphers()}
+    assert not ours_ciphers.issuperset(weak_ciphers)
+
+    good_server = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_SERVER)
+    good_server.load_cert_chain(str(server_crt), str(server_key))
+    _tls_handshake(ctx, good_server, "localhost")
+    other_server = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_SERVER)
+    other_server.load_cert_chain(str(other_crt), str(other_key))
+    with pytest.raises(ssl_mod.SSLError):
+        _tls_handshake(ctx, other_server, "localhost")
+
+
 def test_ssl_require_with_rootcert_checks_hostname(tmp_path: Any) -> None:
     """T1/T11: ``ssl=require`` + CA verifica hostname (más estricto que libpq)."""
 
