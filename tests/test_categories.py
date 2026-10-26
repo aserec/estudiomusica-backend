@@ -542,6 +542,8 @@ _TRANS_FLAG = "🏳\ufe0f\u200d⚧\ufe0f"
 _TRANS_FLAG_PLAIN = "🏳\ufe0f⚧\ufe0f"
 _PIRATE_FLAG = "🏴\u200d☠️"
 _PIRATE_FLAG_PLAIN = "🏴☠️"
+_JOINING_L = "\U00010d00"
+_DEVANAGARI_AA = "\u093e"
 
 # (entrada, clave esperada). La versión sin ZWJ/ZWNJ se compara en el test.
 _NAME_KEY_CASES: tuple[tuple[str, str], ...] = (
@@ -573,7 +575,8 @@ _NAME_KEY_CASES: tuple[tuple[str, str], ...] = (
     ("ب\u200cب", "ب\u200cب"),
     (_BEH_FATHA_ZWNJ, _BEH_FATHA_ZWNJ),
     ("ب\u064e\u064e\u200cب", "ب\u064e\u064e\u200cب"),
-    ("\u2764\ufe0f\ufe0e\u200d\U0001f525", "\u2764\ufe0f\ufe0e\u200d\U0001f525"),
+    ("\u2764\ufe0f\ufe0f\u200d\U0001f525", "\u2764\ufe0f\ufe0f\u200d\U0001f525"),
+    ("\u2764\ufe0e\u200d\U0001f525", "\u2764\ufe0e\U0001f525"),
     (_NKO_ZWNJ, _NKO_ZWNJ),
     (_MONGOL_ZWNJ, _MONGOL_ZWNJ),
     (_SYRIAC_ALAPH, _SYRIAC_ALAPH),
@@ -730,6 +733,81 @@ def test_name_key_table_matches_and_plain_joiner_variant(
             assert category_name_key(raw) != category_name_key(plain)
 
 
+def test_zwnj_izq_acepta_U() -> None:
+    assert category_name_key("a\u200cب") == category_name_key("aب")
+
+
+def test_zwnj_izq_sin_L() -> None:
+    kept = f"{_JOINING_L}\u200cب"
+    assert category_name_key(kept) == kept
+    assert "\u200c" in category_name_key(kept)
+
+
+def test_zwnj_der_acepta_L() -> None:
+    assert category_name_key(f"ب\u200c{_JOINING_L}") == category_name_key(
+        f"ب{_JOINING_L}"
+    )
+
+
+def test_joining_L_ignorada() -> None:
+    kept = f"{_JOINING_L}\u200cب"
+    assert category_name_key(kept) == kept
+
+
+def test_transparente_por_categoria_M() -> None:
+    raw = f"ب{_DEVANAGARI_AA}\u200cب"
+    assert category_name_key(raw) == f"ب{_DEVANAGARI_AA}ب"
+
+
+def test_zwj_sin_filtro_EP() -> None:
+    raw = "a\ufe0f\u200d\u2764\ufe0f"
+    assert category_name_key(raw) == "a\ufe0f\u2764\ufe0f"
+
+
+def test_vs16_cualquier_T() -> None:
+    raw = "\u2764\ufe0e\u200d\U0001f525"
+    assert category_name_key(raw) == "\u2764\ufe0e\U0001f525"
+    assert "\u200d" not in category_name_key(raw)
+
+
+def test_vs15_tambien() -> None:
+    raw = "\u2764\ufe0e\u200d\U0001f525"
+    assert category_name_key(raw) == "\u2764\ufe0e\U0001f525"
+
+
+def test_zwj_borde_true() -> None:
+    assert category_name_key("\u200dPiano") == "Piano"
+    assert category_name_key("Piano\u200d") == "Piano"
+
+
+def test_zwnj_borde_true() -> None:
+    assert category_name_key("\u200cPiano") == "Piano"
+    assert category_name_key("Piano\u200c") == "Piano"
+
+
+def test_flag_con_espacio() -> None:
+    payload = (
+        _BLACK_FLAG
+        + "\U000e0020"
+        + "".join(chr(0xE0000 + ord(char)) for char in "gbeng")
+        + "\U000e007f"
+    )
+    with pytest.raises(ValueError):
+        normalize_category_name(payload)
+    with pytest.raises(ValueError):
+        normalize_category_name(f"{_BLACK_FLAG}\U000e0020\U000e007f")
+
+
+def test_flag_rgi_extra_usca() -> None:
+    payload = (
+        _BLACK_FLAG
+        + "".join(chr(0xE0000 + ord(char)) for char in "usca")
+        + "\U000e007f"
+    )
+    with pytest.raises(ValueError):
+        normalize_category_name(payload)
+
+
 async def test_name_nfc_nfd_and_double_space_collide(
     session_client: Any, db_session: AsyncSession
 ) -> None:
@@ -819,6 +897,13 @@ async def test_name_rejects_zero_width_and_nul(
         + "".join(chr(0xE0000 + ord(char)) for char in "gb1")
         + "\U000e007f",
         "a" + "".join(chr(0xE0000 + ord(char)) for char in "gbeng") + "\U000e007f",
+        _BLACK_FLAG
+        + "".join(chr(0xE0000 + ord(char)) for char in "usca")
+        + "\U000e007f",
+        _BLACK_FLAG
+        + "\U000e0020"
+        + "".join(chr(0xE0000 + ord(char)) for char in "gbeng")
+        + "\U000e007f",
     ):
         response = await session_client.post(_ADMIN, json={"name": payload})
         assert response.status_code == 400
@@ -1038,6 +1123,19 @@ async def test_root_and_child_may_share_name(
     assert await _name_taken(db_session, "Compartido", uuid.uuid4()) is False
 
 
+async def test_name_taken_solo_raiz_sin_padre(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    root = await _create(session_client, name="Compartido")
+    other = await _create(session_client, name="OtroPadre")
+    child = await _create(session_client, name="Compartido", parent_id=other["id"])
+    assert child["parentId"] == other["id"]
+    assert await _name_taken(db_session, "Compartido", None) is True
+    assert await _name_taken(db_session, "Compartido", uuid.UUID(other["id"])) is True
+    assert await _name_taken(db_session, "Compartido", uuid.UUID(root["id"])) is False
+
+
 async def test_put_sort_order_repairs_desynced_name_key(
     session_client: Any, db_session: AsyncSession
 ) -> None:
@@ -1045,7 +1143,7 @@ async def test_put_sort_order_repairs_desynced_name_key(
     row_id = await db_session.scalar(
         text(
             "INSERT INTO categories (name, name_key, sort_order) "
-            "VALUES ('Laud', 'viola', 0) RETURNING id"
+            "VALUES ('Pia\u200dno', 'viola', 0) RETURNING id"
         )
     )
     blocked = await session_client.post(_ADMIN, json={"name": "Viola"})
@@ -1060,10 +1158,11 @@ async def test_put_sort_order_repairs_desynced_name_key(
         text("SELECT name_key FROM categories WHERE id = :id"),
         {"id": row_id},
     )
-    assert stored == category_name_key("Laud")
+    assert stored == category_name_key("Pia\u200dno")
+    assert stored == category_name_key("Piano")
     viola = await _create(session_client, name="Viola")
     assert viola["name"] == "Viola"
-    clash = await session_client.post(_ADMIN, json={"name": "Laud"})
+    clash = await session_client.post(_ADMIN, json={"name": "Pia\u200dno"})
     assert clash.status_code == 409
 
 
@@ -1105,6 +1204,36 @@ async def test_audit_category_name_keys_reports_diff_and_collision(
     assert stored["Pia\u200dno"] == "piajoiner"
     keys = {item.key for item in report.collisions}
     assert "piano" in keys
+
+
+async def test_audit_deleted_parent_single_and_only_mismatches(
+    db_session: AsyncSession,
+) -> None:
+    parent_id = await db_session.scalar(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) "
+            "VALUES ('Padre', 'padre', 0) RETURNING id"
+        )
+    )
+    await db_session.execute(
+        text(
+            "INSERT INTO categories "
+            "(name, name_key, sort_order, parent_id, deleted_at) VALUES "
+            "('Piano', 'piano', 1, NULL, NULL), "
+            "('Pia\u200dno', 'ghost', 2, NULL, clock_timestamp()), "
+            "('Piano', 'child', 3, :parent, NULL), "
+            "('Laud', 'viola', 4, NULL, NULL)"
+        ),
+        {"parent": parent_id},
+    )
+    report = await audit_category_name_keys(db_session)
+    assert not report.ok()
+    assert report.collisions == ()
+    names = {item.name for item in report.mismatches}
+    assert "Pia\u200dno" in names
+    assert "Laud" in names
+    solo = await audit_category_name_keys(db_session)
+    assert all(len(item.ids) != 1 for item in solo.collisions)
 
 
 async def test_audit_does_not_collide_strasse_and_strasse_upper(
