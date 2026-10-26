@@ -1,7 +1,6 @@
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -657,13 +656,17 @@ async def test_last_admin_delete_of_other_admin_when_actor_remains(
     assert leftover.is_admin is True
 
 
-def _stale_admin_actor(user_id: UUID) -> SimpleNamespace:
-    return SimpleNamespace(
-        id=user_id,
+def _stale_admin_actor(user_id: UUID) -> User:
+    actor = User(
+        first_name="Stale",
+        last_name="Actor",
+        email=unique_email("stale-ns"),
+        password_hash="x",
         system_role_id=SystemRole.ADMIN,
         is_admin=True,
-        system_role=SystemRole.ADMIN,
     )
+    actor.id = user_id
+    return actor
 
 
 async def _park_existing_admins(
