@@ -659,6 +659,30 @@ def test_validation_error_redacts_dsn_without_scheme(
     get_settings.cache_clear()
 
 
+def test_validation_error_errors_and_json_redact_auth_secret_on_model_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaked = "auth-secret-must-never-appear-in-errors-32"
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/x_test",
+    )
+    monkeypatch.setenv("AUTH_SECRET", leaked)
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    dumped = caught.value.json()
+    assert leaked not in dumped
+    assert leaked not in str(caught.value)
+    assert leaked not in repr(caught.value)
+    for error in caught.value.errors():
+        assert leaked not in str(error.get("input"))
+        assert leaked not in repr(error.get("input"))
+        assert leaked not in repr(error.get("ctx"))
+    get_settings.cache_clear()
+
+
 def test_validation_error_errors_and_json_redact_dsn_password(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

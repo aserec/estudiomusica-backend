@@ -289,21 +289,30 @@ def _normalize_sslmode(url: str) -> str:
 
 
 _DSN_FIELD_NAMES = frozenset({"database_url", "DATABASE_URL"})
+_AUTH_SECRET_FIELD_NAMES = frozenset({"auth_secret", "AUTH_SECRET"})
+
+
+def _loc_has_field(loc: object, names: frozenset[str]) -> bool:
+    if isinstance(loc, (tuple, list)):
+        return any(part in names for part in loc)
+    return loc in names
 
 
 def _loc_is_dsn(loc: object) -> bool:
-    if isinstance(loc, (tuple, list)):
-        return any(part in _DSN_FIELD_NAMES for part in loc)
-    return loc in _DSN_FIELD_NAMES
+    return _loc_has_field(loc, _DSN_FIELD_NAMES)
 
 
 def _redact_error_input(value: object, *, dsn_field: bool = False) -> object:
-    """Si el campo es el DSN, se sustituye entero (sin parsear)."""
+    """Si el campo es el DSN, se sustituye entero (sin parsear).
+
+    ``auth_secret`` / ``AUTH_SECRET`` también se ocultan: el input de un
+    ``model_validator`` es el dict crudo, no un ``SecretStr``.
+    """
 
     if dsn_field:
         if isinstance(value, dict):
             return {
-                key: _redact_error_input(item, dsn_field=key in _DSN_FIELD_NAMES)
+                key: _redact_named_error_input(key, item)
                 for key, item in value.items()
             }
         return "<dsn-redactado>"
@@ -311,24 +320,39 @@ def _redact_error_input(value: object, *, dsn_field: bool = False) -> object:
         return "**********"
     if isinstance(value, dict):
         return {
-            key: _redact_error_input(item, dsn_field=key in _DSN_FIELD_NAMES)
-            for key, item in value.items()
+            key: _redact_named_error_input(key, item) for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):
         return [_redact_error_input(item) for item in value]
     return value
 
 
+def _redact_named_error_input(key: object, value: object) -> object:
+    if key in _DSN_FIELD_NAMES:
+        return _redact_error_input(value, dsn_field=True)
+    if key in _AUTH_SECRET_FIELD_NAMES:
+        return "**********"
+    return _redact_error_input(value)
+
+
 def _validation_error_without_secrets(exc: ValidationError) -> ValidationError:
-    """Copia el ValidationError sin el DSN original en ``input`` / ``json()``."""
+    """Copia el ValidationError sin DSN ni AUTH_SECRET en ``input`` / ``json()``."""
 
     line_errors: list[Any] = []
     for error in exc.errors(include_url=False):
-        dsn_field = _loc_is_dsn(error.get("loc"))
+        loc = error.get("loc")
+        dsn_field = _loc_is_dsn(loc)
+        raw_input = error.get("input")
+        if _loc_has_field(loc, _AUTH_SECRET_FIELD_NAMES) and not isinstance(
+            raw_input, dict
+        ):
+            redacted_input: object = "**********"
+        else:
+            redacted_input = _redact_error_input(raw_input, dsn_field=dsn_field)
         item: dict[str, Any] = {
             "type": error.get("type", "value_error"),
             "loc": error.get("loc", ()),
-            "input": _redact_error_input(error.get("input"), dsn_field=dsn_field),
+            "input": redacted_input,
         }
         ctx = error.get("ctx")
         if ctx is not None:
