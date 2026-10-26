@@ -73,6 +73,22 @@ def test_alembic_upgrade_head_and_downgrade_base(
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0001_initial"
 
 
+def test_alembic_current_accepts_sslmode(
+    require_postgres: RedactedDsn,
+) -> None:
+    """B-N3: ``sqlalchemy.url`` con ``?sslmode=`` no lanza TypeError."""
+
+    from sqlalchemy.engine.url import make_url
+
+    parsed = make_url(require_postgres.secret())
+    query = dict(parsed.query or {})
+    query["sslmode"] = "prefer"
+    with_mode = RedactedDsn(
+        parsed.set(query=query).render_as_string(hide_password=False)
+    )
+    command.current(alembic_config(with_mode))
+
+
 def test_alembic_has_a_single_initial_revision() -> None:
     config = alembic_config(resolve_alembic_database_url())
     script = ScriptDirectory.from_config(config)

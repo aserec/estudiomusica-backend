@@ -1726,6 +1726,29 @@ def test_ssl_disable_with_sslrootcert_skips_context(tmp_path: Any) -> None:
     assert not isinstance(engine_args.get("ssl"), ssl_mod.SSLContext)
 
 
+def test_asyncpg_url_translates_sslmode(tmp_path: Any) -> None:
+    """B-N3: ``?sslmode=`` no llega a asyncpg (TypeError)."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import asyncpg_url_and_connect_args
+
+    cafile = _write_unrelated_ca(Path(str(tmp_path)) / "sslmode-ca.pem")
+    url, args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test"
+        f"?sslmode=verify-full&sslrootcert={cafile}"
+    )
+    assert "sslmode=" not in url.lower()
+    assert "sslrootcert=" not in url.lower()
+    assert isinstance(args.get("ssl"), ssl_mod.SSLContext)
+    plain, plain_args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?sslmode=disable"
+    )
+    assert "sslmode=" not in plain.lower()
+    assert plain_args.get("ssl") is False
+
+
 @pytest.mark.db
 def test_ssl_disable_sslrootcert_engine_matches_probe(
     monkeypatch: pytest.MonkeyPatch,

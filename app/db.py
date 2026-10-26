@@ -32,6 +32,7 @@ _ADAPTER_CALLABLE_KEYS = frozenset(
     }
 )
 _SSLROOTCERT_KEYS = frozenset({"sslrootcert"})
+_SSLMODE_KEYS = frozenset({"sslmode"})
 
 
 _QUERY_SECRET_KEYS = frozenset({"password", "sslpassword"})
@@ -160,22 +161,26 @@ def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def asyncpg_url_and_connect_args(raw: str) -> tuple[str, dict[str, Any]]:
-    """Quita ``sslrootcert`` de la URL; el SSL lo decide ``asyncpg_ssl_connect_arg``."""
+    """Quita ``sslrootcert`` / ``sslmode`` de la URL (asyncpg no los acepta).
+
+    El SSL lo decide ``asyncpg_ssl_connect_arg``, la misma función que la sonda.
+    """
 
     parsed = make_url(raw)
     query = dict(parsed.query or {})
     prepared = prepare_asyncpg_connect_kwargs(query)
     connect_args: dict[str, Any] = {}
-    if _query_scalar(query, "sslrootcert"):
-        query = {
-            key: value
-            for key, value in query.items()
-            if str(key).lower() not in _SSLROOTCERT_KEYS
-        }
+    drop = {
+        key
+        for key in query
+        if str(key).lower() in _SSLROOTCERT_KEYS or str(key).lower() in _SSLMODE_KEYS
+    }
+    if drop:
+        query = {key: value for key, value in query.items() if key not in drop}
         raw = parsed.set(query=query).render_as_string(hide_password=False)
-        ssl_value = prepared.get("ssl")
-        if ssl_value is not None:
-            connect_args["ssl"] = ssl_value
+    ssl_value = prepared.get("ssl")
+    if isinstance(ssl_value, (ssl.SSLContext, bool)):
+        connect_args["ssl"] = ssl_value
     return raw, connect_args
 
 
