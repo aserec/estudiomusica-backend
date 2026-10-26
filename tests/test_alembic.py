@@ -82,6 +82,9 @@ def test_alembic_current_accepts_sslmode(
 
     parsed = make_url(require_postgres.secret())
     query = dict(parsed.query or {})
+    for key in list(query):
+        if str(key).lower() in {"ssl", "sslmode"}:
+            del query[key]
     query["sslmode"] = "prefer"
     with_mode = RedactedDsn(
         parsed.set(query=query).render_as_string(hide_password=False)

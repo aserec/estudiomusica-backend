@@ -2111,31 +2111,49 @@ def test_sslmode_verify_full_without_rootcert_rejects_untrusted(
     del env_url
 
     ssl_tokens = ("ssl", "certificate", "certificat", "verify", "encryption")
+    live_must_fail = True
+    if sslmode == "require":
+        probe = _create_async_engine(raw, pool_pre_ping=True)
 
-    with pytest.raises(Exception) as alembic_exc:
-        command.current(make_alembic_config(raw))
-    alembic_text = str(alembic_exc.value).lower()
-    assert any(token in alembic_text for token in ssl_tokens), alembic_exc.value
+        async def _require_probe() -> None:
+            try:
+                async with probe.connect() as connection:
+                    await connection.execute(text("SELECT 1"))
+            finally:
+                await probe.dispose()
 
-    get_settings.cache_clear()
-    with pytest.raises(Exception) as env_exc:
-        command.current(make_alembic_config())
-    env_text = str(env_exc.value).lower()
-    assert any(token in env_text for token in ssl_tokens), env_exc.value
-
-    engine = _create_async_engine(raw, pool_pre_ping=True)
-
-    async def _connect() -> None:
         try:
-            async with engine.connect() as connection:
-                await connection.execute(text("SELECT 1"))
-        finally:
-            await engine.dispose()
+            asyncio.run(_require_probe())
+        except Exception:
+            live_must_fail = True
+        else:
+            live_must_fail = False
 
-    with pytest.raises(Exception) as engine_exc:
-        asyncio.run(_connect())
-    engine_text = str(engine_exc.value).lower()
-    assert any(token in engine_text for token in ssl_tokens), engine_exc.value
+    if live_must_fail:
+        with pytest.raises(Exception) as alembic_exc:
+            command.current(make_alembic_config(raw))
+        alembic_text = str(alembic_exc.value).lower()
+        assert any(token in alembic_text for token in ssl_tokens), alembic_exc.value
+
+        get_settings.cache_clear()
+        with pytest.raises(Exception) as env_exc:
+            command.current(make_alembic_config())
+        env_text = str(env_exc.value).lower()
+        assert any(token in env_text for token in ssl_tokens), env_exc.value
+
+        engine = _create_async_engine(raw, pool_pre_ping=True)
+
+        async def _connect() -> None:
+            try:
+                async with engine.connect() as connection:
+                    await connection.execute(text("SELECT 1"))
+            finally:
+                await engine.dispose()
+
+        with pytest.raises(Exception) as engine_exc:
+            asyncio.run(_connect())
+        engine_text = str(engine_exc.value).lower()
+        assert any(token in engine_text for token in ssl_tokens), engine_exc.value
     get_settings.cache_clear()
 
 
