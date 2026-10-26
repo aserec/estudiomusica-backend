@@ -383,6 +383,16 @@ async def test_single_level_rejects_grandchildren_and_non_root_parent(
     assert "parentId" in leaf_self.json()["fields"]
     assert leaf_self.status_code != 500
 
+    lonely = await _create(session_client, name="Raíz sola")
+    lonely_self = await session_client.put(
+        f"{_ADMIN}/{lonely['id']}",
+        json={"parentId": lonely["id"]},
+    )
+    assert lonely_self.status_code == 400
+    assert lonely_self.json()["error"] == "validation"
+    assert "parentId" in lonely_self.json()["fields"]
+    assert lonely_self.status_code != 500
+
     parent_under_child = await session_client.put(
         f"{_ADMIN}/{root['id']}",
         json={"parentId": child["id"]},
