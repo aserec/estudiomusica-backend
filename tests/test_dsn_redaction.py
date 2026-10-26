@@ -445,6 +445,7 @@ def test_ping_postgres_normalizes_sslmode(monkeypatch: pytest.MonkeyPatch) -> No
     assert "sslmode" not in query
 
 
+@pytest.mark.timeout(90)
 def test_broken_migration_does_not_leak_password_with_showlocals(
     tmp_path: Path,
 ) -> None:
