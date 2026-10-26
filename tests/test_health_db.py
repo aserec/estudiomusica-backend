@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import socket
 import threading
 import time
@@ -1717,6 +1718,9 @@ def _start_ephemeral_tls_postgres(
 
     def _cleanup() -> None:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+    if not shutil.which("docker"):
+        pytest.skip("docker no está en PATH; se omite Postgres TLS efímero")
 
     started = subprocess.run(
         [
