@@ -316,8 +316,22 @@ def test_production_rejects_pgpassfile_and_client_cert_env(
     get_settings.cache_clear()
     monkeypatch.delenv("PGSSLKEY")
     monkeypatch.setenv("PGSSLROOTCERT", "/tmp/ca.pem")
-    with pytest.raises(ValidationError, match="PGSSLROOTCERT"):
-        Settings()
+    settings = Settings()
+    assert settings.app_env == "production"
+    get_settings.cache_clear()
+
+
+def test_production_allows_sslrootcert_and_pgsslrootcert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?sslrootcert=/tmp/ca.pem",
+    )
+    get_settings.cache_clear()
+    settings = Settings()
+    assert "sslrootcert" in settings.resolved_database_url()
     get_settings.cache_clear()
 
 

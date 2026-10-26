@@ -136,9 +136,11 @@ class Settings(BaseSettings):
         mayúsculas. asyncpg acepta ``password``, ``user``, ``database`` y
         ``dbname`` en la query; se aplican como override antes de validar.
         También se rechazan ``passfile`` / ``.pgpass`` y certificado de
-        cliente en la query o en ``PGPASSFILE`` / ``PGSSLCERT`` /
-        ``PGSSLKEY`` / ``PGSSLROOTCERT``. El cliente no puede rechazar
-        autenticación peer: eso lo decide ``pg_hba.conf``.
+        cliente (``sslcert`` / ``sslkey`` / ``sslpassword``, o
+        ``PGPASSFILE`` / ``PGSSLCERT`` / ``PGSSLKEY``).
+        ``sslrootcert`` / ``PGSSLROOTCERT`` son la CA del servidor
+        (hace falta para ``verify-full``) y se permiten. El cliente no
+        puede rechazar autenticación peer: eso lo decide ``pg_hba.conf``.
         """
 
         if self.app_env == "development":
@@ -184,7 +186,7 @@ class Settings(BaseSettings):
                 "DATABASE_URL no puede usar passfile/.pgpass "
                 "fuera de APP_ENV=development"
             )
-        for key in ("sslcert", "sslkey", "sslpassword", "sslrootcert"):
+        for key in ("sslcert", "sslkey", "sslpassword"):
             if self._query_value(parsed, key) is not None:
                 raise ValueError(
                     f"DATABASE_URL no puede usar certificado de cliente "
@@ -194,7 +196,7 @@ class Settings(BaseSettings):
             raise ValueError(
                 "PGPASSFILE no puede estar definido fuera de APP_ENV=development"
             )
-        for env_name in ("PGSSLCERT", "PGSSLKEY", "PGSSLROOTCERT"):
+        for env_name in ("PGSSLCERT", "PGSSLKEY"):
             if os.environ.get(env_name):
                 raise ValueError(
                     f"{env_name} no puede estar definido fuera de APP_ENV=development"
