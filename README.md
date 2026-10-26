@@ -117,12 +117,32 @@ El catálogo tiene **un solo nivel** (regla del front, `category-service.ts`): e
 GET    /api/v1/categories
 POST   /api/v1/admin/categories              {name, parentId?, description?, sortOrder?}
 PUT    /api/v1/admin/categories/{id}         {name?, parentId?, description?, sortOrder?}
-DELETE /api/v1/admin/categories/{id}         409 si tiene hijas
+DELETE /api/v1/admin/categories/{id}         409 si tiene hijas o cursos
 ```
 
-El ticket #400 pedía PATCH. Se mantiene **PUT** (convención #91) pero **parcial**: un campo omitido no cambia. `PUT {name}` no mueve a la raíz ni borra `description`. Para quitar el padre o la description hay que enviar `null` explícito (`model_fields_set`). El listado no pagina. Nombre: NFC, espacios colapsados, citext (sin distinguir mayúsculas), único entre hermanos vigentes por clave sin Cf (`name_key`). DELETE es lógico (`deleted_at`). `409 {error: category_not_empty}` si hay hijas vigentes. Hasta #97 no hay tabla `courses`: el borrado no protege cursos. `409 {error: category_name_taken}` si el nombre ya existe en el mismo padre. Los POST/PUT que fijan o cambian `parentId` y el DELETE toman `pg_advisory_xact_lock(400, 1)` sobre el árbol; al validar el padre se hace `SELECT … FOR SHARE`.
+El ticket #400 pedía PATCH. Se mantiene **PUT** (convención #91) pero **parcial**: un campo omitido no cambia. `PUT {name}` no mueve a la raíz ni borra `description`. Para quitar el padre o la description hay que enviar `null` explícito (`model_fields_set`). El listado no pagina. Nombre: NFC, espacios colapsados, citext (sin distinguir mayúsculas), único entre hermanos vigentes por clave sin Cf (`name_key`). DELETE es lógico (`deleted_at`). `409 {error: category_not_empty}` si hay hijas vigentes o cursos vigentes; lo mismo al cambiar `parentId` de una categoría con cursos. `409 {error: category_name_taken}` si el nombre ya existe en el mismo padre. Los POST/PUT que fijan o cambian `parentId` y el DELETE toman `pg_advisory_xact_lock(400, 1)` sobre el árbol; al validar el padre se hace `SELECT … FOR SHARE`.
 
-`0004_course_categories` crea `categories` (`id`, `name`, `parent_id`, `description`, `sort_order`, timestamps, `deleted_at`) y el trigger `updated_at`. #97 añadirá `courses.category_id` FK a esta tabla.
+`0004_course_categories` crea `categories` (`id`, `name`, `parent_id`, `description`, `sort_order`, timestamps, `deleted_at`) y el trigger `updated_at`. `courses.category_id` (0005) apunta a esta tabla.
+
+## Cursos
+
+La ficha de un curso es el ancla del LMS. Crear, listar (admin), duplicar y borrar exigen `site:manage-courses` (solo admin). Ver un curso exige `course:view` (matrícula o admin). Editar y archivar exigen `course:teach` (profesor del curso vía `course_memberships`, o admin). Profesor adjunto o alumno: `403 {error: forbidden}` al editar. Un alumno no matriculado ante un curso oculto recibe `404` (no se filtra la existencia). Curso visible sin permiso: `403`. Sin sesión o token inválido: `401 {error: unauthorized}`. Denegación por defecto.
+
+```text
+GET    /api/v1/courses/{id}
+PUT    /api/v1/courses/{id}                    {shortName, name, summary?, categoryId?, startDate?, endDate?, visible, level, defaultGroupMode}
+PUT    /api/v1/courses/{id}/archived           {archived}
+GET    /api/v1/admin/courses?query=&archived=&page=&pageSize=
+POST   /api/v1/admin/courses                   CreateCourseInput → 201
+POST   /api/v1/admin/courses/{id}/duplicate    {shortName, name, startDate} → 201
+DELETE /api/v1/admin/courses/{id}              204 (lógico)
+```
+
+El ticket #401 pedía PATCH y un listado admin `{items}` sin más. Se usa **PUT** (convención #91) y el listado admin reutiliza el helper `page`/`pageSize` (no `limit`/`cursor`; pendiente de Danel). `shortName` único entre vigentes (citext). DELETE es lógico (`deleted_at`) y libera el `shortName`. `409 {error: duplicate_short_name}` si choca, también en carreras (índice único parcial + `IntegrityError`). `409 {error: course_archived}` al modificar contenido de un curso archivado; archivar/desarchivar sí está permitido. `endDate` anterior a `startDate`: `400 {error: validation, fields: ["endDate"]}`.
+
+Duplicar copia la ficha (sin matrículas ni notas). Si el `endDate` original queda antes del nuevo `startDate`, la copia lo deja vacío. La copia de secciones y actividades queda en el hook `copy_course_contents` (#402 y siguientes). El curso nuevo no hereda `archivedAt`.
+
+`0005_courses` crea `courses` y añade la FK `course_memberships.course_id` → `courses.id` que #94 dejó pendiente. Enums `level` y `default_group_mode` por `CHECK`, no tipo ENUM de Postgres.
 
 ## Postgres, migraciones y tests con BD
 
@@ -172,7 +192,7 @@ En el repo, o con el wheel, también vale `alembic -c app/alembic.ini upgrade he
 uv run alembic revision -m "descripcion" --autogenerate
 ```
 
-Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. No hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext` si falta, `users` y `auth_sessions`, y monta ese trigger en ambas. El downgrade de 0002 **no** hace `DROP EXTENSION citext` (puede venir preinstalada o usarla otra revisión). `0003_system_roles` añade `system_roles` (id slug, no UUID), `users.system_role_id` y `course_memberships`. `0004_course_categories` añade `categories` (árbol con `parent_id`, citext, índices únicos parciales por hermano) y monta el trigger con `op_create_updated_at_trigger` (0001 solo crea la función; el SQL va quoted por el preparer).
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. No hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext` si falta, `users` y `auth_sessions`, y monta ese trigger en ambas. El downgrade de 0002 **no** hace `DROP EXTENSION citext` (puede venir preinstalada o usarla otra revisión). `0003_system_roles` añade `system_roles` (id slug, no UUID), `users.system_role_id` y `course_memberships`. `0004_course_categories` añade `categories` (árbol con `parent_id`, citext, índices únicos parciales por hermano) y monta el trigger con `op_create_updated_at_trigger` (0001 solo crea la función; el SQL va quoted por el preparer). `0005_courses` añade `courses` (`short_name` único entre vigentes, `category_id` FK, enums por check, `archived_at`) y la FK de `course_memberships`.
 
 `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
@@ -308,11 +328,11 @@ app/
   exceptions.py      # AccessDenied, NotFound, Validation, PayloadTooLarge
   config/            # Ajustes por variables de entorno (pydantic-settings)
   routers/           # Rutas HTTP (health, auth, admin, categories, courses y examples)
-  schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth, roles, categories)
-  services/          # Lógica de aplicación (salud, auth, roles, categories, examples)
+  schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth, roles, categories, courses)
+  services/          # Lógica de aplicación (salud, auth, roles, categories, courses, examples)
   permissions/       # Matriz versionada y dependencias require_*_permission
   auth/              # Hash argon2, JWT HS256 y cookie de sesión
-  models/            # PersistentModel, User, AuthSession, SystemRoleRow, CourseMembership, Category
+  models/            # PersistentModel, User, AuthSession, SystemRoleRow, CourseMembership, Category, Course
   migrations/        # Alembic (env.py async + versions/ + config programático)
   alembic.ini        # Fuente de verdad empaquetada
 docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)

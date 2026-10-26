@@ -61,6 +61,7 @@ def _wipe_alembic_schema(dsn: RedactedDsn) -> None:
                 await connection.execute(
                     text("DROP TABLE IF EXISTS course_memberships CASCADE")
                 )
+                await connection.execute(text("DROP TABLE IF EXISTS courses CASCADE"))
                 await connection.execute(
                     text("DROP TABLE IF EXISTS categories CASCADE")
                 )
@@ -119,6 +120,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
         == "course_memberships"
     )
     assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
+    assert _scalar(dsn, "SELECT to_regclass('public.courses')") == "courses"
     assert (
         _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
         == "citext"
@@ -145,6 +147,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
         "system_roles",
         "course_memberships",
         "categories",
+        "courses",
     ):
         name = updated_at_trigger_name(table)
         assert (
@@ -161,7 +164,8 @@ def test_alembic_upgrade_head_and_downgrade_base(
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == parent
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
-    assert _scalar(dsn, "SELECT to_regclass('public.categories')") is None
+    assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
+    assert _scalar(dsn, "SELECT to_regclass('public.courses')") is None
     assert (
         _scalar(dsn, "SELECT to_regclass('public.course_memberships')")
         == "course_memberships"
@@ -179,6 +183,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
     assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
+    assert _scalar(dsn, "SELECT to_regclass('public.courses')") == "courses"
     _assert_is_admin_check_rejects_incoherent_and_null(dsn)
 
     command.downgrade(config, "0001_initial")
@@ -207,6 +212,16 @@ def test_alembic_upgrade_head_and_downgrade_base(
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
     assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
+    assert _scalar(dsn, "SELECT to_regclass('public.courses')") == "courses"
+    assert (
+        _scalar(
+            dsn,
+            "SELECT 1 FROM information_schema.table_constraints "
+            "WHERE table_name = 'course_memberships' "
+            "AND constraint_name = 'fk_course_memberships_course_id_courses'",
+        )
+        == 1
+    )
 
 
 def _assert_is_admin_check_rejects_incoherent_and_null(dsn: RedactedDsn) -> None:
@@ -391,6 +406,7 @@ def test_alembic_revision_chain_is_linear() -> None:
         revision.revision for revision in script.walk_revisions()
     ]
     assert len(chain) == len({revision.revision for revision in chain})
+    assert script.get_revision("0005_courses").down_revision == "0004_course_categories"
 
 
 def test_alembic_check_has_no_drift(

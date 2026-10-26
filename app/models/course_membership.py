@@ -11,8 +11,8 @@ from app.models.base import PersistentModel
 class CourseMembership(PersistentModel):
     """Inscripción mínima para resolver permisos de curso.
 
-    No hay FK a ``courses``: esa tabla llega en el CRUD de cursos. El ticket
-    de matrículas (#403) será quien asigne el rol; este modelo solo lo lee.
+    ``course_id`` apunta a ``courses``. El ticket de matrículas (#403)
+    será quien asigne el rol; este modelo solo lo lee.
     """
 
     __tablename__ = "course_memberships"
@@ -36,6 +36,7 @@ class CourseMembership(PersistentModel):
         index=True,
     )
     course_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("courses.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )

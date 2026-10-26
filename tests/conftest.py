@@ -462,6 +462,16 @@ async def _cleanup_production_test_rows(admin: RedactedDsn) -> None:
                         "('alumno', 'profesor', 'profesor_adjunto', 'admin')"
                     )
                 )
+            courses = await connection.scalar(
+                text("SELECT to_regclass('public.courses')")
+            )
+            if courses is not None:
+                await connection.execute(
+                    text(
+                        "DELETE FROM courses WHERE name LIKE :prod OR name LIKE :copia"
+                    ),
+                    {"prod": "Prod %", "copia": "Copia prod%"},
+                )
             categories = await connection.scalar(
                 text("SELECT to_regclass('public.categories')")
             )

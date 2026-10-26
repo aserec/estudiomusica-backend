@@ -13,7 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.config import get_settings
 from app.db import RedactedDsn
 from app.exceptions import AccessDenied, RoleNotAssignable
-from app.models import CourseMembership, SystemRoleRow, User
+from app.models import Course, CourseMembership, SystemRoleRow, User
+from app.models.course import CourseLevel, DefaultGroupMode
 from app.models.user import SystemRole
 from app.permissions.types import CourseRole
 from app.schemas.roles import SystemRoleUpdate
@@ -78,12 +79,38 @@ async def _set_role(
     return user
 
 
+async def _ensure_course(db_session: AsyncSession, course_id: uuid.UUID) -> Course:
+    """Crea la ficha mínima que exige la FK de ``course_memberships``."""
+
+    from datetime import date
+
+    existing = await db_session.get(Course, course_id)
+    if existing is not None:
+        if existing.deleted_at is not None:
+            existing.deleted_at = None
+            await db_session.flush()
+        return existing
+    row = Course(
+        id=course_id,
+        short_name=f"c-{course_id.hex[:12]}",
+        name=f"Course {course_id.hex[:8]}",
+        visible=True,
+        level=CourseLevel.BEGINNER,
+        default_group_mode=DefaultGroupMode.NONE,
+        start_date=date(2026, 1, 1),
+    )
+    db_session.add(row)
+    await db_session.flush()
+    return row
+
+
 async def _enroll(
     db_session: AsyncSession,
     user_id: uuid.UUID,
     course_id: uuid.UUID,
     course_role: CourseRole,
 ) -> None:
+    await _ensure_course(db_session, course_id)
     db_session.add(
         CourseMembership(
             user_id=user_id,

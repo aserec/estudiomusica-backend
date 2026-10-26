@@ -42,6 +42,24 @@ def _promote_to_admin(dsn: RedactedDsn, email: str) -> None:
     )
 
 
+def _ensure_course(dsn: RedactedDsn, course_id: uuid.UUID) -> None:
+    """Ficha mínima: 0005 exige FK real en ``course_memberships.course_id``."""
+
+    _run_sql(
+        dsn,
+        "INSERT INTO courses (id, short_name, name, start_date, visible, "
+        "level, default_group_mode) "
+        "VALUES (:course_id, :short_name, :name, DATE '2026-01-01', "
+        "true, 'beginner', 'none') "
+        "ON CONFLICT (id) DO UPDATE SET deleted_at = NULL",
+        {
+            "course_id": course_id,
+            "short_name": f"c-{course_id.hex[:12]}",
+            "name": f"Course {course_id.hex[:8]}",
+        },
+    )
+
+
 @contextmanager
 def _temporarily_deactivate_role(dsn: RedactedDsn, role_id: str) -> Iterator[None]:
     """Cambia ``active`` en la base compartida y siempre lo restaura."""
@@ -154,6 +172,7 @@ def test_production_role_can_insert_course_membership(
     assert created.status_code == 201
     _assert_production_session(created, production_client)
     user_id = created.json()["user"]["id"]
+    _ensure_course(production_test_database_url, _COURSE)
     _run_sql(
         production_test_database_url,
         "INSERT INTO course_memberships (user_id, course_id, course_role) "

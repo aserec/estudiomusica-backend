@@ -86,7 +86,8 @@ async def post_category(
         "no cambia; parentId/description en null los borra. Una categoría "
         "con hijas no puede dejar de ser raíz. 400 validation "
         "fields=[parentId] si el padre no es raíz, es uno mismo o el "
-        "movimiento crearía un nieto."
+        "movimiento crearía un nieto. 409 ``category_not_empty`` si se "
+        "cambia parentId y hay cursos vigentes."
     ),
     responses={
         400: ERROR_RESPONSES[400],
@@ -112,8 +113,7 @@ async def put_category(
     summary="Borrar una categoría",
     description=(
         "Requiere ``site:manage-courses``. Borrado lógico. 409 "
-        "``category_not_empty`` si tiene hijas vigentes. El chequeo de "
-        "cursos lo añade #97."
+        "``category_not_empty`` si tiene hijas vigentes o cursos vigentes."
     ),
     responses={
         401: ERROR_RESPONSES[401],

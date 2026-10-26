@@ -1,6 +1,7 @@
 import asyncio
 import unicodedata
 import uuid
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
@@ -9,7 +10,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import CategoryNameTaken
-from app.models import Category
+from app.models import Category, Course
+from app.models.course import CourseLevel, DefaultGroupMode
 from app.models.user import SystemRole
 from app.permissions.types import Permission
 from app.schemas.categories import (
@@ -416,6 +418,72 @@ async def test_delete_with_children_is_category_not_empty(
     ids = [item["id"] for item in listed.json()]
     assert parent["id"] not in ids
     assert child["id"] not in ids
+
+
+async def _occupy_with_course(db_session: AsyncSession, category_id: str) -> Course:
+    course = Course(
+        short_name=f"bloqueante-{uuid.uuid4().hex[:8]}",
+        name="Curso que ocupa la categoría",
+        category_id=uuid.UUID(category_id),
+        start_date=date(2026, 1, 1),
+        visible=True,
+        level=CourseLevel.BEGINNER,
+        default_group_mode=DefaultGroupMode.NONE,
+    )
+    db_session.add(course)
+    await db_session.flush()
+    return course
+
+
+async def _soft_delete_course(db_session: AsyncSession, course: Course) -> None:
+    stored = await db_session.scalar(select(Course).where(Course.id == course.id))
+    assert stored is not None
+    stored.deleted_at = datetime.now(UTC)
+    await db_session.flush()
+
+
+async def test_delete_with_courses_is_category_not_empty(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    category = await _create(session_client, name="Con cursos")
+    course = await _occupy_with_course(db_session, category["id"])
+
+    blocked = await session_client.delete(f"{_ADMIN}/{category['id']}")
+    assert blocked.status_code == 409
+    assert blocked.json() == {"error": "category_not_empty"}
+
+    await _soft_delete_course(db_session, course)
+    allowed = await session_client.delete(f"{_ADMIN}/{category['id']}")
+    assert allowed.status_code == 204
+
+
+async def test_move_with_courses_is_category_not_empty(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    parent = await _create(session_client, name="Raíz origen")
+    other = await _create(session_client, name="Raíz destino")
+    leaf = await _create(session_client, name="Hoja con cursos", parent_id=parent["id"])
+    course = await _occupy_with_course(db_session, leaf["id"])
+
+    blocked = await session_client.put(
+        f"{_ADMIN}/{leaf['id']}",
+        json={"parentId": other["id"]},
+    )
+    assert blocked.status_code == 409
+    assert blocked.json() == {"error": "category_not_empty"}
+    listed = await session_client.get(_LIST)
+    current = next(item for item in listed.json() if item["id"] == leaf["id"])
+    assert current["parentId"] == parent["id"]
+
+    await _soft_delete_course(db_session, course)
+    allowed = await session_client.put(
+        f"{_ADMIN}/{leaf['id']}",
+        json={"parentId": other["id"]},
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["parentId"] == other["id"]
 
 
 async def test_soft_deleted_name_can_be_reused(

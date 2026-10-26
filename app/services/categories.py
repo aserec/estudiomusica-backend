@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import CategoryNameTaken, CategoryNotEmpty, NotFound, Validation
-from app.models import Category
+from app.models import Category, Course
 from app.schemas.categories import (
     CategoryCreate,
     CategoryResponse,
@@ -126,6 +126,21 @@ async def _has_active_children(session: AsyncSession, category_id: UUID) -> bool
         )
 
 
+async def _has_courses(session: AsyncSession, category_id: UUID) -> bool:
+    with session.no_autoflush:
+        return (
+            await session.scalar(
+                select(Course.id)
+                .where(
+                    Course.category_id == category_id,
+                    Course.deleted_at.is_(None),
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
+
 async def _assert_parent_is_root(
     session: AsyncSession,
     parent_id: UUID,
@@ -204,6 +219,8 @@ async def update_category(
         raise Validation(fields=["name"])
     next_parent = row.parent_id
     if changing_parent:
+        if await _has_courses(session, category_id):
+            raise CategoryNotEmpty()
         if body.parent_id is not None:
             if await _has_active_children(session, category_id):
                 raise Validation(fields=["parentId"])
@@ -235,7 +252,9 @@ async def delete_category(session: AsyncSession, category_id: UUID) -> None:
     row = await _lock_category(session, category_id)
     if row is None:
         raise NotFound()
-    if await _has_active_children(session, category_id):
+    if await _has_active_children(session, category_id) or await _has_courses(
+        session, category_id
+    ):
         raise CategoryNotEmpty()
     row.deleted_at = datetime.now(UTC)
     await session.flush()
