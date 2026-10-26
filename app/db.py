@@ -403,6 +403,8 @@ async def _get_streaming_session(request: Request) -> AsyncIterator[AsyncSession
             yield session
             await session.commit()
         except Exception:
+            # ST5: el rollback explícito es equivalente al de
+            # ``async with factory()`` al salir con transacción abierta.
             await session.rollback()
             raise
 
