@@ -69,6 +69,9 @@ def parse_tables(ucd_dir: Path) -> dict[str, tuple[tuple[int, int], ...]]:
 
 
 def _format_ranges(ranges: tuple[tuple[int, int], ...]) -> str:
+    if len(ranges) == 1:
+        start, end = ranges[0]
+        return f"((0x{start:04X}, 0x{end:04X}),)"
     parts = [f"(0x{start:04X}, 0x{end:04X})" for start, end in ranges]
     inner = ",\n    ".join(parts)
     return f"(\n    {inner},\n)"

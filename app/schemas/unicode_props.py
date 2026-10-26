@@ -695,6 +695,4 @@ EMOJI_PRESENTATION: tuple[tuple[int, int], ...] = (
     (0x1FAF0, 0x1FAF8),
 )
 
-REGIONAL_INDICATOR: tuple[tuple[int, int], ...] = (
-    (0x1F1E6, 0x1F1FF),
-)
+REGIONAL_INDICATOR: tuple[tuple[int, int], ...] = ((0x1F1E6, 0x1F1FF),)
