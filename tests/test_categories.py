@@ -39,6 +39,7 @@ from app.services.categories import (
     create_category,
     delete_category,
     fix_category_name_keys,
+    list_categories,
     update_category,
 )
 from tests.test_auth import unique_email
@@ -1703,6 +1704,47 @@ def test_k_dup_sin_rstrip_cortado() -> None:
     assert clipped == ("a" * 111) + " (dup 1)"
 
 
+async def test_create_retries_transient_then_succeeds(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.exceptions import TransientDbConflict
+    from app.services import categories as categories_svc
+
+    calls = {"n": 0}
+    original = categories_svc._name_taken
+
+    async def flaky(*args: object, **kwargs: object) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TransientDbConflict()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(categories_svc, "_name_taken", flaky)
+    row = await create_category(
+        db_session, CategoryCreate.model_validate({"name": "Retryok"})
+    )
+    assert row.name == "Retryok"
+    assert calls["n"] == 2
+
+
+async def test_create_exhausts_transient_and_session_stays_clean(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.exceptions import TransientDbConflict
+    from app.services import categories as categories_svc
+
+    async def always(*_args: object, **_kwargs: object) -> bool:
+        raise TransientDbConflict()
+
+    monkeypatch.setattr(categories_svc, "_name_taken", always)
+    with pytest.raises(TransientDbConflict):
+        await create_category(
+            db_session, CategoryCreate.model_validate({"name": "Retryfail"})
+        )
+    rows = await list_categories(db_session)
+    assert isinstance(rows, list)
+
+
 async def test_f_sin_chequeo_clash(db_session: AsyncSession) -> None:
     await db_session.execute(
         text(
@@ -3181,9 +3223,8 @@ def _run_in_thread(database_url: str, barrier: Any, work: Any) -> str:
     from app.exceptions import (
         CategoryNameTaken,
         CategoryNotEmpty,
-        DeadlockDetected,
         NotFound,
-        SerializationFailure,
+        TransientDbConflict,
         Validation,
         conflict_from_sqlstate,
         pg_sqlstate,
@@ -3212,12 +3253,9 @@ def _run_in_thread(database_url: str, barrier: Any, work: Any) -> str:
                 except NotFound:
                     await session.rollback()
                     return "not_found"
-                except DeadlockDetected:
+                except TransientDbConflict:
                     await session.rollback()
-                    return "deadlock"
-                except SerializationFailure:
-                    await session.rollback()
-                    return "serialization"
+                    return "transient"
                 except DBAPIError as exc:
                     await session.rollback()
                     mapped = conflict_from_sqlstate(pg_sqlstate(exc))

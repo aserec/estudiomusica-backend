@@ -119,16 +119,11 @@ class CategoryNameTaken(Conflict):
     error = "category_name_taken"
 
 
-class DeadlockDetected(Conflict):
-    """409 {error: deadlock_detected}."""
+class TransientDbConflict(DomainError):
+    """503 {error: transient_db_conflict} con Retry-After."""
 
-    error = "deadlock_detected"
-
-
-class SerializationFailure(Conflict):
-    """409 {error: serialization_failure}."""
-
-    error = "serialization_failure"
+    status_code = 503
+    error = "transient_db_conflict"
 
 
 def pg_sqlstate(exc: BaseException) -> str:
@@ -150,9 +145,9 @@ def pg_sqlstate(exc: BaseException) -> str:
     return ""
 
 
-def conflict_from_sqlstate(state: str) -> Conflict | None:
-    if state == "40P01":
-        return DeadlockDetected()
-    if state == "40001":
-        return SerializationFailure()
+def conflict_from_sqlstate(state: str) -> TransientDbConflict | None:
+    """40P01/40001 son transitorios: el caller reintenta o responde 503."""
+
+    if state in {"40P01", "40001"}:
+        return TransientDbConflict()
     return None

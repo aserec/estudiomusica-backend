@@ -124,15 +124,27 @@ def test_domain_validation_stays_400_not_422(probe_client: TestClient) -> None:
     assert response.json() == {"error": "validation", "fields": ["email"]}
 
 
-def test_pg_deadlock_and_serialization_are_409_not_500(
+def test_pg_deadlock_and_serialization_are_503_not_500(
     probe_client: TestClient,
 ) -> None:
     deadlock = probe_client.get("/api/v1/_test/pg-deadlock")
-    assert deadlock.status_code == 409
-    assert deadlock.json() == {"error": "deadlock_detected"}
+    assert deadlock.status_code == 503
+    assert deadlock.json() == {"error": "transient_db_conflict"}
+    assert deadlock.headers.get("retry-after") == "1"
     serial = probe_client.get("/api/v1/_test/pg-serialization")
-    assert serial.status_code == 409
-    assert serial.json() == {"error": "serialization_failure"}
+    assert serial.status_code == 503
+    assert serial.json() == {"error": "transient_db_conflict"}
+    assert serial.headers.get("retry-after") == "1"
+
+
+def test_transient_retry_succeeds_and_exhaust_is_503(probe_client: TestClient) -> None:
+    ok = probe_client.get("/api/v1/_test/pg-transient-retry")
+    assert ok.status_code == 200
+    assert ok.json() == {"attempts": 2}
+    exhausted = probe_client.get("/api/v1/_test/pg-transient-exhaust")
+    assert exhausted.status_code == 503
+    assert exhausted.json() == {"error": "transient_db_conflict"}
+    assert exhausted.headers.get("retry-after") == "1"
 
 
 def test_unhandled_error_is_500_without_message(client: TestClient) -> None:

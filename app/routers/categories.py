@@ -27,6 +27,10 @@ ERROR_RESPONSES = {
     403: {"model": ErrorResponse, "description": "Sin permiso de sitio"},
     404: {"model": ErrorResponse, "description": "Categoría no encontrada"},
     409: {"model": ErrorResponse, "description": "Conflicto de categoría"},
+    503: {
+        "model": ErrorResponse,
+        "description": "Conflicto transitorio de base de datos; reintentar",
+    },
 }
 
 _MANAGE = require_site_permission(Permission.SITE_MANAGE_COURSES)
@@ -66,6 +70,7 @@ async def get_categories(
         401: ERROR_RESPONSES[401],
         403: ERROR_RESPONSES[403],
         409: ERROR_RESPONSES[409],
+        503: ERROR_RESPONSES[503],
     },
 )
 async def post_category(
@@ -94,6 +99,7 @@ async def post_category(
         403: ERROR_RESPONSES[403],
         404: ERROR_RESPONSES[404],
         409: ERROR_RESPONSES[409],
+        503: ERROR_RESPONSES[503],
     },
 )
 async def put_category(
@@ -120,6 +126,7 @@ async def put_category(
         403: ERROR_RESPONSES[403],
         404: ERROR_RESPONSES[404],
         409: ERROR_RESPONSES[409],
+        503: ERROR_RESPONSES[503],
     },
 )
 async def remove_category(

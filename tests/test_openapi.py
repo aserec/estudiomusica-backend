@@ -151,15 +151,18 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert "401" in categories_post["responses"]
     assert "403" in categories_post["responses"]
     assert "409" in categories_post["responses"]
+    assert "503" in categories_post["responses"]
     assert "patch" not in paths["/api/v1/admin/categories/{category_id}"]
     categories_put = paths["/api/v1/admin/categories/{category_id}"]["put"]
     assert "200" in categories_put["responses"]
     assert "400" in categories_put["responses"]
     assert "404" in categories_put["responses"]
     assert "409" in categories_put["responses"]
+    assert "503" in categories_put["responses"]
     categories_delete = paths["/api/v1/admin/categories/{category_id}"]["delete"]
     assert "204" in categories_delete["responses"]
     assert "409" in categories_delete["responses"]
+    assert "503" in categories_delete["responses"]
     assert "CategoryResponse" in schemas
     assert "CategoryCreate" in schemas
     assert "CategoryUpdate" in schemas

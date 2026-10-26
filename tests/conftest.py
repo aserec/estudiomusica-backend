@@ -226,6 +226,39 @@ def _mount_probes(application: FastAPI) -> None:
 
         raise DBAPIError("SELECT 1", {}, _PgError())
 
+    @application.get("/api/v1/_test/pg-transient-retry")
+    async def retry_transient_then_ok() -> dict[str, int]:
+        from app.exceptions import TransientDbConflict
+        from app.services.categories import _run_with_transient_retry
+
+        class _Session:
+            async def rollback(self) -> None:
+                return None
+
+        state = {"n": 0}
+
+        async def flaky() -> dict[str, int]:
+            state["n"] += 1
+            if state["n"] < 2:
+                raise TransientDbConflict()
+            return {"attempts": state["n"]}
+
+        return await _run_with_transient_retry(_Session(), flaky)  # type: ignore[arg-type]
+
+    @application.get("/api/v1/_test/pg-transient-exhaust")
+    async def exhaust_transient() -> None:
+        from app.exceptions import TransientDbConflict
+        from app.services.categories import _run_with_transient_retry
+
+        class _Session:
+            async def rollback(self) -> None:
+                return None
+
+        async def boom() -> None:
+            raise TransientDbConflict()
+
+        await _run_with_transient_retry(_Session(), boom)  # type: ignore[arg-type]
+
     @application.get("/api/v1/_test/validation")
     def raise_validation() -> None:
         raise Validation(fields=["email"])
