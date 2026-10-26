@@ -1,9 +1,9 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, Self
+from typing import Any, Literal, Self
 from urllib.parse import urlparse
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine.url import make_url
 
@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     db_max_overflow: int = Field(default=10, ge=0)
     db_pool_timeout: float = Field(default=30.0, gt=0)
     db_pool_recycle: int = Field(default=1800, ge=-1)
+
+    def __init__(self, **data: Any) -> None:
+        try:
+            super().__init__(**data)
+        except ValidationError as exc:
+            raise _validation_error_without_secrets(exc) from None
 
     def cors_origin_list(self) -> list[str]:
         return [
@@ -121,8 +127,12 @@ class Settings(BaseSettings):
     def reject_default_database_credentials(self) -> Self:
         """Las credenciales y bases de test no valen fuera de development.
 
-        asyncpg acepta ``password``, ``user``, ``database`` y ``dbname``
-        en la query; se aplican como override del DSN antes de validar.
+        Fuera de development el DSN debe traer usuario, contraseña y base
+        explícitos: no se heredan de ``PGUSER`` / ``PGPASSWORD`` /
+        ``PGDATABASE`` (asyncpg usaría el usuario como nombre de base).
+        La comparación de usuario y del sufijo ``_test`` no distingue
+        mayúsculas. asyncpg acepta ``password``, ``user``, ``database`` y
+        ``dbname`` en la query; se aplican como override antes de validar.
         """
 
         if self.app_env == "development":
@@ -133,24 +143,78 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_URL no es un DSN válido") from None
         query_password = self._query_value(parsed, "password")
         query_user = self._query_value(parsed, "user")
-        password = query_password or parsed.password
-        username = query_user or parsed.username
-        database = (
-            self._query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
-            or parsed.database
-            or ""
-        )
-        if password == _DEFAULT_DEV_PASSWORD or username == _DEFAULT_DEV_USER:
+        query_database = self._query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
+        password = query_password if query_password is not None else parsed.password
+        username = query_user if query_user is not None else parsed.username
+        database = query_database if query_database is not None else parsed.database
+        if not username:
+            raise ValueError(
+                "DATABASE_URL debe incluir el usuario explícitamente "
+                "fuera de APP_ENV=development (no se hereda de PGUSER)"
+            )
+        if password is None or password == "":
+            raise ValueError(
+                "DATABASE_URL debe incluir la contraseña explícitamente "
+                "fuera de APP_ENV=development (no se hereda de PGPASSWORD)"
+            )
+        if not database:
+            raise ValueError(
+                "DATABASE_URL debe incluir el nombre de base explícitamente "
+                "fuera de APP_ENV=development (no se hereda de PGDATABASE "
+                "ni del usuario)"
+            )
+        if password == _DEFAULT_DEV_PASSWORD or username.lower() == _DEFAULT_DEV_USER:
             raise ValueError(
                 "DATABASE_URL no puede usar la contraseña o el usuario "
                 "por defecto de desarrollo fuera de APP_ENV=development"
             )
-        if database.endswith("_test"):
+        if database.lower().endswith("_test"):
             raise ValueError(
                 "DATABASE_URL no puede apuntar a una base *_test "
                 "fuera de APP_ENV=development"
             )
         return self
+
+
+def _redact_error_input(value: object) -> object:
+    if isinstance(value, SecretStr):
+        return "**********"
+    if isinstance(value, str) and "://" in value:
+        try:
+            return make_url(value).render_as_string(hide_password=True)
+        except Exception:
+            return "<dsn-redactado>"
+    if isinstance(value, dict):
+        return {key: _redact_error_input(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_error_input(item) for item in value]
+    return value
+
+
+def _validation_error_without_secrets(exc: ValidationError) -> ValidationError:
+    """Copia el ValidationError sin el DSN original en ``input`` / ``json()``."""
+
+    line_errors: list[Any] = []
+    for error in exc.errors(include_url=False):
+        item: dict[str, Any] = {
+            "type": error.get("type", "value_error"),
+            "loc": error.get("loc", ()),
+            "input": _redact_error_input(error.get("input")),
+        }
+        ctx = error.get("ctx")
+        if ctx is not None:
+            item["ctx"] = _redact_error_input(ctx)
+        line_errors.append(item)
+    try:
+        return ValidationError.from_exception_data(
+            exc.title, line_errors, hide_input=True
+        )
+    except Exception:
+        return ValidationError.from_exception_data(
+            exc.title,
+            [{"type": "value_error", "loc": ("database_url",), "input": None}],
+            hide_input=True,
+        )
 
 
 @lru_cache
