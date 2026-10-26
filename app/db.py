@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import ssl
 from collections.abc import AsyncIterator, Mapping
-from typing import Annotated, Any
+from typing import Annotated, Any, get_origin, get_type_hints
 from urllib.parse import parse_qsl, urlparse
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlalchemy import event
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import (
@@ -345,7 +345,44 @@ async def _get_session() -> AsyncIterator[AsyncSession]:
             raise
 
 
-async def _get_streaming_session() -> AsyncIterator[AsyncSession]:
+def route_allows_streaming_session(route: object) -> bool:
+    """``SessionStreamingDep`` solo si el retorno es ``StreamingResponse``.
+
+    La anotación tiene que ser exactamente ``StreamingResponse`` o una
+    subclase. Un ``Union`` / ``X | Y`` (p. ej. ``StreamingResponse | dict``)
+    no vale: ese POST JSON devolvería 201 con el commit aún pendiente.
+    """
+
+    from starlette.responses import StreamingResponse as StarletteStreaming
+
+    endpoint = getattr(route, "endpoint", None)
+    if endpoint is not None:
+        try:
+            returned = get_type_hints(endpoint).get("return")
+        except (NameError, TypeError):
+            returned = None
+        if returned is not None:
+            if get_origin(returned) is not None:
+                return False
+            return isinstance(returned, type) and issubclass(
+                returned, StarletteStreaming
+            )
+    response_class = getattr(route, "response_class", None)
+    return isinstance(response_class, type) and issubclass(
+        response_class, StarletteStreaming
+    )
+
+
+def _reject_non_streaming_route(request: Request) -> None:
+    route = request.scope.get("route")
+    if route_allows_streaming_session(route):
+        return
+    raise RuntimeError(
+        "SessionStreamingDep solo en rutas que devuelven StreamingResponse"
+    )
+
+
+async def _get_streaming_session(request: Request) -> AsyncIterator[AsyncSession]:
     """Sesión para ``StreamingResponse``: el commit espera al generador.
 
     ``SessionDep`` (scope=function) cierra la transacción antes de
@@ -354,9 +391,12 @@ async def _get_streaming_session() -> AsyncIterator[AsyncSession]:
     el stream, sin dejar idle in transaction.
 
     Un fallo de commit no cambia el status: el cuerpo ya salió
-    (200 truncado). No uses ``SessionStreamingDep`` en un POST JSON.
+    (200 truncado). No uses ``SessionStreamingDep`` en un POST JSON:
+    la dependencia lo rechaza si la anotación no es exactamente
+    ``StreamingResponse`` (nada de ``Union``).
     """
 
+    _reject_non_streaming_route(request)
     factory = get_session_factory()
     async with factory() as session:
         try:

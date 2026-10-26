@@ -345,29 +345,9 @@ def _iter_dependants(dependant: Any) -> Any:
 
 
 def _route_returns_streaming(route: Any) -> bool:
-    from typing import get_args, get_origin, get_type_hints
+    from app.db import route_allows_streaming_session
 
-    from fastapi.responses import StreamingResponse
-    from starlette.responses import StreamingResponse as StarletteStreaming
-
-    response_class = getattr(route, "response_class", None)
-    if isinstance(response_class, type) and issubclass(
-        response_class, StarletteStreaming
-    ):
-        return True
-    endpoint = getattr(route, "endpoint", None)
-    if endpoint is None:
-        return False
-    returned = get_type_hints(endpoint).get("return")
-    if returned is StreamingResponse or returned is StarletteStreaming:
-        return True
-    origin = get_origin(returned)
-    if origin is None:
-        return False
-    return any(
-        arg is StreamingResponse or arg is StarletteStreaming
-        for arg in get_args(returned)
-    )
+    return route_allows_streaming_session(route)
 
 
 def test_session_route_deps_use_function_scope() -> None:
@@ -408,6 +388,36 @@ def test_session_route_deps_use_function_scope() -> None:
     assert isinstance(streaming_dep, DependsParam)
     assert streaming_dep.dependency is _get_streaming_session
     assert streaming_dep.scope == "request"
+
+
+def test_session_streaming_dep_rejects_union_return_annotation() -> None:
+    """M2b: ``StreamingResponse | dict`` no es StreamingResponse; no hay 201."""
+
+    from fastapi.responses import StreamingResponse
+    from fastapi.testclient import TestClient
+
+    from app.db import SessionStreamingDep, route_allows_streaming_session
+    from app.main import create_app
+
+    application = create_app()
+
+    @application.post("/api/v1/_test/m2b", status_code=201, response_model=None)
+    async def m2b_union(
+        session: SessionStreamingDep,
+    ) -> StreamingResponse | dict[str, str]:
+        del session
+        return {"label": "m2b"}
+
+    route = next(
+        item
+        for item in application.routes
+        if getattr(item, "path", None) == "/api/v1/_test/m2b"
+    )
+    assert not route_allows_streaming_session(route)
+    with TestClient(application) as client:
+        response = client.post("/api/v1/_test/m2b")
+        assert response.status_code != 201
+        assert response.status_code >= 400
 
 
 async def _create_probe_table(engine: Any, probe_table: Table) -> None:
