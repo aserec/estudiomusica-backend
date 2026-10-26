@@ -563,37 +563,32 @@ class _SessionAdvisoryLock:
             self._ready.set()
 
     async def _hold(self) -> None:
-        import asyncpg  # type: ignore[import-untyped]
-
-        raw, connect_args = asyncpg_url_and_connect_args(self._admin.secret())
-        parsed = make_url(raw)
-        kwargs: dict[str, Any] = {
-            "user": parsed.username,
-            "password": parsed.password,
-            "database": parsed.database,
-            "timeout": 5,
-        }
-        if parsed.host:
-            kwargs["host"] = parsed.host
-        if parsed.port:
-            kwargs["port"] = int(parsed.port)
-        ssl = connect_args.get("ssl")
-        if ssl is not None:
-            kwargs["ssl"] = ssl
-        connection = await asyncpg.connect(**kwargs)
+        engine = _create_async_engine(
+            self._admin.secret(),
+            isolation_level="AUTOCOMMIT",
+            connect_args={"timeout": 5, "command_timeout": 5},
+        )
+        connection = None
         try:
+            connection = await engine.connect()
             key1, key2 = _role_advisory_lock_keys(self._name)
-            got = await connection.fetchval(
-                "SELECT pg_try_advisory_lock($1, $2)", key1, key2
+            got = await connection.scalar(
+                text("SELECT pg_try_advisory_lock(:k1, :k2)"),
+                {"k1": key1, "k2": key2},
             )
             self._acquired = bool(got)
             self._ready.set()
             if not self._acquired:
                 return
             await asyncio.to_thread(self._stop.wait)
-            await connection.fetchval("SELECT pg_advisory_unlock($1, $2)", key1, key2)
+            await connection.scalar(
+                text("SELECT pg_advisory_unlock(:k1, :k2)"),
+                {"k1": key1, "k2": key2},
+            )
         finally:
-            await connection.close()
+            if connection is not None:
+                await connection.close()
+            await engine.dispose()
 
 
 _ROLE_LIFE_LOCK: _SessionAdvisoryLock | None = None

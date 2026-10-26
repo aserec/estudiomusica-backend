@@ -696,7 +696,6 @@ def test_orphan_objects_in_non_test_db_are_not_dropped(
 
         assert asyncio.run(table_exists()) is not None
     finally:
-
         if asyncio.run(_database_exists(require_postgres, dbname)) is not None:
 
             async def cleanup_table() -> None:
@@ -941,6 +940,64 @@ def test_orphan_production_test_role_captures_overflow(
 
     monkeypatch.setattr(os, "kill", boom)
     assert _orphan_production_test_role("em_prod_tests_99999999999") is False
+
+
+@pytest.mark.db
+def test_session_lock_holds_with_unix_socket_query_dsn(
+    require_postgres: RedactedDsn,
+) -> None:
+    """MEDIA 3: ?host=/socket&port= debe abrir el lock por la ruta del engine."""
+
+    async def socket_params() -> tuple[str, str]:
+        engine = _admin_engine(require_postgres)
+        try:
+            async with engine.connect() as connection:
+                directories = await connection.scalar(
+                    text("SHOW unix_socket_directories")
+                )
+                port = await connection.scalar(text("SHOW port"))
+        finally:
+            await engine.dispose()
+        if not directories:
+            raise RuntimeError("Postgres no publica unix_socket_directories")
+        return str(directories).split(",")[0].strip(), str(port)
+
+    directory, port = asyncio.run(socket_params())
+    parsed = make_url(require_postgres.secret())
+    socket_url = (
+        parsed.set(host=None, port=None)
+        .set(query={})
+        .update_query_dict({"host": directory, "port": port})
+        .render_as_string(hide_password=False)
+    )
+    lock = _SessionAdvisoryLock(RedactedDsn(socket_url), "em_prod_tests_1_dsn_sock")
+    try:
+        assert lock.start() is True
+    finally:
+        lock.stop()
+    assert lock._thread.is_alive() is False
+
+
+@pytest.mark.db
+def test_session_lock_holds_with_query_user_password(
+    require_postgres: RedactedDsn,
+) -> None:
+    """MEDIA 3: user/password en la query no deben romper el lock."""
+
+    parsed = make_url(require_postgres.secret())
+    user = parsed.username
+    password = parsed.password
+    assert user and password
+    query_url = (
+        parsed.set(username=None, password=None)
+        .update_query_dict({"user": user, "password": password})
+        .render_as_string(hide_password=False)
+    )
+    lock = _SessionAdvisoryLock(RedactedDsn(query_url), "em_prod_tests_1_dsn_query")
+    try:
+        assert lock.start() is True
+    finally:
+        lock.stop()
 
 
 def test_own_schema_names_includes_public() -> None:
