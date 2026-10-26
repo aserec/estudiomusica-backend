@@ -385,6 +385,29 @@ def test_0004_does_not_import_app_schemas() -> None:
     assert "510acf77" in source
 
 
+def test_name_key_column_is_not_null_without_default() -> None:
+    from app.models.category import Category
+
+    column = Category.__table__.c.name_key
+    assert column.nullable is False
+    assert column.server_default is None
+    assert column.default is None
+
+    model_source = (ROOT / "app/models/category.py").read_text(encoding="utf-8")
+    expected_model = "name_key: Mapped[str] = mapped_column(CITEXT(), nullable=False)"
+    assert expected_model in model_source
+
+    migration = (ROOT / "app/migrations/versions/0004_course_categories.py").read_text(
+        encoding="utf-8"
+    )
+    name_key_columns = [
+        line.strip()
+        for line in migration.splitlines()
+        if "name_key" in line and "sa.Column" in line
+    ]
+    assert name_key_columns == ['sa.Column("name_key", CITEXT(), nullable=False),']
+
+
 def test_downgrade_0004_drops_legacy_name_key_function(
     monkeypatch: pytest.MonkeyPatch,
     require_postgres: RedactedDsn,

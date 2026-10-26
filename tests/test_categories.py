@@ -28,6 +28,7 @@ from app.schemas.categories import (
 from app.services.categories import (
     _CATEGORY_TREE_LOCK_KEY,
     _integrity_name,
+    _name_taken,
     _raise_from_integrity,
     audit_category_name_keys,
     create_category,
@@ -560,6 +561,8 @@ _NAME_KEY_CASES: tuple[tuple[str, str], ...] = (
     ("🇪\u200d🇸", _SPAIN),
     ("ب\u200cب", "ب\u200cب"),
     (_BEH_FATHA_ZWNJ, _BEH_FATHA_ZWNJ),
+    ("ب\u064e\u064e\u200cب", "ب\u064e\u064e\u200cب"),
+    ("\u2764\ufe0f\ufe0e\u200d\U0001f525", "\u2764\ufe0f\ufe0e\u200d\U0001f525"),
     (_NKO_ZWNJ, _NKO_ZWNJ),
     (_MONGOL_ZWNJ, _MONGOL_ZWNJ),
     (_SYRIAC_ALAPH, _SYRIAC_ALAPH),
@@ -992,6 +995,9 @@ async def test_root_and_child_may_share_name(
     child = await _create(session_client, name="Compartido", parent_id=root["id"])
     assert child["parentId"] == root["id"]
     assert child["name"] == root["name"]
+    assert await _name_taken(db_session, "Compartido", None) is True
+    assert await _name_taken(db_session, "Compartido", uuid.UUID(root["id"])) is True
+    assert await _name_taken(db_session, "Compartido", uuid.uuid4()) is False
 
 
 async def test_put_sort_order_repairs_desynced_name_key(
