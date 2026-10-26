@@ -33,6 +33,9 @@ _ADAPTER_CALLABLE_KEYS = frozenset(
 )
 _SSLROOTCERT_KEYS = frozenset({"sslrootcert"})
 _SSL_QUERY_KEYS = frozenset({"ssl", "sslmode"})
+_TLS_QUERY_KEYS = frozenset(
+    {"ssl", "sslmode", "sslrootcert", "sslcert", "sslkey", "sslpassword"}
+)
 _SSL_CONFLICT_MSG = "DATABASE_URL no puede mezclar ni repetir ssl y sslmode"
 
 
@@ -123,6 +126,9 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
     new_query: dict[Any, Any] = {}
     for key, value in query.items():
         lowered = str(key).lower()
+        if lowered in _TLS_QUERY_KEYS and lowered not in _SSL_QUERY_KEYS:
+            if isinstance(value, (list, tuple)) and len(value) > 1:
+                raise ValueError(_SSL_CONFLICT_MSG)
         if lowered in _SSL_QUERY_KEYS:
             if isinstance(value, (list, tuple)):
                 if len(value) > 1:
@@ -143,6 +149,14 @@ def _reject_conflicting_ssl_opts(opts: Mapping[str, Any]) -> None:
         raise ValueError(_SSL_CONFLICT_MSG)
     if "ssl" in lowered and "sslmode" in lowered:
         raise ValueError(_SSL_CONFLICT_MSG)
+    for key in _TLS_QUERY_KEYS:
+        if lowered.count(key) > 1:
+            raise ValueError(_SSL_CONFLICT_MSG)
+    for key, value in opts.items():
+        if str(key).lower() not in _TLS_QUERY_KEYS:
+            continue
+        if isinstance(value, (list, tuple)) and len(value) > 1:
+            raise ValueError(_SSL_CONFLICT_MSG)
 
 
 def ssl_context_from_rootcert(cafile: str, ssl_value: object = None) -> ssl.SSLContext:
@@ -216,6 +230,8 @@ def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
             continue
         if lowered in _SSLROOTCERT_KEYS:
             if isinstance(value, (list, tuple)):
+                if len(value) > 1:
+                    raise ValueError(_SSL_CONFLICT_MSG)
                 sslrootcert = str(value[0]) if value else None
             else:
                 sslrootcert = str(value) if value else None

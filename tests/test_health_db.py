@@ -2098,6 +2098,37 @@ def test_normalize_rejects_uppercase_and_encoded_conflicts() -> None:
         assert str(caught.value) == _SSL_CONFLICT_MSG
 
 
+def test_repeated_tls_keys_raise_value_error(tmp_path: Any) -> None:
+    """BAJA: sslrootcert (y cualquier clave TLS) repetida → ValueError."""
+
+    from app.db import (
+        _SSL_CONFLICT_MSG,
+        normalize_asyncpg_ssl_url,
+        prepare_asyncpg_connect_kwargs,
+    )
+
+    cafile = tmp_path / "ca.pem"
+    cafile.write_text("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+    cases = (
+        f"sslrootcert={cafile}&sslrootcert=/bad.pem",
+        "sslcert=/a.pem&sslcert=/b.pem",
+        "sslkey=/a.pem&sslkey=/b.pem",
+        "sslpassword=one&sslpassword=two",
+        "sslmode=verify-full&sslrootcert=CA&sslrootcert=BAD",
+        "SSLROOTCERT=CA&sslrootcert=BAD",
+    )
+    for query in cases:
+        url = f"postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?{query}"
+        with pytest.raises(ValueError, match="mezclar ni repetir") as caught:
+            normalize_asyncpg_ssl_url(url)
+        assert str(caught.value) == _SSL_CONFLICT_MSG
+    with pytest.raises(ValueError, match="mezclar ni repetir") as prepared:
+        prepare_asyncpg_connect_kwargs(
+            {"host": "127.0.0.1", "ssl": "verify-full", "sslrootcert": ("CA", "BAD")}
+        )
+    assert str(prepared.value) == _SSL_CONFLICT_MSG
+
+
 def test_normalize_accepts_unencoded_brackets_in_password() -> None:
     """``[`` / ``]`` en la contraseña siguen siendo un DSN válido."""
 
