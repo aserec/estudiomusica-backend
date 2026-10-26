@@ -7,7 +7,7 @@ from typing import Any
 import asyncpg  # type: ignore[import-untyped]
 from sqlalchemy.engine.url import make_url
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db import HEALTH_APPLICATION_NAME
 from app.schemas.health import DatabaseHealthResponse, HealthResponse
 
@@ -155,7 +155,7 @@ def _probe_busy() -> bool:
 def _connect_kwargs() -> dict[str, Any]:
     settings = get_settings()
     parsed = make_url(_health_dsn())
-    return {
+    kwargs: dict[str, Any] = {
         "host": parsed.host,
         "port": parsed.port or 5432,
         "user": parsed.username,
@@ -165,6 +165,12 @@ def _connect_kwargs() -> dict[str, Any]:
         "command_timeout": settings.db_command_timeout,
         "server_settings": {"application_name": HEALTH_APPLICATION_NAME},
     }
+    # asyncpg en TCP usa ssl=prefer si no se pasa; hay que honrar el DSN
+    # (p. ej. ssl=disable del proxy de freeze, que lee el protocolo en claro).
+    sslmode = Settings._query_value(parsed, "sslmode", "ssl")
+    if sslmode is not None:
+        kwargs["ssl"] = sslmode
+    return kwargs
 
 
 def clear_health_probe() -> None:
