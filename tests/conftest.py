@@ -14,9 +14,15 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
-from app.db import RedactedDsn, SessionDep, get_session, redact_database_url
+from app.db import (
+    RedactedDsn,
+    SessionDep,
+    asyncpg_url_and_connect_args,
+    get_session,
+    redact_database_url,
+)
 from app.exceptions import Validation
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -561,6 +567,15 @@ def _redacted_exception_detail(exc: BaseException, dsn: RedactedDsn) -> str:
     return text
 
 
+def _create_async_engine(database_url: str, **kwargs: Any) -> AsyncEngine:
+    """``create_async_engine`` con ``sslrootcert`` → ``SSLContext``."""
+
+    url, ssl_args = asyncpg_url_and_connect_args(database_url)
+    connect_args = dict(kwargs.pop("connect_args", {}) or {})
+    connect_args.update(ssl_args)
+    return create_async_engine(url, connect_args=connect_args, **kwargs)
+
+
 def ensure_database_exists(database_url: str | RedactedDsn) -> None:
     """Crea la base conectando a la BD de mantenimiento ``postgres``."""
 
@@ -571,7 +586,7 @@ def ensure_database_exists(database_url: str | RedactedDsn) -> None:
         raise RuntimeError(f"DSN sin nombre de base. {dsn}") from None
 
     async def create_if_missing() -> None:
-        engine = create_async_engine(
+        engine = _create_async_engine(
             parsed.set(database="postgres").render_as_string(hide_password=False),
             isolation_level="AUTOCOMMIT",
             connect_args={
@@ -614,7 +629,7 @@ def drop_database_if_exists(database_url: str | RedactedDsn) -> None:
         raise RuntimeError(f"Solo se pueden borrar bases *_test. {dsn}") from None
 
     async def drop() -> None:
-        engine = create_async_engine(
+        engine = _create_async_engine(
             make_url(dsn.secret())
             .set(database="postgres")
             .render_as_string(hide_password=False),
@@ -660,7 +675,7 @@ def _ping_postgres(database_url: str | RedactedDsn) -> None:
     dsn = _as_redacted_dsn(database_url)
 
     async def ping() -> None:
-        engine = create_async_engine(
+        engine = _create_async_engine(
             _normalize_sslmode(dsn.secret()),
             pool_pre_ping=False,
             connect_args={
@@ -751,7 +766,7 @@ _LEFTOVER_TEST_DATABASES = (
 
 def _drop_leftover_test_tables(dsn: RedactedDsn) -> None:
     async def drop() -> None:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 for name in _LEFTOVER_TEST_TABLES:
@@ -815,7 +830,7 @@ async def db_session(
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     get_settings.cache_clear()
     get_app.cache_clear()
-    engine = create_async_engine(dsn.secret(), pool_pre_ping=True)
+    engine = _create_async_engine(dsn.secret(), pool_pre_ping=True)
     try:
         async with engine.connect() as connection:
             transaction = await connection.begin()

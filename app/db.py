@@ -140,17 +140,14 @@ def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
     return kwargs
 
 
-def _engine_url_and_connect_args() -> tuple[str, dict[str, Any]]:
-    settings = get_settings()
-    raw = settings.resolved_database_url()
+def asyncpg_url_and_connect_args(raw: str) -> tuple[str, dict[str, Any]]:
+    """Quita ``sslrootcert`` de la URL y lo pasa como ``SSLContext``."""
+
     parsed = make_url(raw)
     query = dict(parsed.query or {})
     cafile = _query_scalar(query, "sslrootcert")
     ssl_value = _query_scalar(query, "ssl")
-    connect_args: dict[str, Any] = {
-        "timeout": settings.db_connect_timeout,
-        "command_timeout": settings.db_command_timeout,
-    }
+    connect_args: dict[str, Any] = {}
     if cafile:
         query = {
             key: value
@@ -159,6 +156,14 @@ def _engine_url_and_connect_args() -> tuple[str, dict[str, Any]]:
         }
         raw = parsed.set(query=query).render_as_string(hide_password=False)
         connect_args["ssl"] = ssl_context_from_rootcert(cafile, ssl_value)
+    return raw, connect_args
+
+
+def _engine_url_and_connect_args() -> tuple[str, dict[str, Any]]:
+    settings = get_settings()
+    raw, connect_args = asyncpg_url_and_connect_args(settings.resolved_database_url())
+    connect_args["timeout"] = settings.db_connect_timeout
+    connect_args["command_timeout"] = settings.db_command_timeout
     return raw, connect_args
 
 
