@@ -117,9 +117,3 @@ class CategoryNameTaken(Conflict):
     """409 {error: category_name_taken}."""
 
     error = "category_name_taken"
-
-
-class CategoryCycle(Conflict):
-    """409 {error: category_cycle}."""
-
-    error = "category_cycle"

@@ -1,23 +1,19 @@
 """CRUD de categorías de curso. Deniega por defecto en el router."""
 
 from datetime import UTC, datetime
+from typing import NoReturn
 from uuid import UUID
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.exceptions import (
-    CategoryCycle,
-    CategoryNameTaken,
-    CategoryNotEmpty,
-    NotFound,
-    Validation,
-)
+from app.exceptions import CategoryNameTaken, CategoryNotEmpty, NotFound, Validation
 from app.models import Category
 from app.schemas.categories import CategoryCreate, CategoryResponse, CategoryUpdate
 
-_MAX_ANCESTOR_WALK = 64
+# Un solo candado para todo el árbol: serializa POST/PUT que fijan o cambian padre.
+_CATEGORY_TREE_LOCK = "SELECT pg_advisory_xact_lock(400, 1)"
 _NAME_CONSTRAINTS = (
     "uq_categories_root_name_active",
     "uq_categories_parent_name_active",
@@ -49,15 +45,17 @@ def _integrity_name(exc: IntegrityError) -> str:
     return str(orig) if orig is not None else str(exc)
 
 
-def _raise_from_integrity(exc: IntegrityError) -> None:
+def _raise_from_integrity(exc: IntegrityError) -> NoReturn:
     name = _integrity_name(exc)
     if any(item in name for item in _NAME_CONSTRAINTS):
         raise CategoryNameTaken() from exc
-    if "parent_not_self" in name:
-        raise CategoryCycle() from exc
-    if "parent_id" in name:
+    if "parent_not_self" in name or "parent_id" in name:
         raise Validation(fields=["parentId"]) from exc
-    raise CategoryNameTaken() from exc
+    raise exc
+
+
+async def _lock_category_tree(session: AsyncSession) -> None:
+    await session.execute(text(_CATEGORY_TREE_LOCK))
 
 
 async def _lock_category(session: AsyncSession, category_id: UUID) -> Category | None:
@@ -66,18 +64,6 @@ async def _lock_category(session: AsyncSession, category_id: UUID) -> Category |
         .where(Category.id == category_id, Category.deleted_at.is_(None))
         .with_for_update()
     )
-
-
-async def _lock_categories(
-    session: AsyncSession, *category_ids: UUID | None
-) -> dict[UUID, Category]:
-    unique = sorted({item for item in category_ids if item is not None})
-    locked: dict[UUID, Category] = {}
-    for category_id in unique:
-        row = await _lock_category(session, category_id)
-        if row is not None:
-            locked[category_id] = row
-    return locked
 
 
 async def _next_sort_order(session: AsyncSession, parent_id: UUID | None) -> int:
@@ -112,39 +98,6 @@ async def _name_taken(
     return await session.scalar(query.limit(1)) is not None
 
 
-async def _assert_parent(
-    session: AsyncSession, parent_id: UUID | None
-) -> Category | None:
-    if parent_id is None:
-        return None
-    parent = await _lock_category(session, parent_id)
-    if parent is None:
-        raise Validation(fields=["parentId"])
-    return parent
-
-
-async def _would_cycle(
-    session: AsyncSession, category_id: UUID, new_parent_id: UUID | None
-) -> bool:
-    if new_parent_id is None:
-        return False
-    if new_parent_id == category_id:
-        return True
-    current: UUID | None = new_parent_id
-    seen: set[UUID] = set()
-    for _ in range(_MAX_ANCESTOR_WALK):
-        if current is None:
-            return False
-        if current == category_id or current in seen:
-            return True
-        seen.add(current)
-        row = await session.get(Category, current)
-        if row is None or row.deleted_at is not None:
-            return False
-        current = row.parent_id
-    return True
-
-
 async def _has_active_children(session: AsyncSession, category_id: UUID) -> bool:
     return (
         await session.scalar(
@@ -159,23 +112,25 @@ async def _has_active_children(session: AsyncSession, category_id: UUID) -> bool
     )
 
 
-async def _has_courses(session: AsyncSession, category_id: UUID) -> bool:
-    """#401 creará ``courses``. Hasta entonces ``to_regclass`` es NULL."""
+async def _assert_parent_is_root(
+    session: AsyncSession,
+    parent_id: UUID,
+    *,
+    category_id: UUID | None = None,
+) -> Category:
+    """Un solo nivel: el padre tiene que ser una raíz vigente, no uno mismo."""
 
-    table = await session.scalar(text("SELECT to_regclass('public.courses')"))
-    if table is None:
-        return False
-    return bool(
-        await session.scalar(
-            text(
-                "SELECT EXISTS ("
-                "SELECT 1 FROM courses "
-                "WHERE category_id = :category_id AND deleted_at IS NULL"
-                ")"
-            ),
-            {"category_id": category_id},
+    if category_id is not None and parent_id == category_id:
+        raise Validation(fields=["parentId"])
+    parent = await session.scalar(
+        select(Category).where(
+            Category.id == parent_id,
+            Category.deleted_at.is_(None),
         )
     )
+    if parent is None or parent.parent_id is not None:
+        raise Validation(fields=["parentId"])
+    return parent
 
 
 async def list_categories(session: AsyncSession) -> list[Category]:
@@ -188,7 +143,9 @@ async def list_categories(session: AsyncSession) -> list[Category]:
 
 
 async def create_category(session: AsyncSession, body: CategoryCreate) -> Category:
-    await _assert_parent(session, body.parent_id)
+    if body.parent_id is not None:
+        await _lock_category_tree(session)
+        await _assert_parent_is_root(session, body.parent_id)
     if await _name_taken(session, body.name, body.parent_id):
         raise CategoryNameTaken()
     sort_order = (
@@ -215,21 +172,32 @@ async def create_category(session: AsyncSession, body: CategoryCreate) -> Catego
 async def update_category(
     session: AsyncSession, category_id: UUID, body: CategoryUpdate
 ) -> Category:
-    locked = await _lock_categories(session, category_id, body.parent_id)
-    row = locked.get(category_id)
+    fields = body.model_fields_set
+    changing_parent = "parent_id" in fields
+    if changing_parent:
+        await _lock_category_tree(session)
+    row = await _lock_category(session, category_id)
     if row is None:
         raise NotFound()
-    if body.parent_id is not None and body.parent_id not in locked:
-        raise Validation(fields=["parentId"])
-    if await _would_cycle(session, category_id, body.parent_id):
-        raise CategoryCycle()
-    if await _name_taken(session, body.name, body.parent_id, exclude_id=category_id):
-        raise CategoryNameTaken()
-    row.name = body.name
-    row.parent_id = body.parent_id
-    row.description = body.description
-    if body.sort_order is not None:
+    if "name" in fields:
+        if body.name is None:
+            raise Validation(fields=["name"])
+        row.name = body.name
+    if changing_parent:
+        if body.parent_id is not None:
+            if await _has_active_children(session, category_id):
+                raise Validation(fields=["parentId"])
+            await _assert_parent_is_root(
+                session, body.parent_id, category_id=category_id
+            )
+        row.parent_id = body.parent_id
+    if "description" in fields:
+        row.description = body.description
+    if "sort_order" in fields and body.sort_order is not None:
         row.sort_order = body.sort_order
+    parent_for_name = row.parent_id
+    if await _name_taken(session, row.name, parent_for_name, exclude_id=category_id):
+        raise CategoryNameTaken()
     try:
         async with session.begin_nested():
             await session.flush()
@@ -243,9 +211,7 @@ async def delete_category(session: AsyncSession, category_id: UUID) -> None:
     row = await _lock_category(session, category_id)
     if row is None:
         raise NotFound()
-    if await _has_active_children(session, category_id) or await _has_courses(
-        session, category_id
-    ):
+    if await _has_active_children(session, category_id):
         raise CategoryNotEmpty()
     row.deleted_at = datetime.now(UTC)
     await session.flush()

@@ -57,9 +57,9 @@ async def get_categories(
     status_code=status.HTTP_201_CREATED,
     summary="Crear una categoría",
     description=(
-        "Requiere ``site:manage-courses``. Acepta name, parentId, "
-        "description y sortOrder. Sin sortOrder se asigna el siguiente "
-        "entre hermanos. Nombre único (sin distinguir mayúsculas) por padre."
+        "Requiere ``site:manage-courses``. Un solo nivel: parentId solo "
+        "puede ser una raíz. Nieto o padre no-raíz → 400 validation "
+        "fields=[parentId]. Nombre único (citext, NFC) por padre."
     ),
     responses={
         400: ERROR_RESPONSES[400],
@@ -82,10 +82,11 @@ async def post_category(
     response_model=CategoryResponse,
     summary="Actualizar una categoría",
     description=(
-        "Requiere ``site:manage-courses``. PUT (convención #91; el ticket "
-        "pedía PATCH). Sustituye name, parentId y description. sortOrder "
-        "opcional: si no viene, se conserva. 409 si el nuevo padre formaría "
-        "un ciclo o el nombre ya existe entre hermanos."
+        "Requiere ``site:manage-courses``. PUT parcial: un campo omitido "
+        "no cambia; parentId/description en null los borra. Una categoría "
+        "con hijas no puede dejar de ser raíz. 400 validation "
+        "fields=[parentId] si el padre no es raíz, es uno mismo o el "
+        "movimiento crearía un nieto."
     ),
     responses={
         400: ERROR_RESPONSES[400],
@@ -111,8 +112,8 @@ async def put_category(
     summary="Borrar una categoría",
     description=(
         "Requiere ``site:manage-courses``. Borrado lógico. 409 "
-        "``category_not_empty`` si tiene hijas vigentes o cursos vigentes "
-        "(cuando exista la tabla ``courses`` de #401)."
+        "``category_not_empty`` si tiene hijas vigentes. El chequeo de "
+        "cursos lo añade #97."
     ),
     responses={
         401: ERROR_RESPONSES[401],

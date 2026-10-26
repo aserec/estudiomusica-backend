@@ -10,11 +10,11 @@ from app.models.base import PersistentModel
 
 
 class Category(PersistentModel):
-    """Nodo del árbol de categorías.
+    """Nodo del árbol de categorías (un solo nivel: padre = raíz).
 
-    El CRUD de cursos (#401) añadirá ``courses.category_id`` FK a
-    ``categories.id``. El borrado consulta ``public.courses`` si existe
-    para responder ``409 category_not_empty``.
+    #97 añadirá ``courses.category_id`` FK a ``categories.id`` y el
+    chequeo de borrado con cursos. Hasta entonces no hay cursos que
+    proteger.
     """
 
     __tablename__ = "categories"

@@ -111,18 +111,18 @@ Dependencias reutilizables: `require_site_permission(...)` y `require_course_per
 
 ## Categorías de curso
 
-El catálogo es jerárquico (`parentId`). Cualquier usuario autenticado lee el listado; crear, actualizar y borrar exige `site:manage-courses` (solo admin). Alumno, profesor y profesor adjunto reciben `403 {error: forbidden}` en las mutaciones. Sin sesión o token inválido: `401 {error: unauthorized}`.
+El catálogo tiene **un solo nivel** (regla del front, `category-service.ts`): el padre de una categoría tiene que ser una raíz, y una categoría con hijas se queda en la raíz. Un nieto, un padre que no es raíz o mover un nodo con hijas responde `400 {error: validation, fields: ["parentId"]}`. Cualquier usuario autenticado lee el listado; crear, actualizar y borrar exige `site:manage-courses` (solo admin). Alumno, profesor y profesor adjunto reciben `403 {error: forbidden}` en las mutaciones. Sin sesión o token inválido: `401 {error: unauthorized}`.
 
 ```text
 GET    /api/v1/categories
 POST   /api/v1/admin/categories              {name, parentId?, description?, sortOrder?}
-PUT    /api/v1/admin/categories/{id}         {name, parentId?, description?, sortOrder?}
-DELETE /api/v1/admin/categories/{id}         409 si tiene hijas o cursos
+PUT    /api/v1/admin/categories/{id}         {name?, parentId?, description?, sortOrder?}
+DELETE /api/v1/admin/categories/{id}         409 si tiene hijas
 ```
 
-El ticket #400 pedía PATCH y un array sin más. Se usa **PUT** (convención #91) y el listado sigue sin paginar: el árbol es el catálogo completo, no hace falta `page`/`pageSize`. Nombre único (citext, sin distinguir mayúsculas) entre hermanos vigentes. DELETE es lógico (`deleted_at`). `409 {error: category_not_empty}` si hay hijas vigentes o filas vigentes en `courses` (la tabla llega en #401; hasta entonces el chequeo es no-op). `409 {error: category_cycle}` si el nuevo padre sería un descendiente. `409 {error: category_name_taken}` si el nombre ya existe en el mismo padre.
+El ticket #400 pedía PATCH. Se mantiene **PUT** (convención #91) pero **parcial**: un campo omitido no cambia. `PUT {name}` no mueve a la raíz ni borra `description`. Para quitar el padre o la description hay que enviar `null` explícito (`model_fields_set`). El listado no pagina. Nombre: NFC, espacios colapsados, citext (sin distinguir mayúsculas), único entre hermanos vigentes. DELETE es lógico (`deleted_at`). `409 {error: category_not_empty}` si hay hijas vigentes. Hasta #97 no hay tabla `courses`: el borrado no protege cursos. `409 {error: category_name_taken}` si el nombre ya existe en el mismo padre. Los POST/PUT que fijan o cambian `parentId` toman `pg_advisory_xact_lock(400, 1)` sobre el árbol.
 
-`0004_course_categories` crea `categories` (`id`, `name`, `parent_id`, `description`, `sort_order`, timestamps, `deleted_at`) y el trigger `updated_at`. #401 añadirá `courses.category_id` FK a esta tabla.
+`0004_course_categories` crea `categories` (`id`, `name`, `parent_id`, `description`, `sort_order`, timestamps, `deleted_at`) y el trigger `updated_at`. #97 añadirá `courses.category_id` FK a esta tabla.
 
 ## Postgres, migraciones y tests con BD
 

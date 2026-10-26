@@ -47,7 +47,11 @@ def process_revision_directives(
         ):
             extra.append(ops.ExecuteSQLOp(updated_at_trigger_sql(operation.table_name)))
     upgrade_ops.ops.extend(extra)
-    if upgrade_ops.is_empty():
-        # Sin esto, `alembic revision --autogenerate` escribe un fichero
-        # vacío (upgrade/downgrade = pass) y abre un segundo head.
+    config = getattr(context, "config", None)
+    cmd_opts = getattr(config, "cmd_opts", None) if config is not None else None
+    # Solo `alembic revision --autogenerate`: no escribir un fichero pass.
+    # `alembic check` reutiliza este hook y necesita el directive vacío
+    # (si se borra, IndexError / exit 1). Una revisión vacía sería lineal,
+    # no un segundo head.
+    if upgrade_ops.is_empty() and bool(getattr(cmd_opts, "autogenerate", False)):
         directives[:] = []
