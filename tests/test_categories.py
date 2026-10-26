@@ -531,6 +531,16 @@ _ADLAM_ZWNJ = "𞤢\u200c𞤣"
 _ARABIC_EXT_B = "ب\u200c\u08c8"
 _MANDAIC_ZWNJ = "ࡁ\u200cࡊ"
 _BEH_FATHA_ZWNJ = "ب\u064e\u200cب"
+_COUPLE_HEART = "👨\u200d❤️\u200d👨"
+_COUPLE_HEART_PLAIN = "👨❤️👨"
+_RUNNER = "🏃\u200d♂️"
+_RUNNER_PLAIN = "🏃♂️"
+_TECHNOLOGIST = "👩\U0001f3fd\u200d💻"
+_TECHNOLOGIST_PLAIN = "👩\U0001f3fd💻"
+_TRANS_FLAG = "🏳\ufe0f\u200d⚧\ufe0f"
+_TRANS_FLAG_PLAIN = "🏳\ufe0f⚧\ufe0f"
+_PIRATE_FLAG = "🏴\u200d☠️"
+_PIRATE_FLAG_PLAIN = "🏴☠️"
 
 # (entrada, clave esperada). La versión sin ZWJ/ZWNJ se compara en el test.
 _NAME_KEY_CASES: tuple[tuple[str, str], ...] = (
@@ -571,6 +581,12 @@ _NAME_KEY_CASES: tuple[tuple[str, str], ...] = (
     (_MANDAIC_ZWNJ, _MANDAIC_ZWNJ),
     (_FAMILY_EMOJI, _FAMILY_EMOJI),
     ("می‌خواهم", "می‌خواهم"),
+    (_COUPLE_HEART, _COUPLE_HEART),
+    (_COUPLE_HEART_PLAIN, _COUPLE_HEART_PLAIN),
+    (_RUNNER, _RUNNER),
+    (_TECHNOLOGIST, _TECHNOLOGIST),
+    (_TRANS_FLAG, _TRANS_FLAG),
+    (_PIRATE_FLAG, _PIRATE_FLAG),
 )
 
 _LEGITIMATE_CF_NAMES: tuple[tuple[str, str], ...] = (
@@ -964,6 +980,25 @@ async def test_significant_zwj_zwnj_stay_distinct(
         assert created["name"] == payload
         again = await session_client.post(_ADMIN, json={"name": payload})
         assert again.status_code == 409
+
+
+async def test_rgi_zwj_emoji_stay_distinct_from_plain(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    for plain, zwj in (
+        (_COUPLE_HEART_PLAIN, _COUPLE_HEART),
+        (_RUNNER_PLAIN, _RUNNER),
+        (_TECHNOLOGIST_PLAIN, _TECHNOLOGIST),
+        (_TRANS_FLAG_PLAIN, _TRANS_FLAG),
+        (_PIRATE_FLAG_PLAIN, _PIRATE_FLAG),
+    ):
+        created = await _create(session_client, name=plain)
+        assert created["name"] == plain
+        distinct = await session_client.post(_ADMIN, json={"name": zwj})
+        assert distinct.status_code == 201, zwj
+        assert distinct.json()["name"] == zwj
+        assert category_name_key(zwj) != category_name_key(plain)
 
 
 async def test_contextj_spoof_collides_with_plain(

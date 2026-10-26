@@ -111,6 +111,14 @@ def _keep_zwj(value: str, index: int) -> bool:
     right, right_vs = _skip_transparent(value, index, 1)
     if not (0 <= left < len(value) and 0 <= right < len(value)):
         return False
+    # UTS #51: el modificador de tono (1F3FB..1F3FF) no es EP y va
+    # pegado al emoji; el VS16 de presentación va *detrás* del carácter.
+    if 0x1F3FB <= ord(value[left]) <= 0x1F3FF:
+        left -= 1
+        left_vs = True
+    right_vs = right_vs or value[right + 1 : right + 2] == _VS16
+    if not 0 <= left < len(value):
+        return False
     return _is_emoji_zwj_side(value[left], left_vs) and _is_emoji_zwj_side(
         value[right], right_vs
     )

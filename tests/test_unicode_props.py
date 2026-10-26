@@ -1,6 +1,7 @@
 import runpy
 from pathlib import Path
 
+from app.schemas.categories import category_name_key
 from app.schemas.unicode_props import (
     EMOJI_PRESENTATION,
     EXTENDED_PICTOGRAPHIC,
@@ -34,3 +35,16 @@ def test_generated_unicode_tables_match_vendored_ucd() -> None:
     assert any(start <= 0x08C8 <= end for start, end in JOINING_D)
     assert any(start <= 0x2600 <= end for start, end in EXTENDED_PICTOGRAPHIC)
     assert any(start <= 0x2764 <= end for start, end in EXTENDED_PICTOGRAPHIC)
+
+
+def test_rgi_zwj_sequences_keep_every_zwj() -> None:
+    generated = runpy.run_path(str(ROOT / "scripts" / "generate_unicode_tables.py"))
+    path = generated["UCD_DIR"] / "emoji-zwj-sequences.txt"
+    sequences = generated["parse_zwj_sequences"](path)
+    assert len(sequences) == 1468
+    lost = [
+        seq
+        for seq in sequences
+        if seq.count("\u200d") != category_name_key(seq).count("\u200d")
+    ]
+    assert lost == []

@@ -54,6 +54,22 @@ def _merge(ranges: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
     return tuple(merged)
 
 
+def parse_zwj_sequences(path: Path) -> tuple[str, ...]:
+    """Secuencias RGI_Emoji_ZWJ_Sequence de emoji-zwj-sequences.txt."""
+
+    sequences: list[str] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        codes, _, rest = line.partition(";")
+        prop, _, _tail = rest.partition(";")
+        if prop.strip() != "RGI_Emoji_ZWJ_Sequence":
+            continue
+        sequences.append("".join(chr(int(token, 16)) for token in codes.split()))
+    return tuple(sequences)
+
+
 def parse_tables(ucd_dir: Path) -> dict[str, tuple[tuple[int, int], ...]]:
     joining = ucd_dir / "DerivedJoiningType.txt"
     emoji = ucd_dir / "emoji-data.txt"
