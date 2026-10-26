@@ -18,6 +18,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import PersistentModel
 
+PERSON_NAME_MAX = 80
+
 
 class SystemRole(StrEnum):
     """Roles de sistema. Enums en snake_case (convención #91)."""
@@ -38,9 +40,9 @@ class User(PersistentModel):
         ),
     )
 
-    first_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    first_name: Mapped[str] = mapped_column(String(PERSON_NAME_MAX), nullable=False)
     last_name: Mapped[str] = mapped_column(
-        String(80),
+        String(PERSON_NAME_MAX),
         nullable=False,
         server_default=text("''"),
     )

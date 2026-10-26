@@ -105,3 +105,15 @@ class RoleNotAssignable(Conflict):
     """409 {error: role_not_assignable}."""
 
     error = "role_not_assignable"
+
+
+class CannotModifySelf(Conflict):
+    """409 {error: cannot_modify_self}."""
+
+    error = "cannot_modify_self"
+
+
+class LastAdmin(Conflict):
+    """409 {error: last_admin}."""
+
+    error = "last_admin"

@@ -23,19 +23,16 @@ from app.exceptions import (
     Validation,
 )
 from app.models import AuthSession, User
-from app.models.user import SystemRole
+from app.models.user import PERSON_NAME_MAX, SystemRole
 from app.schemas.auth import LogInRequest, PublicUser, SignUpRequest
 from app.services.roles import assert_role_assignable
-
-_FIRST_NAME_MAX = 80
-_LAST_NAME_MAX = 80
 
 
 def split_display_name(name: str) -> tuple[str, str]:
     parts = name.split(None, 1)
     first = parts[0]
     last = parts[1] if len(parts) > 1 else ""
-    if len(first) > _FIRST_NAME_MAX or len(last) > _LAST_NAME_MAX:
+    if len(first) > PERSON_NAME_MAX or len(last) > PERSON_NAME_MAX:
         raise Validation(fields=["name"])
     return first, last
 

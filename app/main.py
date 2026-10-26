@@ -20,10 +20,12 @@ from app.middleware import (
 )
 from app.routers import (
     admin_roles_router,
+    admin_users_router,
     auth_router,
     courses_router,
     examples_router,
     health_router,
+    users_router,
 )
 from app.schemas.errors import ErrorResponse
 
@@ -45,6 +47,8 @@ Backend FastAPI de EstudioMusica.
 - Auth: `POST /api/v1/auth/signup|login|logout` y `GET /api/v1/auth/me`.
 - Roles: `GET|PATCH|DELETE /api/v1/admin/system-roles` y
   `GET /api/v1/courses/{course_id}/me/permissions`.
+- Admin users: `GET|PUT|DELETE /api/v1/admin/users` y
+  `GET /api/v1/users/search`.
 """
 
 OPENAPI_TAGS = [
@@ -63,8 +67,17 @@ OPENAPI_TAGS = [
     {
         "name": "admin",
         "description": (
-            "Roles de sistema. Requiere `site:manage-admins`. "
-            "PATCH parcial de name/active/sortOrder (excepción al PUT de #91)."
+            "Roles de sistema y administración de usuarios. "
+            "Requiere `site:manage-admins`. "
+            "PATCH de system-roles (excepción al PUT de #91); "
+            "identidad de usuario va por PUT."
+        ),
+    },
+    {
+        "name": "users",
+        "description": (
+            "Búsqueda de usuarios para matricular. "
+            "Admin o profesor de un curso. Paginación page/pageSize."
         ),
     },
     {
@@ -165,6 +178,8 @@ def create_app() -> FastAPI:
     api_router.include_router(health_router)
     api_router.include_router(auth_router)
     api_router.include_router(admin_roles_router)
+    api_router.include_router(admin_users_router)
+    api_router.include_router(users_router)
     api_router.include_router(courses_router)
     if settings.example_routes_enabled():
         api_router.include_router(examples_router)

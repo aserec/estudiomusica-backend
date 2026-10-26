@@ -2,7 +2,7 @@
 
 Backend FastAPI de EstudioMusica. Sustituye los almacenes JSON del frontend Next.js.
 
-Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS), la persistencia (Postgres, SQLAlchemy 2 async y Alembic), la API de autenticación (`/api/v1/auth`) y la matriz de roles/permisos (`/api/v1/admin/system-roles`, `/api/v1/courses/{courseId}/me/permissions`).
+Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS), la persistencia (Postgres, SQLAlchemy 2 async y Alembic), la API de autenticación (`/api/v1/auth`), la matriz de roles/permisos (`/api/v1/admin/system-roles`, `/api/v1/courses/{courseId}/me/permissions`) y la administración de usuarios (`/api/v1/admin/users`, `/api/v1/users/search`).
 
 ## Requisitos
 
@@ -108,6 +108,39 @@ GET    /api/v1/courses/{courseId}/me/permissions
 Dependencias reutilizables: `require_site_permission(...)` y `require_course_permission(...)` (leen `course_id` del path). La asignación de matrícula queda fuera de este ticket (#403). El TODO(#306) de visibilidad multimedia/SM3 del profesor adjunto es el flag `ASSISTANT_MEDIA_AND_SM3_VISIBLE` (por defecto `false`); no se ha inventado un permiso nuevo.
 
 `0003_system_roles` (en `app/migrations/versions/`) crea `system_roles` y `course_memberships`, siembra los cuatro roles y añade `users.system_role_id`. Tras el backfill de 0002, `is_admin` se realinea desde `system_role_id` (fuente de verdad). El CHECK exige `is_admin` no nulo y coherente con el rol. `/auth/me` deriva `isAdmin` del rol. Monta el trigger con `op_create_updated_at_trigger`. Las bases de **dev/staging** creadas con una 0003 anterior (sin este CHECK) hay que **recrearlas**: el id de revisión no cambia, y un `downgrade` + `upgrade` pierde el rol y realinea desde `is_admin`. No hay nada desplegado.
+
+## Administración de usuarios
+
+Reutiliza `users` (suspensión y borrado lógico de #93) y `assign_system_role` / `site:manage-admins` de #94. No hay migración nueva: el modelo ya tenía los campos. Autorización por permiso, denegación por defecto.
+
+```text
+GET    /api/v1/admin/users?query=&status=&page=&pageSize=
+PUT    /api/v1/admin/users/{userId}              {firstName?, lastName?, email?}
+PUT    /api/v1/admin/users/{userId}/admin        {isAdmin}
+PUT    /api/v1/admin/users/{userId}/suspension   {suspended}
+DELETE /api/v1/admin/users/{userId}              204 (borrado lógico)
+GET    /api/v1/users/search?q=&page=&pageSize=
+```
+
+`AdminUserView` = `PublicUser` + `suspendedAt` + `deletedAt` + `systemRoleId`. Nunca incluye el hash de contraseña.
+
+Errores (snake_case, convención #91):
+
+- sin sesión / token inválido o caducado → `401 {"error":"unauthorized"}`
+- alumno, profesor o profesor adjunto en `/admin/users` → `403 {"error":"forbidden"}`
+- usuario suspendido con sesión → `403 {"error":"account_suspended"}`
+- email ya usado → `409 {"error":"email_taken"}`
+- quitarse el admin, suspenderse o borrarse a uno mismo → `409 {"error":"cannot_modify_self"}` (aunque haya otros admins)
+- la operación dejaría el sitio sin un admin vigente → `409 {"error":"last_admin"}` (incluye la carrera del último admin; `SELECT ... FOR UPDATE` de actor, destino y admins vigentes, ordenado por id, con `populate_existing` para refrescar el actor ya cargado en la sesión; un admin suspendido o borrado no cuenta y no se bloquea; un actor que ya no es admin vigente recibe `403` antes de `last_admin`)
+- `isAdmin`/`suspended` no aceptan `"yes"` (booleanos estrictos; validación 400)
+- byte NUL en `query`, `q`, `firstName`, `lastName` o `email` → `400 {"error":"validation"}` (no 422; convención #91; Postgres rechazaría el NUL con 500)
+- si el rol `alumno` está desactivado, quitar el admin → `409 {"error":"role_not_assignable"}` (`assign_system_role` bloquea el rol `FOR SHARE` y rechaza el inactivo; no es 500)
+
+`GET /admin/users` pagina con `page`/`pageSize` (no `limit`/`cursor`: el ticket #395 los pedía; se mantiene el helper de #91, pendiente de decisión de Danel). Sin `status` lista vigentes, **incluidos suspendidos**; `status=all` añade borrados. `query` (máximo 200 **tras NFC**; tope crudo 2000 para no rechazar NFD que cabe) filtra por nombre o email; los comodines LIKE se escapan. 100×U+0958 (200 NFC) → 200; 101×U+0958 → 400; 101×`é` se comporta como 101 ASCII.
+
+`PUT` de identidad (no PATCH): la convención #91 usa PUT para actualizar. El nombre (signup y PUT admin) se guarda en NFC; `firstName`/`lastName` (y las mitades del `name` de signup) se limitan a 80 **tras NFC** (ValueError → 400 con `fields`; el `max_length` crudo es 800 para no rechazar NFD que cabe, p. ej. 41×`é`, y para no procesar entradas enormes). 80×U+0958 o 41×U+0958 → 400, no 500 de `varchar(80)`. La búsqueda compara `normalize(col, NFC)` para cubrir filas antiguas en NFD (sin migración nueva). `isAdmin: true` asigna el rol `admin` y el espejo `is_admin`; `false` vuelve a `alumno` vía `assign_system_role` (los dos campos a la vez: `CHECK (is_admin = (system_role_id = 'admin'))`). DELETE revoca todas las `auth_sessions` del usuario; suspender no las revoca (al reactivar, el token viejo vuelve a valer; lo decide Danel). El email de un usuario borrado queda bloqueado (pendiente de decisión; no se reutiliza).
+
+`GET /users/search` (`q` documentado en OpenAPI, máximo 200 **tras NFC**; tope crudo 2000): admin (`site:manage-admins`) busca por nombre y email (`ILIKE`, un recorrido para el listado y otro para el `count`). La búsqueda admin (`_text_match`, OR del ILIKE de email) sigue en Seq Scan aunque exista el índice trgm de nombre: el OR no usa solo el de nombre (haría falta también trgm en email; no en este PR). Un no-admin con membresía `teacher` vigente (no borrada) necesita al menos 3 caracteres distintos de `%`/`_` **tras NFC** (`q` y `query` se normalizan a NFC antes del tope de 200 y de ese mínimo), recibe como máximo 10 resultados y solo coincide por nombre (`ILIKE` de `normalize(first_name || ' ' || last_name, NFC)`; `||` es indexable, `concat()` no — seguimiento: índice `pg_trgm` sobre esa expresión, no en este PR; sin ILIKE sueltos de `first_name`/`last_name`). El email exacto va en una consulta aparte (`users.email = …` con la misma normalización que el login: `strip`+`lower` y luego `EmailStr`, que aplica NFC e IDNA al dominio; si no es un email válido, `strip`+`lower`+NFC) para usar `uq_users_email` (Index Scan); no se mezcla en el `OR` de los `ILIKE` (eso hacía Seq Scan, ~193 ms con 100k). El profesor sigue haciendo Seq Scan del `ILIKE` de nombre aunque `q` sea un email. En el listado fusionado del profesor la fila del email exacto sale primero. La respuesta omite el email salvo que `q` sea ese email completo. `q` vacío no vuelca el directorio. Cuando existan #401/#403 se podrá limitar a matricular en un curso concreto. Seguimiento (no en este PR): unaccent (`jose` vs `José`) y `pg_trgm` sobre `normalize(first_name || ' ' || last_name, NFC)` (no `concat()`: STABLE, no indexable). Sin migración en #95.
 
 ## Postgres, migraciones y tests con BD
 
@@ -293,9 +326,9 @@ app/
   errors.py          # Sobre de error y handlers (validación, HTTP)
   exceptions.py      # AccessDenied, NotFound, Validation, PayloadTooLarge
   config/            # Ajustes por variables de entorno (pydantic-settings)
-  routers/           # Rutas HTTP (health, auth, admin, courses y examples)
-  schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth, roles)
-  services/          # Lógica de aplicación (salud, auth, roles, examples)
+  routers/           # Rutas HTTP (health, auth, admin, users, courses y examples)
+  schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth, roles, users)
+  services/          # Lógica de aplicación (salud, auth, roles, users, examples)
   permissions/       # Matriz versionada y dependencias require_*_permission
   auth/              # Hash argon2, JWT HS256 y cookie de sesión
   models/            # PersistentModel, User, AuthSession, SystemRoleRow, CourseMembership

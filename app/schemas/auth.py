@@ -1,9 +1,23 @@
+import unicodedata
 import uuid
+from typing import overload
 
 from pydantic import EmailStr, Field, field_validator
 
-from app.models.user import SystemRole
+from app.models.user import PERSON_NAME_MAX, SystemRole
 from app.schemas.base import APIModel
+
+PERSON_NAME_RAW_MAX = PERSON_NAME_MAX * 10
+# first + espacio + last; tope semántico 80+80 tras NFC.
+SIGNUP_NAME_RAW_MAX = PERSON_NAME_RAW_MAX * 2 + 1
+
+
+@overload
+def normalize_email(value: str) -> str: ...
+
+
+@overload
+def normalize_email(value: object) -> object: ...
 
 
 def normalize_email(value: object) -> object:
@@ -13,7 +27,7 @@ def normalize_email(value: object) -> object:
 
 
 class SignUpRequest(APIModel):
-    name: str = Field(min_length=1, max_length=161)
+    name: str = Field(min_length=1, max_length=SIGNUP_NAME_RAW_MAX)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128, repr=False)
 
@@ -23,7 +37,7 @@ class SignUpRequest(APIModel):
         stripped = value.strip()
         if not stripped:
             raise ValueError("name required")
-        return stripped
+        return unicodedata.normalize("NFC", stripped)
 
     @field_validator("email", mode="before")
     @classmethod
