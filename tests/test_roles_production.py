@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import get_settings
@@ -140,3 +141,47 @@ def test_production_inactive_alumno_blocks_signup_with_409(
         assert "message" not in blocked.json()
         assert "password12" not in blocked.text
         assert PRODUCTION_AUTH_SECRET not in blocked.text
+
+
+def test_production_role_can_insert_course_membership(
+    production_client: TestClient,
+    production_test_database_url: RedactedDsn,
+) -> None:
+    email = unique_email("prod-enroll")
+    created = production_client.post(
+        "/api/v1/auth/signup", json=signup_body(email=email)
+    )
+    assert created.status_code == 201
+    _assert_production_session(created, production_client)
+    user_id = created.json()["user"]["id"]
+    _run_sql(
+        production_test_database_url,
+        "INSERT INTO course_memberships (user_id, course_id, course_role) "
+        "VALUES (:user_id, :course_id, 'student')",
+        {"user_id": user_id, "course_id": _COURSE},
+    )
+    perms = production_client.get(f"/api/v1/courses/{_COURSE}/me/permissions")
+    assert perms.status_code == 200
+    assert perms.json()["courseRole"] == "student"
+    assert "course:view" in perms.json()["permissions"]
+
+
+def test_production_check_rejects_is_admin_drift(
+    production_client: TestClient,
+    production_test_database_url: RedactedDsn,
+) -> None:
+    email = unique_email("prod-ck")
+    created = production_client.post(
+        "/api/v1/auth/signup", json=signup_body(email=email)
+    )
+    assert created.status_code == 201
+    with pytest.raises(IntegrityError):
+        _run_sql(
+            production_test_database_url,
+            "UPDATE users SET is_admin = true WHERE email = :email",
+            {"email": email},
+        )
+    me = production_client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["systemRole"] == "alumno"
+    assert me.json()["isAdmin"] is False

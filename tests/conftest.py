@@ -429,6 +429,17 @@ async def _cleanup_production_test_rows(admin: RedactedDsn) -> None:
             users = await connection.scalar(text("SELECT to_regclass('public.users')"))
             if users is None:
                 return
+            memberships = await connection.scalar(
+                text("SELECT to_regclass('public.course_memberships')")
+            )
+            if memberships is not None:
+                await connection.execute(
+                    text(
+                        "DELETE FROM course_memberships WHERE user_id IN "
+                        "(SELECT id FROM users WHERE email LIKE :prefix)"
+                    ),
+                    {"prefix": f"{_PRODUCTION_TEST_EMAIL_PREFIX}%"},
+                )
             await connection.execute(
                 text(
                     "DELETE FROM auth_sessions WHERE user_id IN "
@@ -440,6 +451,17 @@ async def _cleanup_production_test_rows(admin: RedactedDsn) -> None:
                 text("DELETE FROM users WHERE email LIKE :prefix"),
                 {"prefix": f"{_PRODUCTION_TEST_EMAIL_PREFIX}%"},
             )
+            roles = await connection.scalar(
+                text("SELECT to_regclass('public.system_roles')")
+            )
+            if roles is not None:
+                await connection.execute(
+                    text(
+                        "UPDATE system_roles SET active = true "
+                        "WHERE id IN "
+                        "('alumno', 'profesor', 'profesor_adjunto', 'admin')"
+                    )
+                )
     finally:
         await engine.dispose()
 
@@ -512,6 +534,13 @@ def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
                 if citext is not None:
                     await connection.execute(
                         text(f"GRANT USAGE ON TYPE citext TO {role}")
+                    )
+                updated_at = await connection.scalar(
+                    text("SELECT 1 FROM pg_proc WHERE proname = 'set_updated_at'")
+                )
+                if updated_at is not None:
+                    await connection.execute(
+                        text(f"GRANT EXECUTE ON FUNCTION set_updated_at() TO {role}")
                     )
         finally:
             await engine.dispose()
