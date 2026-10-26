@@ -20,8 +20,8 @@ from app.db import (
     RedactedDsn,
     SessionDep,
     SessionStreamingDep,
+    _get_session,
     asyncpg_url_and_connect_args,
-    get_session,
     redact_database_url,
 )
 from app.exceptions import Validation
@@ -861,11 +861,11 @@ async def db_session(
                 yield session
 
             application = get_app()
-            application.dependency_overrides[get_session] = _override_session
+            application.dependency_overrides[_get_session] = _override_session
             try:
                 yield session
             finally:
-                application.dependency_overrides.pop(get_session, None)
+                application.dependency_overrides.pop(_get_session, None)
                 await session.close()
                 await transaction.rollback()
     finally:
@@ -881,7 +881,7 @@ async def session_client(
     db_session: AsyncSession,
     require_postgres: RedactedDsn,
 ) -> AsyncIterator[Any]:
-    """Cliente HTTP en el mismo loop, con get_session ligado a db_session."""
+    """Cliente HTTP en el mismo loop, con _get_session ligado a db_session."""
 
     from httpx2 import ASGITransport, AsyncClient
 
@@ -899,9 +899,9 @@ async def session_client(
     async def _override_session() -> AsyncIterator[AsyncSession]:
         yield db_session
 
-    application.dependency_overrides[get_session] = _override_session
+    application.dependency_overrides[_get_session] = _override_session
     transport = ASGITransport(app=application)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
-    application.dependency_overrides.pop(get_session, None)
+    application.dependency_overrides.pop(_get_session, None)
     get_settings.cache_clear()

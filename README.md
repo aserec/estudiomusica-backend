@@ -123,6 +123,8 @@ Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UU
 
 `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
+Las rutas inyectan la sesión con **`SessionDep`** (`Depends` + `scope="function"`). `get_session` ya no es pública: el scope por defecto de FastAPI 0.162 (`request`) hacía commit *después* de responder (201 con la fila aún no visible). Las ramas #93–#97 deben importar `SessionDep`. Un `StreamingResponse` que consulte la sesión usa **`SessionStreamingDep`** (scope `request`).
+
 ### Tests con base aislada
 
 Los tests de persistencia **no** usan los JSON de `.data/` del frontend. Usan `estudiomusica_test` y envuelven cada caso en una transacción que se revierte al terminar. `ALEMBIC_TEST_DATABASE_URL` se deriva de `TEST_DATABASE_URL` (`<stem>_alembic_test`, p. ej. `estudiomusica_alembic_test`) y solo se usa en upgrade/downgrade de Alembic. El nombre efectivo de ambas bases debe terminar en `_test`; se rechazan query params que puedan cambiar el destino (`database`, `dbname`, `service`, `options`). Si no, pytest aborta (el mensaje nunca incluye la contraseña).

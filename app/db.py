@@ -204,7 +204,7 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
-async def get_session() -> AsyncIterator[AsyncSession]:
+async def _get_session() -> AsyncIterator[AsyncSession]:
     """Sesión por petición: commit al salir del yield, rollback si falla.
 
     FastAPI 0.162 ejecuta el código posterior al ``yield`` *después* de
@@ -250,7 +250,7 @@ async def get_session() -> AsyncIterator[AsyncSession]:
             raise
 
 
-async def get_streaming_session() -> AsyncIterator[AsyncSession]:
+async def _get_streaming_session() -> AsyncIterator[AsyncSession]:
     """Sesión para ``StreamingResponse``: el commit espera al generador.
 
     ``SessionDep`` (scope=function) cierra la transacción antes de
@@ -269,9 +269,12 @@ async def get_streaming_session() -> AsyncIterator[AsyncSession]:
             raise
 
 
-SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
+# Las ramas #93–#97 deben importar SessionDep, no Depends(get_session):
+# get_session ya no es pública (el scope por defecto reproducía 201
+# con la fila aún no visible).
+SessionDep = Annotated[AsyncSession, Depends(_get_session, scope="function")]
 SessionStreamingDep = Annotated[
-    AsyncSession, Depends(get_streaming_session, scope="request")
+    AsyncSession, Depends(_get_streaming_session, scope="request")
 ]
 
 
