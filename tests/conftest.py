@@ -123,6 +123,12 @@ PROBE_FILE_BYTES = b"file-response-body\n" * 8
 _PROBE_FILE: Path | None = None
 
 
+def _is_test_database_name(name: str) -> bool:
+    """Igual que settings: no distinguir mayúsculas en el sufijo ``_test``."""
+
+    return name.casefold().endswith("_test")
+
+
 def require_test_database_url(url: str, *, env_name: str = "TEST_DATABASE_URL") -> str:
     """Exige una base ``*_test`` y rechaza query que pueda cambiar el destino."""
 
@@ -140,7 +146,7 @@ def require_test_database_url(url: str, *, env_name: str = "TEST_DATABASE_URL") 
             f"({', '.join(sorted(banned))}). Recibido: {redact_database_url(url)}"
         )
     name = parsed.database or ""
-    if not name.endswith("_test"):
+    if not _is_test_database_name(name):
         raise pytest.UsageError(
             f"{env_name} debe apuntar a una base cuyo nombre termina "
             "en '_test' para no tocar desarrollo. Recibido: "
@@ -152,7 +158,7 @@ def require_test_database_url(url: str, *, env_name: str = "TEST_DATABASE_URL") 
 def derive_alembic_database_url(test_url: str) -> str:
     parsed = make_url(test_url)
     name = parsed.database or ""
-    stem = name[: -len("_test")] if name.endswith("_test") else name
+    stem = name[: -len("_test")] if _is_test_database_name(name) else name
     return parsed.set(database=f"{stem}_alembic_test").render_as_string(
         hide_password=False
     )
@@ -740,7 +746,7 @@ async def _drop_named_production_test_role(
         )
     if admin is not None:
         for database in await _other_owned_databases(connection, name):
-            if database.endswith("_test"):
+            if _is_test_database_name(database):
                 await _drop_owned_in_database(admin, database, name)
                 continue
             raise RuntimeError(
@@ -1266,7 +1272,7 @@ def drop_database_if_exists(database_url: str | RedactedDsn) -> None:
     db_name = make_url(dsn.secret()).database
     if db_name is None:
         raise RuntimeError(f"DSN sin nombre de base. {dsn}") from None
-    if not db_name.endswith("_test"):
+    if not _is_test_database_name(db_name):
         raise RuntimeError(f"Solo se pueden borrar bases *_test. {dsn}") from None
 
     async def drop() -> None:

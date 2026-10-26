@@ -999,6 +999,15 @@ def test_production_role_teardown_drops_own_role(
     assert asyncio.run(_role_exists(require_postgres, name)) is None
 
 
+def test_is_test_database_name_ignores_case() -> None:
+    from tests.conftest import _is_test_database_name
+
+    assert _is_test_database_name("foo_test") is True
+    assert _is_test_database_name("foo_TEST") is True
+    assert _is_test_database_name("foo_Test") is True
+    assert _is_test_database_name("foo_prod") is False
+
+
 def test_production_test_role_name_is_unique() -> None:
     from tests.conftest import _production_test_role_name
 
