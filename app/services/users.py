@@ -79,7 +79,7 @@ def _search_term(raw: str) -> str:
     return unicodedata.normalize("NFC", raw.strip())
 
 
-def _nfc_text(column: ColumnElement[Any]) -> ColumnElement[Any]:
+def _nfc_text(column: Any) -> Any:
     return func.normalize(column, literal_column("NFC"))
 
 
@@ -480,7 +480,7 @@ async def search_users(
     items = [
         to_search_hit(
             user,
-            include_email=full_search or _email_term(user.email) == email_term,
+            include_email=full_search or user.email == email_term,
         )
         for user in rows
     ]

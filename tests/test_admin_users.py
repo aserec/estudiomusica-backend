@@ -1782,7 +1782,8 @@ async def test_search_idna_domain_matches_login_typed(
     typed = f"{marker}@{domain}"
     created = await _signup(session_client, email=typed, name=f"Idna {marker}")
     stored = created["response"].json()["user"]["email"]
-    assert stored == _email_term(typed)
+    expected = f"{marker}@file-r95.es" if domain == "ﬁle-r95.es" else f"{marker}@r95.es"
+    assert stored == expected
     assert stored != typed
     session_client.cookies.clear()
 
@@ -2124,7 +2125,7 @@ async def test_search_compatibility_local_part_matches_login(
     created = await _signup(session_client, email=typed, name=f"Nfc3 {marker}")
     stored = created["response"].json()["user"]["email"]
     assert stored == typed
-    assert stored == _email_term(typed)
+    assert stored == f"ﬁle-{marker}@example.com"
     session_client.cookies.clear()
 
     teacher = await _signup(session_client, email=unique_email("tea-nfc3"))
