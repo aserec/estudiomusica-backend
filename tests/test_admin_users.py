@@ -2132,9 +2132,6 @@ def test_email_term_fallback_applies_nfc_after_strip_lower() -> None:
     assert _email_term("  J\u030cX  ") == "\u01f0x"
     assert _email_term("J\u030cX") == "\u01f0x"
     assert _email_term("j\u030cx") == "\u01f0x"
-    ligature = "\ufb01"
-    assert unicodedata.normalize("NFC", ligature) == ligature
-    assert unicodedata.normalize("NFKC", ligature) == "fi"
 
 
 async def test_search_name_match_keeps_nfc_not_nfkc(
