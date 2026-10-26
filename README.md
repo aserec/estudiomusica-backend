@@ -67,7 +67,7 @@ La sonda de Postgres es `GET /api/v1/health/db` (también hay alias en `GET /hea
 curl -i http://127.0.0.1:8000/api/v1/health/db
 ```
 
-Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde o la sonda supera `DB_HEALTH_TIMEOUT` (2 s por defecto), HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, code, fields}` de las rutas de negocio. `GET /health/db` en la raíz es el alias de sonda; no aparece en OpenAPI.
+Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde o la sonda supera `DB_HEALTH_TIMEOUT` (2 s por defecto), HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, code, fields}` de las rutas de negocio. El tiempo total de la petición no supera `DB_HEALTH_TIMEOUT` más 0,4 s (`HEALTH_TIMEOUT_MARGIN_SECONDS`): un close/reset congelado se abandona (terminate + invalidate) sin bloquear la respuesta. En el caso sano la conexión vuelve al pool. `GET /health/db` en la raíz es el alias de sonda; no aparece en OpenAPI.
 
 Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
@@ -85,7 +85,7 @@ postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
 docker compose up -d
 ```
 
-Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings rechaza la contraseña por defecto, el usuario por defecto (`estudiomusica`, p. ej. `estudiomusica:otra@…`) y las bases `*_test`. Los overrides de query (`password`, `user`, `database`, `dbname`) se aplican antes de validar. Los errores de validación no muestran el DSN (`hide_input_in_errors`). Espera a que el healthcheck esté sano:
+Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings exige usuario, contraseña y base **explícitos** en el DSN (no se heredan de `PGUSER` / `PGPASSWORD` / `PGDATABASE`; asyncpg usaría el usuario como nombre de base) y rechaza la contraseña por defecto, el usuario por defecto (`estudiomusica`, p. ej. `estudiomusica:otra@…`) y las bases `*_test` (sin distinguir mayúsculas, p. ej. `x_TEST`). Los overrides de query (`password`, `user`, `database`, `dbname`) se aplican antes de validar. En development un DSN sin credenciales sí puede heredar `PGUSER`/`PGPASSWORD`. Los errores de validación no muestran el DSN (`hide_input_in_errors`; tampoco en `.errors()` / `.json()`). Espera a que el healthcheck esté sano:
 
 ```bash
 docker compose ps
@@ -103,11 +103,15 @@ Para revertirlas del todo:
 uv run alembic downgrade base
 ```
 
-Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations`). Van en el wheel con el paquete `app`. La fuente de verdad es `app/alembic.ini` (el de la raíz es un enlace para que `uv run alembic` siga funcionando en el repo). Desde el paquete instalado:
+Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations`). Van en el wheel con el paquete `app`. La fuente de verdad es `app/alembic.ini`. El `alembic.ini` de la raíz es un fichero regular (no un symlink) que delega en el paquete para que `uv run alembic` funcione en el repo y el sdist no lleve enlaces.
+
+Desde el paquete instalado, en un directorio **sin** un `app/` local (`python -c` y `python -m alembic` importan el `app/` del CWD):
 
 ```bash
 python -c "from alembic import command; from app.migrations.config import make_alembic_config; command.upgrade(make_alembic_config(), 'head')"
 ```
+
+En el repo, o con el wheel, también vale `alembic -c app/alembic.ini upgrade head` (o `-c` apuntando al `alembic.ini` de `site-packages/app`).
 
 `0001` solo crea la función `set_updated_at()` (`clock_timestamp()`), no el trigger. No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. El trigger de cada tabla `PersistentModel` lo montan las revisiones que la crean (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. Nueva revisión, cuando exista un modelo:
 
@@ -245,11 +249,11 @@ app/
   services/          # Lógica de aplicación (salud + lista fija de examples)
   models/            # Base SQLAlchemy y mixin PersistentModel
   migrations/        # Alembic (env.py async + versions/ + config programático)
-  alembic.ini        # Fuente de verdad (el de la raíz es un enlace)
+  alembic.ini        # Fuente de verdad empaquetada
 docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
 tests/               # Tests de pytest (convenciones + BD aislada)
 docker-compose.yml   # Postgres 17 en 127.0.0.1:5432 (sin container_name fijo)
-alembic.ini          # Enlace a app/alembic.ini para `uv run alembic`
+alembic.ini          # CLI del repo (delegado; no es un symlink)
 .env.example         # Plantilla de variables de entorno
 pyproject.toml       # Dependencias, ruff, pytest y mypy
 uv.lock              # Lockfile reproducible de uv
