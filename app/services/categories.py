@@ -118,20 +118,15 @@ async def _run_category_write[T](
     session: AsyncSession,
     operation: Callable[[AsyncSession], Awaitable[T]],
 ) -> T:
-    """Ejecuta el CRUD en una sesión que el reintento pueda hacer rollback.
+    """Reintenta solo si la sesión no tiene transacción abierta.
 
-    Si la sesión de la petición ya tiene transacción (el User de auth),
-    abre una sesión/transacción nueva y no toca la de la petición.
+    Si ya hay transacción (trabajo previo o el User de auth), ejecuta la
+    unidad en esa sesión sin rollback: el reintento HTTP usa una sesión
+    nueva en el router, no esta.
     """
 
     if session.in_transaction():
-        from app.db import get_session_factory
-
-        factory = get_session_factory()
-        async with factory() as write:
-            result = await _run_with_transient_retry(write, lambda: operation(write))
-            await write.commit()
-            return result
+        return await operation(session)
     return await _run_with_transient_retry(session, lambda: operation(session))
 
 

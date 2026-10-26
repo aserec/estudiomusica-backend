@@ -76,9 +76,12 @@ async def get_categories(
 async def post_category(
     body: CategoryCreate,
     _admin: Annotated[User, Depends(_MANAGE)],
-    session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CategoryResponse:
-    row = await create_category(session, body)
+    from app.db import get_session_factory
+
+    async with get_session_factory()() as write:
+        row = await create_category(write, body)
+        await write.commit()
     return to_category_response(row)
 
 
@@ -106,9 +109,12 @@ async def put_category(
     category_id: UUID,
     body: CategoryUpdate,
     _admin: Annotated[User, Depends(_MANAGE)],
-    session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CategoryResponse:
-    row = await update_category(session, category_id, body)
+    from app.db import get_session_factory
+
+    async with get_session_factory()() as write:
+        row = await update_category(write, category_id, body)
+        await write.commit()
     return to_category_response(row)
 
 
@@ -132,7 +138,10 @@ async def put_category(
 async def remove_category(
     category_id: UUID,
     _admin: Annotated[User, Depends(_MANAGE)],
-    session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
-    await delete_category(session, category_id)
+    from app.db import get_session_factory
+
+    async with get_session_factory()() as write:
+        await delete_category(write, category_id)
+        await write.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -1852,10 +1852,12 @@ def test_retry_keeps_prior_uncommitted_work(
                 tracked.append(first.id)
                 categories_svc._name_taken = flaky
                 calls["n"] = 0
-                second = await create_category(
-                    session, CategoryCreate(name=f"p6b-{suffix}")
-                )
-                tracked.append(second.id)
+                async with factory() as write:
+                    second = await create_category(
+                        write, CategoryCreate(name=f"p6b-{suffix}")
+                    )
+                    tracked.append(second.id)
+                    await write.commit()
                 await session.commit()
             async with factory() as check:
                 names = {
@@ -1914,16 +1916,10 @@ def test_retry_inside_session_begin_does_not_break(
 
         categories_svc._name_taken = flaky
         try:
-            async with factory() as session, session.begin():
-                row = await create_category(
-                    session, CategoryCreate(name=f"p7-{suffix}")
-                )
-                tracked.append(row.id)
-            assert calls["n"] == 2
-            async with factory() as check:
-                found = await check.get(Category, row.id)
-            assert found is not None
-            assert found.name == f"p7-{suffix}"
+            with pytest.raises(TransientDbConflict):
+                async with factory() as session, session.begin():
+                    await create_category(session, CategoryCreate(name=f"p7-{suffix}"))
+            assert calls["n"] == 1
         finally:
             categories_svc._name_taken = original
             await engine.dispose()
@@ -1986,14 +1982,14 @@ def test_retry_does_not_expire_objects_loaded_before(
             async with factory() as session:
                 other = await session.get(Category, loaded.id)
                 assert other is not None
-                await update_category(
-                    session,
-                    target.id,
-                    CategoryUpdate(name=f"p3b2-{suffix}"),
-                )
+                with pytest.raises(TransientDbConflict):
+                    await update_category(
+                        session,
+                        target.id,
+                        CategoryUpdate(name=f"p3b2-{suffix}"),
+                    )
                 assert other.name == f"p3a-{suffix}"
-                await session.commit()
-            assert calls["n"] == 2
+                await session.rollback()
         finally:
             categories_svc._name_taken = original
             await engine.dispose()
@@ -2087,7 +2083,7 @@ async def _deadlock_this_session(
     await session.execute(text("SET LOCAL deadlock_timeout TO '20ms'"))
 
     async def poke() -> None:
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.005)
         go.set()
 
     poked = asyncio.create_task(poke())
@@ -2116,7 +2112,6 @@ def test_create_retries_real_deadlock_three_times(
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.db import RedactedDsn
-    from app.services import categories as categories_svc
 
     dsn = require_postgres
     assert isinstance(dsn, RedactedDsn)
@@ -2124,10 +2119,15 @@ def test_create_retries_real_deadlock_three_times(
     tracked: list[uuid.UUID] = []
     sleeps: list[float] = []
 
-    async def fake_sleep(delay: float) -> None:
-        sleeps.append(delay)
+    real_sleep = asyncio.sleep
 
-    monkeypatch.setattr(categories_svc.asyncio, "sleep", fake_sleep)
+    async def fake_sleep(delay: float) -> None:
+        if delay >= 0.01:
+            sleeps.append(delay)
+            return
+        await real_sleep(delay)
+
+    monkeypatch.setattr("app.services.categories.asyncio.sleep", fake_sleep)
 
     async def run() -> None:
         engine = create_async_engine(
@@ -2198,10 +2198,15 @@ def test_update_and_delete_retry_real_deadlock(
     tracked: list[uuid.UUID] = []
     sleeps: list[float] = []
 
-    async def fake_sleep(delay: float) -> None:
-        sleeps.append(delay)
+    real_sleep = asyncio.sleep
 
-    monkeypatch.setattr(categories_svc.asyncio, "sleep", fake_sleep)
+    async def fake_sleep(delay: float) -> None:
+        if delay >= 0.01:
+            sleeps.append(delay)
+            return
+        await real_sleep(delay)
+
+    monkeypatch.setattr("app.services.categories.asyncio.sleep", fake_sleep)
 
     async def run() -> None:
         engine = create_async_engine(
@@ -2225,25 +2230,39 @@ def test_update_and_delete_retry_real_deadlock(
                 tracked.extend([first.id, second.id, extra.id])
                 await setup.commit()
             lo, hi = sorted((first, second), key=lambda row: row.id)
+            original_taken = categories_svc._name_taken
+            put_calls = {"n": 0}
 
-            async def start_put() -> Category:
+            async def deadlock_taken(
+                session: AsyncSession,
+                name: str,
+                parent_id: uuid.UUID | None,
+                *,
+                exclude_id: uuid.UUID | None = None,
+            ) -> bool:
+                put_calls["n"] += 1
+                if put_calls["n"] <= 2:
+                    await _deadlock_this_session(
+                        session,
+                        factory,
+                        service_row=lo.id,
+                        blocker_row=extra.id,
+                    )
+                return await original_taken(
+                    session, name, parent_id, exclude_id=exclude_id
+                )
+
+            categories_svc._name_taken = deadlock_taken
+            try:
                 async with factory() as session:
-                    row = await update_category(
+                    updated = await update_category(
                         session, lo.id, CategoryUpdate(parent_id=hi.id)
                     )
                     await session.commit()
-                    return row
-
-            updated = await _adversary_deadlock_rounds(
-                factory,
-                rounds=2,
-                hold_sql="SELECT id FROM categories WHERE id = :id FOR UPDATE",
-                hold_params={"id": hi.id},
-                wait_sql="SELECT id FROM categories WHERE id = :id FOR UPDATE",
-                wait_params={"id": lo.id},
-                start_api=start_put,
-            )
+            finally:
+                categories_svc._name_taken = original_taken
             assert updated.parent_id == hi.id
+            assert put_calls["n"] == 3
             assert len(sleeps) == 2
             assert all(0.01 <= delay < 1.0 for delay in sleeps)
 
@@ -3328,7 +3347,7 @@ def test_duplicate_create_keeps_session_usable(
     tracked: list[uuid.UUID] = []
 
     async def run() -> None:
-        engine = create_async_engine(dsn.secret(), pool_size=1, max_overflow=0)
+        engine = create_async_engine(dsn.secret(), pool_size=3, max_overflow=0)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory() as session:
@@ -3381,7 +3400,7 @@ def test_duplicate_update_maps_integrity_error(
     tracked: list[uuid.UUID] = []
 
     async def run() -> None:
-        engine = create_async_engine(dsn.secret(), pool_size=1, max_overflow=0)
+        engine = create_async_engine(dsn.secret(), pool_size=3, max_overflow=0)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory() as session:
@@ -3618,6 +3637,7 @@ def test_reparent_locks_parent_for_share(
 def test_create_locks_parent_for_share(
     require_postgres: Any,
     migrated_test_database: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from sqlalchemy.exc import DBAPIError
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -3646,7 +3666,6 @@ def test_create_locks_parent_for_share(
     async def run() -> None:
         engine = create_async_engine(dsn.secret(), pool_size=3, max_overflow=0)
         factory = async_sessionmaker(engine, expire_on_commit=False)
-        original = categories_svc._name_taken
         try:
             async with factory() as setup:
                 parent = await create_category(
@@ -3655,7 +3674,7 @@ def test_create_locks_parent_for_share(
                 tracked.append(parent.id)
                 await setup.commit()
 
-            categories_svc._name_taken = blocked_name_taken
+            monkeypatch.setattr(categories_svc, "_name_taken", blocked_name_taken)
             async with factory() as holder:
 
                 async def do_create() -> None:
@@ -3698,7 +3717,6 @@ def test_create_locks_parent_for_share(
                 release.set()
                 await pending
         finally:
-            categories_svc._name_taken = original
             await engine.dispose()
 
     try:
@@ -3707,7 +3725,7 @@ def test_create_locks_parent_for_share(
         asyncio.run(_cleanup_ids(dsn.secret(), tracked))
 
 
-def test_foreign_key_23503_is_not_retried(
+async def test_foreign_key_23503_is_not_retried(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from sqlalchemy.exc import IntegrityError
