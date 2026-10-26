@@ -155,7 +155,7 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     query_schema = query_param.get("schema", query_param)
     query_options = query_schema.get("anyOf") or [query_schema]
     assert any(
-        isinstance(option, dict) and option.get("maxLength") == 200
+        isinstance(option, dict) and option.get("maxLength") == 2000
         for option in query_options
     )
     assert "200" in users_get["responses"]
@@ -179,7 +179,7 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     q_schema = q_param.get("schema", q_param)
     q_options = q_schema.get("anyOf") or [q_schema]
     assert any(
-        isinstance(option, dict) and option.get("maxLength") == 200
+        isinstance(option, dict) and option.get("maxLength") == 2000
         for option in q_options
     )
     q_description = (q_param.get("description") or "").lower()

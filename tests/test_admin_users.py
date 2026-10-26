@@ -1662,6 +1662,35 @@ async def test_identity_put_name_length_is_checked_after_nfc(
     assert stored.last_name == "é" * 41
 
 
+async def test_search_query_length_is_checked_after_nfc(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _signup_role(
+        session_client, db_session, SystemRole.ADMIN, prefix="q-nfc-admin"
+    )
+    qa = "\u0958"
+    nfd_e = "e\u0301"
+    assert len(unicodedata.normalize("NFC", qa * 100)) == 200
+    assert len(unicodedata.normalize("NFC", qa * 101)) == 202
+    assert len(unicodedata.normalize("NFC", nfd_e * 101)) == 101
+
+    for path, param in (
+        ("/api/v1/admin/users", "query"),
+        ("/api/v1/users/search", "q"),
+    ):
+        fitted = await session_client.get(path, params={param: qa * 100})
+        assert fitted.status_code == 200, fitted.text
+        over = await session_client.get(path, params={param: qa * 101})
+        assert over.status_code == 400, over.text
+        assert over.json()["error"] == "validation"
+        assert param in over.json()["fields"]
+        nfd_ok = await session_client.get(path, params={param: nfd_e * 101})
+        ascii_ok = await session_client.get(path, params={param: "a" * 101})
+        assert nfd_ok.status_code == 200, nfd_ok.text
+        assert ascii_ok.status_code == 200, ascii_ok.text
+        assert nfd_ok.status_code == ascii_ok.status_code
+
+
 async def test_nul_bytes_in_user_text_fields_are_validation(
     session_client: Any, db_session: AsyncSession
 ) -> None:

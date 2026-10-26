@@ -35,6 +35,10 @@ from app.services.auth import to_public_user
 from app.services.roles import assign_system_role
 
 _SEARCH_Q_MAX = 200
+# Tope crudo generoso: Query(max_length=200) miraba el texto crudo y
+# rechazaba 101×``é`` (cabe) o aceptaba 101×U+0958 (202 NFC). El de 200
+# se aplica tras NFC; 2000 evita procesar entradas enormes.
+_SEARCH_Q_RAW_MAX = 2000
 _TEACHER_Q_MIN_EFFECTIVE = 3
 _TEACHER_SEARCH_CAP = 10
 _LIKE_WILDCARDS = frozenset("%_")

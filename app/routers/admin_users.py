@@ -20,6 +20,7 @@ from app.schemas.users import (
     reject_nul,
 )
 from app.services.users import (
+    _SEARCH_Q_RAW_MAX,
     list_admin_users,
     set_user_admin,
     set_user_suspended,
@@ -50,7 +51,8 @@ _ADMIN = require_site_permission(Permission.SITE_MANAGE_ADMINS)
         "(incluidos suspendidos) con ``page``/``pageSize``. "
         "``query`` filtra por nombre o email. ``status``: all, active, "
         "suspended, deleted. Sin status se omiten los borrados. "
-        "``query`` admite como máximo 200 caracteres. "
+        "``query`` admite como máximo 200 caracteres tras NFC "
+        "(tope crudo 2000). "
         "No se usa limit/cursor (pendiente de decisión)."
     ),
     responses={
@@ -66,8 +68,11 @@ async def get_admin_users(
     query: Annotated[
         str | None,
         Query(
-            max_length=200,
-            description="Texto libre sobre nombre o email. Máximo 200 caracteres.",
+            max_length=_SEARCH_Q_RAW_MAX,
+            description=(
+                "Texto libre sobre nombre o email. Máximo 200 caracteres "
+                "tras NFC (tope crudo 2000 para no rechazar NFD que cabe)."
+            ),
             examples=["ada"],
         ),
         AfterValidator(reject_nul),
