@@ -798,6 +798,13 @@ def test_z_sin_bound_tras_tono() -> None:
     assert "\u200d" not in category_name_key(raw)
 
 
+def test_vs16_between_zwj_and_text_presentation_shares_key() -> None:
+    joined = "😀\u200d\ufe0f©"
+    plain = "😀\ufe0f©"
+    assert category_name_key(joined) == category_name_key(plain)
+    assert "\u200d" not in category_name_key(joined)
+
+
 def test_z_vs16_derecha_cualquier_T() -> None:
     vs15 = "😀\u200d©\ufe0e"
     assert category_name_key(vs15) == "😀©\ufe0e"

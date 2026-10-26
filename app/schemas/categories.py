@@ -123,7 +123,8 @@ def _keep_zwj(value: str, index: int) -> bool:
     if index > 0 and unicodedata.combining(value[index - 1]) == _VIRAMA_CCC:
         return True
     left, left_vs = _skip_transparent(value, index, -1)
-    right, right_vs = _skip_transparent(value, index, 1)
+    right, _ = _skip_transparent(value, index, 1)
+    right_vs = False
     if not (0 <= left < len(value) and 0 <= right < len(value)):
         return False
     # UTS #51: el tono (1F3FB..1F3FF) solo cuenta tras Emoji_Modifier_Base;
