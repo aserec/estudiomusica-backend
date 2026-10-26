@@ -116,5 +116,5 @@ async def me(
     return AuthMeResponse(
         user=to_public_user(user),
         system_role=user.system_role,
-        is_admin=user.is_admin,
+        is_admin=user.is_site_admin,
     )

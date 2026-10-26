@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from alembic import command
@@ -14,6 +15,7 @@ from alembic.config import Config
 from alembic.operations import ops
 from alembic.script import ScriptDirectory
 from sqlalchemy import String, Table, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -56,7 +58,13 @@ def _wipe_alembic_schema(dsn: RedactedDsn) -> None:
                 await connection.execute(
                     text("DROP TABLE IF EXISTS auth_sessions CASCADE")
                 )
+                await connection.execute(
+                    text("DROP TABLE IF EXISTS course_memberships CASCADE")
+                )
                 await connection.execute(text("DROP TABLE IF EXISTS users CASCADE"))
+                await connection.execute(
+                    text("DROP TABLE IF EXISTS system_roles CASCADE")
+                )
                 await connection.execute(text("DROP TABLE IF EXISTS dep_trig CASCADE"))
                 await connection.execute(
                     text("DROP TABLE IF EXISTS migrated_trigger_probes CASCADE")
@@ -85,9 +93,12 @@ def test_alembic_upgrade_head_and_downgrade_base(
     _wipe_alembic_schema(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = alembic_config(dsn)
+    script = ScriptDirectory.from_config(config)
+    head = script.get_current_head()
+    assert head is not None
+    parent = script.get_revision(head).down_revision
 
     command.upgrade(config, "head")
-    head = ScriptDirectory.from_config(config).get_current_head()
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
     assert (
         _scalar(dsn, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
@@ -96,11 +107,37 @@ def test_alembic_upgrade_head_and_downgrade_base(
     assert _scalar(dsn, "SELECT gen_random_uuid() IS NOT NULL") is True
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.auth_sessions')") == "auth_sessions"
+    assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+    assert (
+        _scalar(dsn, "SELECT to_regclass('public.course_memberships')")
+        == "course_memberships"
+    )
     assert (
         _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
         == "citext"
     )
-    for table in ("users", "auth_sessions"):
+    assert (
+        _scalar(
+            dsn,
+            "SELECT count(*) FROM system_roles "
+            "WHERE id IN ('alumno','profesor','profesor_adjunto','admin')",
+        )
+        == 4
+    )
+    assert (
+        _scalar(
+            dsn,
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'users' AND column_name = 'system_role_id'",
+        )
+        == 1
+    )
+    for table in (
+        "users",
+        "auth_sessions",
+        "system_roles",
+        "course_memberships",
+    ):
         name = updated_at_trigger_name(table)
         assert (
             _scalar(
@@ -110,11 +147,32 @@ def test_alembic_upgrade_head_and_downgrade_base(
             )
             == name
         )
+    _assert_is_admin_check_rejects_incoherent_and_null(dsn)
+
+    command.downgrade(config, "-1")
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == parent
+    assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
+    assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") is None
+    assert _scalar(dsn, "SELECT to_regclass('public.course_memberships')") is None
+    assert (
+        _scalar(
+            dsn,
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'users' AND column_name = 'system_role_id'",
+        )
+        is None
+    )
+
+    command.upgrade(config, "head")
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
+    assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+    _assert_is_admin_check_rejects_incoherent_and_null(dsn)
 
     command.downgrade(config, "0001_initial")
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0001_initial"
     assert _scalar(dsn, "SELECT to_regclass('public.users')") is None
     assert _scalar(dsn, "SELECT to_regclass('public.auth_sessions')") is None
+    assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") is None
     assert (
         _scalar(dsn, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
         == "set_updated_at"
@@ -132,9 +190,137 @@ def test_alembic_upgrade_head_and_downgrade_base(
     )
 
     command.upgrade(config, "head")
-    head = ScriptDirectory.from_config(config).get_current_head()
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
+    assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+
+
+def _assert_is_admin_check_rejects_incoherent_and_null(dsn: RedactedDsn) -> None:
+    """El CHECK existe en la BD migrada y no admite is_admin incoherente ni NULL."""
+
+    assert (
+        _scalar(
+            dsn,
+            "SELECT conname FROM pg_constraint "
+            "WHERE conname = 'ck_users_is_admin_matches_system_role'",
+        )
+        == "ck_users_is_admin_matches_system_role"
+    )
+    definition = str(
+        _scalar(
+            dsn,
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'ck_users_is_admin_matches_system_role'",
+        )
+    )
+    assert "IS NOT NULL" in definition
+
+    async def probe() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.connect() as connection:
+                transaction = await connection.begin()
+                try:
+                    inserted = await connection.execute(
+                        text(
+                            "INSERT INTO users "
+                            "(first_name, last_name, email, password_hash) "
+                            "VALUES ('Chk', 'User', 'check-probe@example.com', 'x') "
+                            "RETURNING id"
+                        )
+                    )
+                    user_id = inserted.scalar_one()
+                    with pytest.raises(IntegrityError):
+                        async with connection.begin_nested():
+                            await connection.execute(
+                                text("UPDATE users SET is_admin = true WHERE id = :id"),
+                                {"id": user_id},
+                            )
+                    await connection.execute(
+                        text("ALTER TABLE users ALTER COLUMN is_admin DROP NOT NULL")
+                    )
+                    with pytest.raises(IntegrityError):
+                        async with connection.begin_nested():
+                            await connection.execute(
+                                text("UPDATE users SET is_admin = NULL WHERE id = :id"),
+                                {"id": user_id},
+                            )
+                finally:
+                    await transaction.rollback()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(probe())
+
+
+def _execute(
+    dsn: RedactedDsn, sql: str, params: dict[str, object] | None = None
+) -> None:
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text(sql), params or {})
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def _rows(dsn: RedactedDsn, sql: str) -> list[Any]:
+    async def run() -> list[Any]:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.connect() as connection:
+                result = await connection.execute(text(sql))
+                return list(result.all())
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def test_0003_backfills_system_role_from_is_admin(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    """Crea un admin y un no-admin en 0002 y comprueba el backfill de 0003."""
+
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = alembic_config(dsn)
+
+    command.upgrade(config, "0002_auth_users")
+    _execute(
+        dsn,
+        "INSERT INTO users (first_name, last_name, email, password_hash, is_admin) "
+        "VALUES "
+        "('Ada', 'Admin', 'backfill-admin@example.com', 'x', true), "
+        "('Luis', 'Alumno', 'backfill-alumno@example.com', 'x', false)",
+    )
+    assert (
+        _scalar(
+            dsn,
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'users' AND column_name = 'system_role_id'",
+        )
+        is None
+    )
+
+    command.upgrade(config, "0003_system_roles")
+    by_email = {
+        row.email: (row.is_admin, row.system_role_id)
+        for row in _rows(
+            dsn,
+            "SELECT email, is_admin, system_role_id FROM users "
+            "WHERE email IN ('backfill-admin@example.com', "
+            "'backfill-alumno@example.com')",
+        )
+    }
+    assert by_email["backfill-admin@example.com"] == (True, "admin")
+    assert by_email["backfill-alumno@example.com"] == (False, "alumno")
 
 
 def test_0002_downgrade_keeps_preinstalled_citext(
@@ -178,7 +364,15 @@ def test_alembic_revision_chain_is_linear() -> None:
     bases = script.get_bases()
     assert len(heads) == 1
     assert len(bases) == 1
-    assert script.get_revision(heads[0]).down_revision == bases[0]
+    current: str | list[str] | tuple[str, ...] | None = heads[0]
+    seen: list[str] = []
+    while current is not None:
+        if isinstance(current, list | tuple):
+            raise AssertionError(f"revisión ramificada: {current}")
+        assert current not in seen
+        seen.append(current)
+        current = script.get_revision(current).down_revision
+    assert seen[-1] == bases[0]
     assert script.get_revision(bases[0]).down_revision is None
 
 
@@ -237,12 +431,15 @@ def test_env_wires_autogen_hook_offline_and_online() -> None:
     assert "process_revision_directives" in online
     assert "include_schemas" in offline
     assert "include_schemas" in online
+    assert "include_name" in offline
+    assert "include_name" in online
 
 
-_PROBE_REVISION = '''"""Probe PersistentModel created via Alembic, not create_all.
+def _probe_revision(parent: str) -> str:
+    return f'''"""Probe PersistentModel created via Alembic, not create_all.
 
-Revision ID: 0003_migrated_trigger
-Revises: 0002_auth_users
+Revision ID: 0004_migrated_trigger
+Revises: {parent}
 Create Date: 2026-10-25
 """
 
@@ -253,8 +450,8 @@ from alembic import op
 
 from app.migrations.ops import op_create_updated_at_trigger, op_drop_updated_at_trigger
 
-revision: str = "0003_migrated_trigger"
-down_revision: str | None = "0002_auth_users"
+revision: str = "0004_migrated_trigger"
+down_revision: str | None = {parent!r}
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -306,7 +503,13 @@ def test_migrated_database_has_updated_at_trigger_without_create_all(
 ) -> None:
     dest = tmp_path / "migrations"
     shutil.copytree(ROOT / "app" / "migrations", dest)
-    (dest / "versions" / "0003_migrated_trigger_probe.py").write_text(_PROBE_REVISION)
+    parent = ScriptDirectory.from_config(
+        _alembic_config_for(dest, require_postgres)
+    ).get_current_head()
+    assert parent is not None
+    (dest / "versions" / "0004_migrated_trigger_probe.py").write_text(
+        _probe_revision(parent)
+    )
 
     dsn = RedactedDsn(resolve_alembic_database_url())
     ensure_database_exists(dsn)

@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
@@ -24,6 +26,18 @@ def test_importing_main_does_not_read_settings_when_app_env_is_prod(
     finally:
         get_settings.cache_clear()
         get_app.cache_clear()
+
+
+def test_create_app_imports_as_entrypoint() -> None:
+    """``fastapi run`` carga ``app.main`` primero; no debe haber import circular."""
+
+    result = subprocess.run(
+        [sys.executable, "-c", "from app.main import create_app; create_app()"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_package_version_fallback(monkeypatch: pytest.MonkeyPatch) -> None:

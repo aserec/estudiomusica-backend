@@ -7,12 +7,12 @@ import socket
 from collections.abc import AsyncIterator, Iterator
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -27,6 +27,9 @@ from app.db import (
     redact_database_url,
 )
 from app.exceptions import Validation
+from app.models import User
+from app.permissions.deps import require_course_permission, require_site_permission
+from app.permissions.types import Permission
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEST_DATABASE_URL = (
@@ -80,6 +83,7 @@ _SETTINGS_ENV = {
     "AUTH_ARGON2_TIME_COST": "1",
     "AUTH_ARGON2_MEMORY_COST": "8192",
     "AUTH_ARGON2_PARALLELISM": "1",
+    "ASSISTANT_MEDIA_AND_SM3_VISIBLE": "false",
 }
 
 PROBE_FILE_BYTES = b"file-response-body\n" * 8
@@ -286,6 +290,24 @@ def _mount_probes(application: FastAPI) -> None:
         await session.execute(text("SELECT 1"))
         return {"session": "ok"}
 
+    @application.get("/api/v1/_test/site-manage-admins")
+    async def site_manage_admins_probe(
+        _user: Annotated[
+            User,
+            Depends(require_site_permission(Permission.SITE_MANAGE_ADMINS)),
+        ],
+    ) -> dict[str, bool]:
+        return {"ok": True}
+
+    @application.get("/api/v1/_test/courses/{course_id}/teach")
+    async def course_teach_probe(
+        _user: Annotated[
+            User,
+            Depends(require_course_permission(Permission.COURSE_TEACH)),
+        ],
+    ) -> dict[str, bool]:
+        return {"ok": True}
+
     @application.post("/api/v1/_test/session/{label}", status_code=201)
     async def session_create(label: str, session: SessionDep) -> dict[str, str]:
         await session.execute(
@@ -442,6 +464,17 @@ async def _cleanup_production_test_rows(admin: RedactedDsn) -> None:
             users = await connection.scalar(text("SELECT to_regclass('public.users')"))
             if users is None:
                 return
+            memberships = await connection.scalar(
+                text("SELECT to_regclass('public.course_memberships')")
+            )
+            if memberships is not None:
+                await connection.execute(
+                    text(
+                        "DELETE FROM course_memberships WHERE user_id IN "
+                        "(SELECT id FROM users WHERE email LIKE :prefix)"
+                    ),
+                    {"prefix": f"{_PRODUCTION_TEST_EMAIL_PREFIX}%"},
+                )
             await connection.execute(
                 text(
                     "DELETE FROM auth_sessions WHERE user_id IN "
@@ -453,6 +486,17 @@ async def _cleanup_production_test_rows(admin: RedactedDsn) -> None:
                 text("DELETE FROM users WHERE email LIKE :prefix"),
                 {"prefix": f"{_PRODUCTION_TEST_EMAIL_PREFIX}%"},
             )
+            roles = await connection.scalar(
+                text("SELECT to_regclass('public.system_roles')")
+            )
+            if roles is not None:
+                await connection.execute(
+                    text(
+                        "UPDATE system_roles SET active = true "
+                        "WHERE id IN "
+                        "('alumno', 'profesor', 'profesor_adjunto', 'admin')"
+                    )
+                )
     finally:
         await engine.dispose()
 
@@ -1036,14 +1080,18 @@ def _drop_leftover_test_databases(dsn: RedactedDsn) -> None:
         )
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def production_test_database_url(
     require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> Iterator[RedactedDsn]:
     """DSN de la base ``*_test`` con rol de production (sin password por defecto).
 
-    El rol se borra al terminar la sesión, también si la suite falla.
+    Scope de función: ``test_leftovers`` lanza un pytest hijo que ejecuta
+    ``migrated_test_database`` y hace ``DROP ROLE em_prod_tests``. Si el
+    rol viviera toda la sesión, los tests de production posteriores
+    fallarían con ``InvalidPasswordError`` (Postgres no distingue
+    «rol ausente» de «password mala»). Se crea y se borra en cada test.
     """
 
     try:

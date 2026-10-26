@@ -1,0 +1,839 @@
+import asyncio
+import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from typing import Any
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.config import get_settings
+from app.db import RedactedDsn
+from app.exceptions import AccessDenied, RoleNotAssignable
+from app.models import CourseMembership, SystemRoleRow, User
+from app.models.user import SystemRole
+from app.permissions.types import CourseRole
+from app.schemas.roles import SystemRoleUpdate
+from app.services.roles import (
+    assert_role_assignable,
+    assign_system_role,
+    update_system_role,
+)
+from tests.test_auth import PASSWORD, signup_body, unique_email
+
+pytestmark = pytest.mark.db
+
+_COURSE_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
+_COURSE_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
+_LEAK_MARKERS = ("password12", "argon2", "test-auth-secret", "Bearer ")
+
+SYSTEM_ROLES = (
+    SystemRole.ALUMNO,
+    SystemRole.PROFESOR,
+    SystemRole.PROFESOR_ADJUNTO,
+    SystemRole.ADMIN,
+)
+
+ADMIN_ENDPOINTS: tuple[tuple[str, str, dict[str, object] | None], ...] = (
+    ("GET", "/api/v1/admin/system-roles", None),
+    ("PATCH", "/api/v1/admin/system-roles/alumno", {"name": "Alumno"}),
+    ("DELETE", "/api/v1/admin/system-roles/alumno", None),
+)
+
+
+def _assert_no_secrets(response: Any) -> None:
+    for marker in _LEAK_MARKERS:
+        assert marker not in response.text
+
+
+async def _signup(
+    session_client: Any, *, email: str | None = None, name: str = "Ada Lovelace"
+) -> dict[str, Any]:
+    chosen = email or unique_email("role")
+    response = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(name=name, email=chosen),
+    )
+    assert response.status_code == 201
+    user_id = uuid.UUID(response.json()["user"]["id"])
+    return {
+        "email": chosen,
+        "id": user_id,
+        "token": response.cookies["session"],
+        "response": response,
+    }
+
+
+async def _set_role(
+    db_session: AsyncSession, user_id: uuid.UUID, role: SystemRole
+) -> User:
+    user = await db_session.get(User, user_id)
+    assert user is not None
+    user.system_role_id = role
+    user.is_admin = role == SystemRole.ADMIN
+    await db_session.flush()
+    return user
+
+
+async def _enroll(
+    db_session: AsyncSession,
+    user_id: uuid.UUID,
+    course_id: uuid.UUID,
+    course_role: CourseRole,
+) -> None:
+    db_session.add(
+        CourseMembership(
+            user_id=user_id,
+            course_id=course_id,
+            course_role=course_role,
+        )
+    )
+    await db_session.flush()
+
+
+async def _request(
+    session_client: Any,
+    method: str,
+    path: str,
+    json_body: dict[str, object] | None = None,
+) -> Any:
+    return await session_client.request(method, path, json=json_body)
+
+
+@pytest.mark.parametrize("role", SYSTEM_ROLES)
+@pytest.mark.parametrize("method,path,body", ADMIN_ENDPOINTS)
+async def test_admin_endpoints_role_matrix(
+    session_client: Any,
+    db_session: AsyncSession,
+    role: SystemRole,
+    method: str,
+    path: str,
+    body: dict[str, object] | None,
+) -> None:
+    created = await _signup(session_client, email=unique_email(role.value))
+    await _set_role(db_session, created["id"], role)
+    response = await _request(session_client, method, path, body)
+    _assert_no_secrets(response)
+    if role == SystemRole.ADMIN:
+        if method == "DELETE":
+            assert response.status_code == 409
+            assert response.json() == {"error": "system_role_protected"}
+        else:
+            assert response.status_code == 200
+    else:
+        assert response.status_code == 403
+        assert response.json() == {"error": "forbidden"}
+        assert created["email"] not in response.text
+
+
+@pytest.mark.parametrize("method,path,body", ADMIN_ENDPOINTS)
+async def test_admin_endpoints_without_session_are_unauthorized(
+    session_client: Any,
+    method: str,
+    path: str,
+    body: dict[str, object] | None,
+) -> None:
+    response = await _request(session_client, method, path, body)
+    assert response.status_code == 401
+    assert response.json() == {"error": "unauthorized"}
+    _assert_no_secrets(response)
+
+
+@pytest.mark.parametrize("method,path,body", ADMIN_ENDPOINTS)
+async def test_admin_endpoints_reject_invalid_token(
+    session_client: Any,
+    method: str,
+    path: str,
+    body: dict[str, object] | None,
+) -> None:
+    created = await _signup(session_client)
+    token = created["token"]
+    tampered = token[:-2] + ("A" if token[-1] != "A" else "B")
+    session_client.cookies.clear()
+    response = await session_client.request(
+        method,
+        path,
+        json=body,
+        headers={"Authorization": f"Bearer {tampered}"},
+    )
+    assert response.status_code == 401
+    assert response.json() == {"error": "unauthorized"}
+    assert tampered not in response.text
+    _assert_no_secrets(response)
+
+
+async def test_enrolled_student_receives_only_course_view(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _enroll(db_session, created["id"], _COURSE_A, CourseRole.STUDENT)
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"courseRole": "student", "permissions": ["course:view"]}
+    _assert_no_secrets(response)
+
+
+async def test_assistant_receives_view_and_grade_not_teach(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _set_role(db_session, created["id"], SystemRole.PROFESOR_ADJUNTO)
+    await _enroll(db_session, created["id"], _COURSE_A, CourseRole.ASSISTANT)
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["courseRole"] == "assistant"
+    assert body["permissions"] == ["course:view", "course:grade"]
+    assert "course:teach" not in body["permissions"]
+
+
+async def test_teacher_receives_view_grade_teach(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _set_role(db_session, created["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, created["id"], _COURSE_A, CourseRole.TEACHER)
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
+    assert response.status_code == 200
+    assert response.json() == {
+        "courseRole": "teacher",
+        "permissions": ["course:view", "course:grade", "course:teach"],
+    }
+
+
+async def test_admin_gets_site_permissions_without_enrollment(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["courseRole"] is None
+    assert body["permissions"] == [
+        "course:view",
+        "course:grade",
+        "course:teach",
+        "site:manage-admins",
+        "site:manage-courses",
+    ]
+
+
+async def test_unenrolled_non_admin_is_forbidden(
+    session_client: Any,
+) -> None:
+    await _signup(session_client)
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
+    assert response.status_code == 403
+    assert response.json() == {"error": "forbidden"}
+    _assert_no_secrets(response)
+
+
+async def test_course_permissions_without_session_are_unauthorized(
+    session_client: Any,
+) -> None:
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
+    assert response.status_code == 401
+    assert response.json() == {"error": "unauthorized"}
+
+
+async def test_idor_does_not_reveal_other_course_membership(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    owner = await _signup(session_client, email=unique_email("owner"))
+    await _enroll(db_session, owner["id"], _COURSE_B, CourseRole.TEACHER)
+    session_client.cookies.clear()
+    other = await _signup(session_client, email=unique_email("other"))
+    await _enroll(db_session, other["id"], _COURSE_A, CourseRole.STUDENT)
+    response = await session_client.get(f"/api/v1/courses/{_COURSE_B}/me/permissions")
+    assert response.status_code == 403
+    assert response.json() == {"error": "forbidden"}
+    assert owner["email"] not in response.text
+    assert str(owner["id"]) not in response.text
+    _assert_no_secrets(response)
+
+
+async def test_permissions_are_reevaluated_after_role_change(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _enroll(db_session, created["id"], _COURSE_A, CourseRole.STUDENT)
+    first = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
+    assert first.json()["permissions"] == ["course:view"]
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    second = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
+    assert "site:manage-admins" in second.json()["permissions"]
+    assert "course:teach" in second.json()["permissions"]
+
+
+async def test_admin_can_list_and_deactivate_role(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    listed = await session_client.get("/api/v1/admin/system-roles")
+    assert listed.status_code == 200
+    ids = [item["id"] for item in listed.json()]
+    assert ids == ["alumno", "profesor_adjunto", "profesor", "admin"]
+    for item in listed.json():
+        assert set(item) == {
+            "id",
+            "name",
+            "sortOrder",
+            "isSystem",
+            "active",
+            "createdAt",
+            "updatedAt",
+        }
+        assert item["isSystem"] is True
+        assert item["active"] is True
+
+    patched = await session_client.patch(
+        "/api/v1/admin/system-roles/profesor",
+        json={"active": False, "name": "Profesor", "sortOrder": 30},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["active"] is False
+    assert patched.json()["name"] == "Profesor"
+
+    existing = await _signup(session_client, email=unique_email("prof"))
+    session_client.cookies.clear()
+    await session_client.post(
+        "/api/v1/auth/login",
+        json={"email": created["email"], "password": PASSWORD},
+    )
+    await _set_role(db_session, existing["id"], SystemRole.PROFESOR)
+    existing_user = await db_session.get(User, existing["id"])
+    assert existing_user is not None
+    assert existing_user.system_role_id == SystemRole.PROFESOR
+
+    with pytest.raises(RoleNotAssignable):
+        await assert_role_assignable(db_session, SystemRole.PROFESOR)
+
+    admin_user = await db_session.get(User, created["id"])
+    target = await db_session.get(User, existing["id"])
+    assert admin_user is not None and target is not None
+    with pytest.raises(RoleNotAssignable):
+        await assign_system_role(
+            db_session,
+            actor=admin_user,
+            target=target,
+            role_id=SystemRole.PROFESOR,
+        )
+
+
+async def test_patch_ignores_privilege_escalation_fields(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    response = await session_client.patch(
+        "/api/v1/admin/system-roles/alumno",
+        json={
+            "name": "Alumno",
+            "isSystem": False,
+            "id": "admin",
+            "permissions": ["site:manage-admins"],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "alumno"
+    assert body["isSystem"] is True
+    assert "permissions" not in body
+
+
+async def test_non_admin_cannot_assign_admin_role(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    actor = await db_session.get(User, created["id"])
+    assert actor is not None
+    with pytest.raises(AccessDenied):
+        await assign_system_role(
+            db_session,
+            actor=actor,
+            target=actor,
+            role_id=SystemRole.ADMIN,
+        )
+    await db_session.refresh(actor)
+    assert actor.system_role_id == SystemRole.ALUMNO
+    assert actor.is_admin is False
+
+
+async def test_assign_system_role_promotes_alumno_to_admin(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    admin = await _signup(session_client, email=unique_email("asg-admin"))
+    await _set_role(db_session, admin["id"], SystemRole.ADMIN)
+    target_signup = await _signup(session_client, email=unique_email("asg-alum"))
+    actor = await db_session.get(User, admin["id"])
+    target = await db_session.get(User, target_signup["id"])
+    assert actor is not None and target is not None
+    assert target.system_role_id == SystemRole.ALUMNO
+    assert target.is_admin is False
+
+    updated = await assign_system_role(
+        db_session,
+        actor=actor,
+        target=target,
+        role_id=SystemRole.ADMIN,
+    )
+    assert updated.system_role_id == SystemRole.ADMIN
+    assert updated.is_admin is True
+    await db_session.refresh(target)
+    assert target.system_role_id == SystemRole.ADMIN
+    assert target.is_admin is True
+
+
+async def test_assign_system_role_demotes_admin_to_profesor(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    admin = await _signup(session_client, email=unique_email("asg-boss"))
+    await _set_role(db_session, admin["id"], SystemRole.ADMIN)
+    target_signup = await _signup(session_client, email=unique_email("asg-peer"))
+    await _set_role(db_session, target_signup["id"], SystemRole.ADMIN)
+    actor = await db_session.get(User, admin["id"])
+    target = await db_session.get(User, target_signup["id"])
+    assert actor is not None and target is not None
+    assert target.is_admin is True
+
+    updated = await assign_system_role(
+        db_session,
+        actor=actor,
+        target=target,
+        role_id=SystemRole.PROFESOR,
+    )
+    assert updated.system_role_id == SystemRole.PROFESOR
+    assert updated.is_admin is False
+    await db_session.refresh(target)
+    assert target.system_role_id == SystemRole.PROFESOR
+    assert target.is_admin is False
+
+
+async def test_cannot_deactivate_admin_role(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    response = await session_client.patch(
+        "/api/v1/admin/system-roles/admin",
+        json={"active": False},
+    )
+    assert response.status_code == 409
+    assert response.json() == {"error": "system_role_protected"}
+    listed = await session_client.get("/api/v1/admin/system-roles")
+    admin_row = next(item for item in listed.json() if item["id"] == "admin")
+    assert admin_row["active"] is True
+
+
+async def test_soft_deleted_membership_does_not_grant_course_permissions(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _enroll(db_session, created["id"], _COURSE_A, CourseRole.TEACHER)
+    allowed = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
+    assert allowed.status_code == 200
+    assert allowed.json()["courseRole"] == "teacher"
+
+    membership = await db_session.scalar(
+        select(CourseMembership).where(
+            CourseMembership.user_id == created["id"],
+            CourseMembership.course_id == _COURSE_A,
+        )
+    )
+    assert membership is not None
+    membership.deleted_at = datetime.now(UTC)
+    await db_session.flush()
+
+    denied = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
+    assert denied.status_code == 403
+    assert denied.json() == {"error": "forbidden"}
+    teach = await session_client.get(f"/api/v1/_test/courses/{_COURSE_A}/teach")
+    assert teach.status_code == 403
+
+
+async def test_delete_system_role_conflict_and_custom_role(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    protected = await session_client.delete("/api/v1/admin/system-roles/admin")
+    assert protected.status_code == 409
+    assert protected.json() == {"error": "system_role_protected"}
+
+    custom = SystemRoleRow(
+        id="custom_coach",
+        name="Coach",
+        sort_order=90,
+        is_system=False,
+        active=True,
+    )
+    db_session.add(custom)
+    await db_session.flush()
+    holder = User(
+        first_name="Cora",
+        last_name="Coach",
+        email=unique_email("coach"),
+        password_hash="x",
+        system_role_id="custom_coach",
+    )
+    db_session.add(holder)
+    await db_session.flush()
+
+    in_use = await session_client.delete("/api/v1/admin/system-roles/custom_coach")
+    assert in_use.status_code == 409
+    assert in_use.json() == {"error": "role_in_use"}
+    assert holder.email not in in_use.text
+    assert str(holder.id) not in in_use.text
+
+    holder.system_role_id = SystemRole.ALUMNO
+    await db_session.flush()
+    deleted = await session_client.delete("/api/v1/admin/system-roles/custom_coach")
+    assert deleted.status_code == 204
+    assert deleted.content == b""
+    missing = await session_client.delete("/api/v1/admin/system-roles/custom_coach")
+    assert missing.status_code == 404
+    assert missing.json() == {"error": "not_found"}
+
+
+async def test_patch_unknown_role_is_not_found(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    response = await session_client.patch(
+        "/api/v1/admin/system-roles/does-not-exist",
+        json={"name": "Nadie"},
+    )
+    assert response.status_code == 404
+    assert response.json() == {"error": "not_found"}
+
+
+async def test_patch_validation_rejects_blank_name(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    response = await session_client.patch(
+        "/api/v1/admin/system-roles/alumno",
+        json={"name": "   "},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "validation"
+    assert "name" in response.json()["fields"]
+
+
+async def test_require_site_and_course_permission_probes(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    student = await _signup(session_client, email=unique_email("stu"))
+    await _enroll(db_session, student["id"], _COURSE_A, CourseRole.STUDENT)
+    denied_site = await session_client.get("/api/v1/_test/site-manage-admins")
+    assert denied_site.status_code == 403
+    denied_teach = await session_client.get(f"/api/v1/_test/courses/{_COURSE_A}/teach")
+    assert denied_teach.status_code == 403
+
+    session_client.cookies.clear()
+    teacher = await _signup(session_client, email=unique_email("tea"))
+    await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, teacher["id"], _COURSE_A, CourseRole.TEACHER)
+    allowed_teach = await session_client.get(f"/api/v1/_test/courses/{_COURSE_A}/teach")
+    assert allowed_teach.status_code == 200
+    assert allowed_teach.json() == {"ok": True}
+    denied_admin = await session_client.get("/api/v1/_test/site-manage-admins")
+    assert denied_admin.status_code == 403
+
+    session_client.cookies.clear()
+    admin = await _signup(session_client, email=unique_email("adm"))
+    await _set_role(db_session, admin["id"], SystemRole.ADMIN)
+    allowed_site = await session_client.get("/api/v1/_test/site-manage-admins")
+    assert allowed_site.status_code == 200
+    allowed_admin_teach = await session_client.get(
+        f"/api/v1/_test/courses/{_COURSE_A}/teach"
+    )
+    assert allowed_admin_teach.status_code == 200
+
+
+async def test_deactivated_alumno_blocks_signup(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    await session_client.patch(
+        "/api/v1/admin/system-roles/alumno",
+        json={"active": False},
+    )
+    blocked = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(email=unique_email("blocked")),
+    )
+    assert blocked.status_code == 409
+    assert blocked.json() == {"error": "role_not_assignable"}
+    _assert_no_secrets(blocked)
+
+
+async def test_deactivate_alumno_keeps_existing_users(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    """Desactivar un rol con usuarios es válido: lo conservan, no se asigna más."""
+
+    holder = await _signup(session_client, email=unique_email("keep-al"))
+    admin = await _signup(session_client, email=unique_email("keep-ad"))
+    await _set_role(db_session, admin["id"], SystemRole.ADMIN)
+    patched = await session_client.patch(
+        "/api/v1/admin/system-roles/alumno",
+        json={"active": False},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["active"] is False
+    holder_user = await db_session.get(User, holder["id"])
+    actor = await db_session.get(User, admin["id"])
+    assert holder_user is not None and actor is not None
+    assert holder_user.system_role_id == SystemRole.ALUMNO
+    with pytest.raises(RoleNotAssignable):
+        await assign_system_role(
+            db_session,
+            actor=actor,
+            target=holder_user,
+            role_id=SystemRole.ALUMNO,
+        )
+    await db_session.refresh(holder_user)
+    assert holder_user.system_role_id == SystemRole.ALUMNO
+
+
+@asynccontextmanager
+async def _committed_admin_pair(
+    dsn: RedactedDsn,
+) -> AsyncIterator[tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID]]:
+    engine = create_async_engine(dsn.secret(), pool_pre_ping=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    actor_id: uuid.UUID | None = None
+    target_id: uuid.UUID | None = None
+    try:
+        async with factory() as session, session.begin():
+            actor = User(
+                first_name="Lock",
+                last_name="Actor",
+                email=unique_email("lock-actor"),
+                password_hash="x",
+                system_role_id=SystemRole.ADMIN,
+                is_admin=True,
+            )
+            target = User(
+                first_name="Lock",
+                last_name="Target",
+                email=unique_email("lock-target"),
+                password_hash="x",
+                system_role_id=SystemRole.ADMIN,
+                is_admin=True,
+            )
+            session.add_all([actor, target])
+            await session.flush()
+            actor_id = actor.id
+            target_id = target.id
+            alumno = await session.get(SystemRoleRow, SystemRole.ALUMNO)
+            assert alumno is not None
+            alumno.active = True
+        assert actor_id is not None and target_id is not None
+        yield factory, actor_id, target_id
+    finally:
+        async with factory() as session, session.begin():
+            for user_id in (actor_id, target_id):
+                if user_id is None:
+                    continue
+                user = await session.get(User, user_id)
+                if user is not None:
+                    await session.delete(user)
+            alumno = await session.get(SystemRoleRow, SystemRole.ALUMNO)
+            if alumno is not None:
+                alumno.active = True
+        await engine.dispose()
+
+
+async def _deactivate_alumno_vs_demote_admin(
+    factory: async_sessionmaker[AsyncSession],
+    actor_id: uuid.UUID,
+    target_id: uuid.UUID,
+) -> BaseException | None:
+    """Barrera: el PATCH retiene el lock; el assign entra en la ventana abierta."""
+
+    barrier = asyncio.Barrier(2)
+
+    async def deactivate() -> None:
+        async with factory() as session, session.begin():
+            await update_system_role(
+                session,
+                SystemRole.ALUMNO,
+                SystemRoleUpdate(active=False),
+            )
+            await barrier.wait()
+            await asyncio.sleep(0.3)
+
+    async def demote() -> None:
+        await barrier.wait()
+        async with factory() as session, session.begin():
+            actor = await session.get(User, actor_id)
+            target = await session.get(User, target_id)
+            assert actor is not None and target is not None
+            await assign_system_role(
+                session,
+                actor=actor,
+                target=target,
+                role_id=SystemRole.ALUMNO,
+            )
+
+    _patched, assigned = await asyncio.gather(
+        deactivate(), demote(), return_exceptions=True
+    )
+    if isinstance(_patched, BaseException):
+        raise _patched
+    if isinstance(assigned, BaseException):
+        return assigned
+    return None
+
+
+async def test_concurrent_deactivate_alumno_vs_demote_admin(
+    require_postgres: RedactedDsn, migrated_test_database: None
+) -> None:
+    """Con locks, quitar un admin no lo deja en alumno inactivo."""
+
+    async with _committed_admin_pair(require_postgres) as (
+        factory,
+        actor_id,
+        target_id,
+    ):
+        assigned = await _deactivate_alumno_vs_demote_admin(
+            factory, actor_id, target_id
+        )
+        assert isinstance(assigned, RoleNotAssignable)
+        async with factory() as session:
+            target = await session.get(User, target_id)
+            alumno = await session.get(SystemRoleRow, SystemRole.ALUMNO)
+            assert target is not None and alumno is not None
+            assert target.system_role_id == SystemRole.ADMIN
+            assert target.is_admin is True
+            assert alumno.active is False
+
+
+async def test_concurrent_deactivate_vs_demote_without_lock_assigns_inactive(
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sin el lock, la misma barrera clava al admin en alumno inactivo."""
+
+    async def unlocked(
+        session: AsyncSession,
+        role_id: str,
+        *,
+        with_for_update: bool | dict[str, bool] | None = None,
+    ) -> SystemRoleRow | None:
+        row = await session.get(SystemRoleRow, role_id)
+        if row is None or row.deleted_at is not None:
+            return None
+        return row
+
+    monkeypatch.setattr("app.services.roles._load_system_role", unlocked)
+    async with _committed_admin_pair(require_postgres) as (
+        factory,
+        actor_id,
+        target_id,
+    ):
+        assigned = await _deactivate_alumno_vs_demote_admin(
+            factory, actor_id, target_id
+        )
+        assert assigned is None
+        async with factory() as session:
+            target = await session.get(User, target_id)
+            alumno = await session.get(SystemRoleRow, SystemRole.ALUMNO)
+            assert target is not None and alumno is not None
+            assert target.system_role_id == SystemRole.ALUMNO
+            assert target.is_admin is False
+            assert alumno.active is False
+
+
+def test_is_site_admin_follows_system_role_not_column() -> None:
+    mismatched = User(
+        first_name="Ada",
+        last_name="Lovelace",
+        email="ada-mismatch@example.com",
+        password_hash="x",
+        system_role_id=SystemRole.ALUMNO,
+        is_admin=True,
+    )
+    assert mismatched.is_admin is True
+    assert mismatched.is_site_admin is False
+    assert mismatched.system_role is SystemRole.ALUMNO
+
+    admin_flag_off = User(
+        first_name="Boss",
+        last_name="Admin",
+        email="boss-mismatch@example.com",
+        password_hash="x",
+        system_role_id=SystemRole.ADMIN,
+        is_admin=False,
+    )
+    assert admin_flag_off.is_admin is False
+    assert admin_flag_off.is_site_admin is True
+    assert admin_flag_off.system_role is SystemRole.ADMIN
+
+    unknown = User(
+        first_name="Cora",
+        last_name="Coach",
+        email="coach-unknown@example.com",
+        password_hash="x",
+        system_role_id="custom_coach",
+        is_admin=True,
+    )
+    assert unknown.system_role is SystemRole.ALUMNO
+    assert unknown.is_site_admin is False
+
+
+async def test_mismatched_is_admin_is_rejected_by_check(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client, email=unique_email("ck-drift"))
+    user = await db_session.get(User, created["id"])
+    assert user is not None
+    user.is_admin = True
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+async def test_me_is_admin_matches_system_role(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client, email=unique_email("me-role"))
+    me = await session_client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["systemRole"] == "alumno"
+    assert me.json()["isAdmin"] is False
+
+    await _set_role(db_session, created["id"], SystemRole.PROFESOR)
+    profesor = await session_client.get("/api/v1/auth/me")
+    assert profesor.status_code == 200
+    assert profesor.json()["systemRole"] == "profesor"
+    assert profesor.json()["isAdmin"] is False
+    denied = await session_client.get("/api/v1/admin/system-roles")
+    assert denied.status_code == 403
+    assert denied.json() == {"error": "forbidden"}
+
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    admin = await session_client.get("/api/v1/auth/me")
+    assert admin.status_code == 200
+    assert admin.json()["systemRole"] == "admin"
+    assert admin.json()["isAdmin"] is True
+    listed = await session_client.get("/api/v1/admin/system-roles")
+    assert listed.status_code == 200
+
+
+def test_assistant_media_setting_is_configurable() -> None:
+    settings = get_settings()
+    assert settings.assistant_media_and_sm3_visible is False
+    enabled = settings.model_copy(update={"assistant_media_and_sm3_visible": True})
+    assert enabled.assistant_media_and_sm3_visible is True

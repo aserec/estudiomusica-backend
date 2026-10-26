@@ -37,6 +37,9 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert "/api/v1/auth/login" in paths
     assert "/api/v1/auth/logout" in paths
     assert "/api/v1/auth/me" in paths
+    assert "/api/v1/admin/system-roles" in paths
+    assert "/api/v1/admin/system-roles/{role_id}" in paths
+    assert "/api/v1/courses/{course_id}/me/permissions" in paths
     assert "/api/v1/examples" in paths
     assert "/api/v1/examples/denied" in paths
     assert "/api/v1/examples/too-large" in paths
@@ -102,3 +105,36 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert set(signup_props) >= {"name", "email", "password"}
     me_props = schemas["AuthMeResponse"]["properties"]
     assert set(me_props) >= {"user", "systemRole", "isAdmin"}
+
+    roles_get = paths["/api/v1/admin/system-roles"]["get"]
+    assert "200" in roles_get["responses"]
+    assert "401" in roles_get["responses"]
+    assert "403" in roles_get["responses"]
+    roles_patch = paths["/api/v1/admin/system-roles/{role_id}"]["patch"]
+    assert "409" in roles_patch["responses"]
+    assert "200" in roles_patch["responses"]
+    assert "400" in roles_patch["responses"]
+    roles_delete = paths["/api/v1/admin/system-roles/{role_id}"]["delete"]
+    assert "204" in roles_delete["responses"]
+    assert "409" in roles_delete["responses"]
+    course_perms = paths["/api/v1/courses/{course_id}/me/permissions"]["get"]
+    assert "200" in course_perms["responses"]
+    assert "401" in course_perms["responses"]
+    assert "403" in course_perms["responses"]
+    assert "SystemRoleResponse" in schemas
+    assert "SystemRoleUpdate" in schemas
+    assert "CoursePermissionsResponse" in schemas
+    role_props = schemas["SystemRoleResponse"]["properties"]
+    assert set(role_props) >= {
+        "id",
+        "name",
+        "sortOrder",
+        "isSystem",
+        "active",
+        "createdAt",
+        "updatedAt",
+    }
+    patch_props = schemas["SystemRoleUpdate"]["properties"]
+    assert set(patch_props) == {"name", "active", "sortOrder"}
+    perms_props = schemas["CoursePermissionsResponse"]["properties"]
+    assert set(perms_props) >= {"courseRole", "permissions"}
