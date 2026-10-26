@@ -9,8 +9,11 @@ admin con ``INSERT ... ON CONFLICT DO NOTHING``, añade
 ``users.system_role_id`` y ``course_memberships``. No toca 0001 ni 0002.
 Monta ``set_updated_at()`` con ``op_create_updated_at_trigger``
 (0001 solo crea la función; el SQL del trigger va quoted por el
-preparer). ``CHECK (is_admin = (system_role_id = 'admin'))`` mantiene
-el espejo ``is_admin`` alineado con el rol.
+preparer). Tras copiar ``is_admin`` de 0002 a ``system_role_id``,
+el espejo se realinea desde el rol (fuente de verdad) y el CHECK
+rechaza ``is_admin`` incoherente o NULL. Las bases de dev/staging
+creadas con una 0003 anterior hay que recrearlas: el id de revisión
+no cambia y un down/up no conserva el rol.
 """
 
 from collections.abc import Sequence
@@ -82,6 +85,7 @@ def upgrade() -> None:
     op.execute(
         "UPDATE users SET system_role_id = 'alumno' WHERE system_role_id IS NULL"
     )
+    op.execute("UPDATE users SET is_admin = (system_role_id = 'admin')")
     op.alter_column(
         "users",
         "system_role_id",
@@ -105,7 +109,8 @@ def upgrade() -> None:
     op.create_check_constraint(
         "is_admin_matches_system_role",
         "users",
-        "is_admin = (system_role_id = 'admin')",
+        "is_admin IS NOT NULL AND system_role_id IS NOT NULL "
+        "AND is_admin = (system_role_id = 'admin')",
     )
     op.create_table(
         "course_memberships",
@@ -181,10 +186,6 @@ def downgrade() -> None:
         if_exists=True,
     )
     op.drop_table("course_memberships")
-    op.execute(
-        "ALTER TABLE users DROP CONSTRAINT IF EXISTS "
-        "ck_users_is_admin_matches_system_role"
-    )
     op.drop_constraint(
         "fk_users_system_role_id_system_roles",
         "users",

@@ -13,7 +13,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.config import get_settings
-from app.migrations.autogen import process_revision_directives
+from app.migrations.autogen import include_name, process_revision_directives
 from app.models import Base
 
 config = context.config
@@ -39,6 +39,8 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_server_default=True,
+        include_schemas=True,
+        include_name=include_name,
         process_revision_directives=process_revision_directives,
     )
 
@@ -51,6 +53,8 @@ def do_run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_server_default=True,
+        include_schemas=True,
+        include_name=include_name,
         process_revision_directives=process_revision_directives,
     )
 

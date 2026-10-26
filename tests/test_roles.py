@@ -1,7 +1,9 @@
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -352,6 +354,98 @@ async def test_non_admin_cannot_assign_admin_role(
     await db_session.refresh(actor)
     assert actor.system_role_id == SystemRole.ALUMNO
     assert actor.is_admin is False
+
+
+async def test_assign_system_role_promotes_alumno_to_admin(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    admin = await _signup(session_client, email=unique_email("asg-admin"))
+    await _set_role(db_session, admin["id"], SystemRole.ADMIN)
+    target_signup = await _signup(session_client, email=unique_email("asg-alum"))
+    actor = await db_session.get(User, admin["id"])
+    target = await db_session.get(User, target_signup["id"])
+    assert actor is not None and target is not None
+    assert target.system_role_id == SystemRole.ALUMNO
+    assert target.is_admin is False
+
+    updated = await assign_system_role(
+        db_session,
+        actor=actor,
+        target=target,
+        role_id=SystemRole.ADMIN,
+    )
+    assert updated.system_role_id == SystemRole.ADMIN
+    assert updated.is_admin is True
+    await db_session.refresh(target)
+    assert target.system_role_id == SystemRole.ADMIN
+    assert target.is_admin is True
+
+
+async def test_assign_system_role_demotes_admin_to_profesor(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    admin = await _signup(session_client, email=unique_email("asg-boss"))
+    await _set_role(db_session, admin["id"], SystemRole.ADMIN)
+    target_signup = await _signup(session_client, email=unique_email("asg-peer"))
+    await _set_role(db_session, target_signup["id"], SystemRole.ADMIN)
+    actor = await db_session.get(User, admin["id"])
+    target = await db_session.get(User, target_signup["id"])
+    assert actor is not None and target is not None
+    assert target.is_admin is True
+
+    updated = await assign_system_role(
+        db_session,
+        actor=actor,
+        target=target,
+        role_id=SystemRole.PROFESOR,
+    )
+    assert updated.system_role_id == SystemRole.PROFESOR
+    assert updated.is_admin is False
+    await db_session.refresh(target)
+    assert target.system_role_id == SystemRole.PROFESOR
+    assert target.is_admin is False
+
+
+async def test_cannot_deactivate_admin_role(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    response = await session_client.patch(
+        "/api/v1/admin/system-roles/admin",
+        json={"active": False},
+    )
+    assert response.status_code == 409
+    assert response.json() == {"error": "system_role_protected"}
+    listed = await session_client.get("/api/v1/admin/system-roles")
+    admin_row = next(item for item in listed.json() if item["id"] == "admin")
+    assert admin_row["active"] is True
+
+
+async def test_soft_deleted_membership_does_not_grant_course_permissions(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client)
+    await _enroll(db_session, created["id"], _COURSE_A, CourseRole.TEACHER)
+    allowed = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
+    assert allowed.status_code == 200
+    assert allowed.json()["courseRole"] == "teacher"
+
+    membership = await db_session.scalar(
+        select(CourseMembership).where(
+            CourseMembership.user_id == created["id"],
+            CourseMembership.course_id == _COURSE_A,
+        )
+    )
+    assert membership is not None
+    membership.deleted_at = datetime.now(UTC)
+    await db_session.flush()
+
+    denied = await session_client.get(f"/api/v1/courses/{_COURSE_A}/me/permissions")
+    assert denied.status_code == 403
+    assert denied.json() == {"error": "forbidden"}
+    teach = await session_client.get(f"/api/v1/_test/courses/{_COURSE_A}/teach")
+    assert teach.status_code == 403
 
 
 async def test_delete_system_role_conflict_and_custom_role(
