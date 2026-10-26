@@ -2190,13 +2190,23 @@ def test_ssl_require_rootcert_rejects_hostname_mismatch(
     host = str(parsed.host or "127.0.0.1")
     port = int(parsed.port or 5432)
     ctx = ssl_context_from_rootcert(str(cafile), "require")
-    raw = sock.create_connection((host, port), timeout=3)
+
+    def _connect_start_tls() -> sock.socket:
+        raw = sock.create_connection((host, port), timeout=3)
+        raw.sendall(bytes.fromhex("0000000804d2162f"))
+        flag = raw.recv(1)
+        if flag != b"S":
+            raw.close()
+            raise AssertionError(f"Postgres no ofreció TLS: {flag!r}")
+        return raw
+
+    raw = _connect_start_tls()
     try:
         with pytest.raises(ssl_mod.SSLError):
             ctx.wrap_socket(raw, server_hostname="wrong.example")
     finally:
         raw.close()
-    matched = sock.create_connection((host, port), timeout=3)
+    matched = _connect_start_tls()
     try:
         wrapped = ctx.wrap_socket(matched, server_hostname=host)
         wrapped.close()
