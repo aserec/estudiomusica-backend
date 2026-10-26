@@ -5,7 +5,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.auth.tokens import encode_session_token
@@ -103,9 +103,7 @@ async def _demote_foreign_admins(
     db_session: AsyncSession, keep: set[uuid.UUID]
 ) -> None:
     rows = await db_session.scalars(
-        select(User).where(
-            or_(User.is_admin.is_(True), User.system_role_id == SystemRole.ADMIN)
-        )
+        select(User).where(User.system_role_id == SystemRole.ADMIN)
     )
     for user in rows:
         if user.id not in keep:
@@ -419,6 +417,10 @@ async def test_grant_and_revoke_admin_on_another_user(
     )
     assert granted.status_code == 200
     assert granted.json()["systemRoleId"] == "admin"
+    promoted = await db_session.get(User, target["id"])
+    assert promoted is not None
+    assert promoted.is_admin is True
+    assert promoted.system_role_id == SystemRole.ADMIN
     revoked = await session_client.put(
         f"/api/v1/admin/users/{target['id']}/admin",
         json={"isAdmin": False},
@@ -428,6 +430,7 @@ async def test_grant_and_revoke_admin_on_another_user(
     user = await db_session.get(User, target["id"])
     assert user is not None
     assert user.is_admin is False
+    assert user.system_role_id == SystemRole.ALUMNO
 
 
 async def test_suspend_existing_session_is_account_suspended(
@@ -679,9 +682,7 @@ async def _park_existing_admins(
 ) -> list[tuple[UUID, str, bool]]:
     existing = list(
         await session.scalars(
-            select(User).where(
-                or_(User.is_admin.is_(True), User.system_role_id == SystemRole.ADMIN)
-            )
+            select(User).where(User.system_role_id == SystemRole.ADMIN)
         )
     )
     extras = [(user.id, user.system_role_id, user.is_admin) for user in existing]

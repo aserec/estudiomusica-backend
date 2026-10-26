@@ -150,8 +150,8 @@ def test_production_search_does_not_list_deleted(
     _promote_to_admin(production_test_database_url, admin_email)
 
     marker = uuid.uuid4().hex[:12]
-    visible_email = unique_email(f"{marker}-ok")
-    deleted_email = unique_email(f"{marker}-gone")
+    visible_email = unique_email(f"prod-{marker}-ok")
+    deleted_email = unique_email(f"prod-{marker}-gone")
     visible = production_client.post(
         "/api/v1/auth/signup", json=signup_body(email=visible_email)
     )

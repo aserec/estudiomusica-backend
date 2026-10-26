@@ -102,7 +102,7 @@ def _status_filters(status: AdminUserStatus | None) -> list[ColumnElement[bool]]
 
 def _admin_identity_clause() -> ColumnElement[bool]:
     return and_(
-        or_(User.is_admin.is_(True), User.system_role_id == SystemRole.ADMIN),
+        User.system_role_id == SystemRole.ADMIN,
         User.deleted_at.is_(None),
     )
 
@@ -112,11 +112,7 @@ def _active_admin_clause() -> ColumnElement[bool]:
 
 
 def _is_active_admin(user: User) -> bool:
-    return (
-        (user.is_admin or user.system_role_id == SystemRole.ADMIN)
-        and user.deleted_at is None
-        and user.suspended_at is None
-    )
+    return user.is_site_admin and user.deleted_at is None and user.suspended_at is None
 
 
 def _actor_is_site_admin(user: User) -> bool:
@@ -289,7 +285,7 @@ async def set_user_admin(
             session, actor_id=actor.id, target_id=user_id
         )
         _require_active_admin_actor(actor_row)
-        if target.is_admin and target.system_role_id == SystemRole.ADMIN:
+        if target.is_site_admin:
             return target
         return await assign_system_role(
             session, actor=actor_row, target=target, role_id=SystemRole.ADMIN
@@ -300,7 +296,7 @@ async def set_user_admin(
     )
     if actor_row.id == target.id:
         raise CannotModifySelf()
-    already_admin = target.is_admin or target.system_role_id == SystemRole.ADMIN
+    already_admin = target.is_site_admin
     if already_admin and _is_active_admin(target):
         _ensure_admin_remains(locked, actor=actor_row, target=target)
     _require_active_admin_actor(actor_row)
