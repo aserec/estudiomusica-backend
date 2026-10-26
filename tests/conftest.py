@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from app.db import (
     RedactedDsn,
     SessionDep,
+    SessionStreamingDep,
     asyncpg_url_and_connect_args,
     get_session,
     redact_database_url,
@@ -294,6 +295,22 @@ def _mount_probes(application: FastAPI) -> None:
             {"label": label},
         )
         return {"label": found}
+
+    @application.get("/api/v1/_test/session-stream")
+    async def session_stream(session: SessionDep) -> StreamingResponse:
+        async def generate() -> AsyncIterator[str]:
+            found = await session.scalar(text("SELECT 1"))
+            yield f"row={found}"
+
+        return StreamingResponse(generate(), media_type="text/plain")
+
+    @application.get("/api/v1/_test/session-stream-ok")
+    async def session_stream_ok(session: SessionStreamingDep) -> StreamingResponse:
+        async def generate() -> AsyncIterator[str]:
+            found = await session.scalar(text("SELECT 1"))
+            yield f"row={found}"
+
+        return StreamingResponse(generate(), media_type="text/plain")
 
 
 def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> Iterator[TestClient]:

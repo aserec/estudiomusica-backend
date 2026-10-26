@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Annotated, Any
 
 from fastapi import Depends
+from sqlalchemy import event
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import Session as SyncSession
 
 from app.config import get_settings
 
@@ -210,6 +212,51 @@ async def get_session() -> AsyncIterator[AsyncSession]:
     (``request``). ``SessionDep`` fija ``scope="function"`` para que el
     commit ocurra antes de responder: un POST no puede devolver 2xx
     si el commit falla o si la fila aún no es visible.
+
+    Un ``StreamingResponse`` que consulte la sesión en el generador
+    arrancaría otra transacción *después* de ese commit (idle in
+    transaction → 500 de QueuePool). El listener ``after_begin`` lo
+    prohíbe. Para streaming usa ``SessionStreamingDep``.
+    """
+
+    factory = get_session_factory()
+    async with factory() as session:
+        released = False
+
+        def _reject_begin_after_yield(
+            _orm_session: object,
+            _transaction: object,
+            connection: object,
+        ) -> None:
+            if not released:
+                return
+            rollback = getattr(connection, "rollback", None)
+            if callable(rollback):
+                rollback()
+            raise RuntimeError(
+                "la sesión no se puede usar después del yield; "
+                "un StreamingResponse necesita SessionStreamingDep"
+            )
+
+        sync = getattr(session, "sync_session", None)
+        if isinstance(sync, SyncSession):
+            event.listen(sync, "after_begin", _reject_begin_after_yield)
+        try:
+            yield session
+            released = True
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def get_streaming_session() -> AsyncIterator[AsyncSession]:
+    """Sesión para ``StreamingResponse``: el commit espera al generador.
+
+    ``SessionDep`` (scope=function) cierra la transacción antes de
+    enviar el cuerpo. Esta dependencia usa scope=request para que el
+    generador pueda consultar y el commit/rollback corran al terminar
+    el stream, sin dejar idle in transaction.
     """
 
     factory = get_session_factory()
@@ -223,6 +270,9 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
+SessionStreamingDep = Annotated[
+    AsyncSession, Depends(get_streaming_session, scope="request")
+]
 
 
 def clear_engine() -> None:

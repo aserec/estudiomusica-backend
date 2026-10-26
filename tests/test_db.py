@@ -438,6 +438,73 @@ async def test_http_session_commit_error_is_not_2xx(
         clear_engine()
 
 
+async def _count_idle_in_transaction(dsn: RedactedDsn) -> int:
+    import asyncpg  # type: ignore[import-untyped]
+    from sqlalchemy.engine.url import make_url
+
+    parsed = make_url(dsn.secret())
+    connection = await asyncpg.connect(
+        host=parsed.host,
+        port=parsed.port or 5432,
+        user=parsed.username,
+        password=parsed.password,
+        database=parsed.database,
+        timeout=2,
+    )
+    try:
+        value = await connection.fetchval(
+            "SELECT count(*) FROM pg_stat_activity "
+            "WHERE state = 'idle in transaction' AND pid <> pg_backend_pid()"
+        )
+        return int(value or 0)
+    finally:
+        await connection.close()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_streaming_session_dep_leaves_no_idle_in_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """M-1: StreamingResponse + SessionDep no deja idle in transaction."""
+
+    from httpx2 import ASGITransport, AsyncClient
+
+    from app.config import get_settings
+    from app.db import dispose_engine
+    from app.main import create_app
+    from tests.conftest import _mount_probes
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    get_settings.cache_clear()
+    clear_engine()
+    application = create_app()
+    _mount_probes(application)
+    baseline = await _count_idle_in_transaction(require_postgres)
+    try:
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            try:
+                leaked = await client.get("/api/v1/_test/session-stream")
+            except RuntimeError as exc:
+                assert "SessionStreamingDep" in str(exc)
+            else:
+                assert leaked.status_code >= 400 or "row=" not in leaked.text
+            after_leak = await _count_idle_in_transaction(require_postgres)
+            assert after_leak == baseline
+            ok = await client.get("/api/v1/_test/session-stream-ok")
+            assert ok.status_code == 200
+            assert ok.text == "row=1"
+            after_ok = await _count_idle_in_transaction(require_postgres)
+            assert after_ok == baseline
+    finally:
+        await dispose_engine()
+        get_settings.cache_clear()
+        clear_engine()
+
+
 def test_clear_engine_disposes_sync_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     from app import db as db_module
     from app.config import get_settings
