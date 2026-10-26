@@ -1107,6 +1107,23 @@ async def test_audit_category_name_keys_reports_diff_and_collision(
     assert "piano" in keys
 
 
+async def test_audit_does_not_collide_strasse_and_strasse_upper(
+    db_session: AsyncSession,
+) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('Straße', :k1, 0), "
+            "('STRASSE', :k2, 1)"
+        ),
+        {"k1": category_name_key("Straße"), "k2": category_name_key("STRASSE")},
+    )
+    report = await audit_category_name_keys(db_session)
+    assert report.ok()
+    assert report.collisions == ()
+    assert category_name_key("Straße").lower() != category_name_key("STRASSE").lower()
+
+
 async def test_fix_category_name_keys_renames_duplicates(
     db_session: AsyncSession,
 ) -> None:

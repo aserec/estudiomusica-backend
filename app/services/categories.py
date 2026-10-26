@@ -286,7 +286,7 @@ async def audit_category_name_keys(session: AsyncSession) -> NameKeyAudit:
                 )
             )
         if row.deleted_at is None:
-            groups.setdefault((row.parent_id, expected.casefold()), []).append(row.id)
+            groups.setdefault((row.parent_id, expected.lower()), []).append(row.id)
     collisions = tuple(
         NameKeyCollision(key=key, parent_id=parent_id, ids=tuple(ids))
         for (parent_id, key), ids in groups.items()
@@ -313,10 +313,10 @@ async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
     groups: dict[tuple[UUID | None, str], list[Category]] = {}
     for row in live:
         expected = category_name_key(row.name)
-        groups.setdefault((row.parent_id, expected.casefold()), []).append(row)
+        groups.setdefault((row.parent_id, expected.lower()), []).append(row)
     taken: dict[tuple[UUID | None, str], Category] = {}
     for row in live:
-        taken[(row.parent_id, category_name_key(row.name).casefold())] = row
+        taken[(row.parent_id, category_name_key(row.name).lower())] = row
     for (_parent, _key), members in groups.items():
         if len(members) < 2:
             continue
@@ -325,10 +325,10 @@ async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
             suffix = number
             while True:
                 candidate = _dup_name(row.name, suffix)
-                new_key = category_name_key(candidate).casefold()
+                new_key = category_name_key(candidate).lower()
                 clash = taken.get((row.parent_id, new_key))
                 if clash is None or clash.id == row.id:
-                    old_key = category_name_key(row.name).casefold()
+                    old_key = category_name_key(row.name).lower()
                     taken.pop((row.parent_id, old_key), None)
                     row.name = candidate
                     taken[(row.parent_id, new_key)] = row
