@@ -8,6 +8,7 @@ from pydantic.config import JsonDict
 
 from app.schemas.base import APIModel
 from app.schemas.unicode_props import (
+    ASSIGNED,
     EMOJI_PRESENTATION,
     EXTENDED_PICTOGRAPHIC,
     JOINING_D,
@@ -172,7 +173,7 @@ def _reject_forbidden_chars(value: str) -> None:
         raise ValueError("nul")
     if _has_surrogate(value):
         raise ValueError("surrogate")
-    if any(unicodedata.category(char) == "Cn" for char in value):
+    if any(not _in_ranges(ord(char), ASSIGNED) for char in value):
         raise ValueError("unassigned")
     if "\ufffc" in value:
         raise ValueError("object replacement")

@@ -2,6 +2,9 @@
 """Genera app/schemas/unicode_props.py desde la UCD 16.0.0 vendida.
 
 Uso: uv run python scripts/generate_unicode_tables.py
+
+Fuentes: DerivedJoiningType.txt, emoji-data.txt, DerivedGeneralCategory.txt,
+emoji-zwj-sequences.txt.
 """
 
 from __future__ import annotations
@@ -70,9 +73,31 @@ def parse_zwj_sequences(path: Path) -> tuple[str, ...]:
     return tuple(sequences)
 
 
+def parse_assigned(path: Path) -> tuple[tuple[int, int], ...]:
+    """Rangos asignados (General_Category distinta de Cn) en Unicode 16.0.0."""
+
+    ranges: list[tuple[int, int]] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("@"):
+            continue
+        codes, _, prop = line.partition(";")
+        if prop.strip().split()[0] == "Cn":
+            continue
+        token = codes.strip()
+        if ".." in token:
+            start_s, end_s = token.split("..", 1)
+            ranges.append((_parse_code(start_s), _parse_code(end_s)))
+        else:
+            code = _parse_code(token)
+            ranges.append((code, code))
+    return _merge(ranges)
+
+
 def parse_tables(ucd_dir: Path) -> dict[str, tuple[tuple[int, int], ...]]:
     joining = ucd_dir / "DerivedJoiningType.txt"
     emoji = ucd_dir / "emoji-data.txt"
+    category = ucd_dir / "DerivedGeneralCategory.txt"
     return {
         "JOINING_L": parse_ucd_property(joining, "L"),
         "JOINING_D": parse_ucd_property(joining, "D"),
@@ -81,6 +106,7 @@ def parse_tables(ucd_dir: Path) -> dict[str, tuple[tuple[int, int], ...]]:
         "EXTENDED_PICTOGRAPHIC": parse_ucd_property(emoji, "Extended_Pictographic"),
         "EMOJI_PRESENTATION": parse_ucd_property(emoji, "Emoji_Presentation"),
         "REGIONAL_INDICATOR": REGIONAL_INDICATOR,
+        "ASSIGNED": parse_assigned(category),
     }
 
 
@@ -97,7 +123,8 @@ def render(tables: dict[str, tuple[tuple[int, int], ...]]) -> str:
     chunks = [
         '"""Tablas UCD congeladas. Generado; no editar a mano.',
         "",
-        f"Fuente: Unicode {UCD_VERSION} (DerivedJoiningType.txt, emoji-data.txt).",
+        f"Fuente: Unicode {UCD_VERSION}.",
+        "DerivedJoiningType.txt, emoji-data.txt, DerivedGeneralCategory.txt.",
         '"""',
         "",
         f'UCD_VERSION = "{UCD_VERSION}"',

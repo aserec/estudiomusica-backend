@@ -705,9 +705,11 @@ def test_normalize_category_name_nfc_spaces_and_invisibles() -> None:
         normalize_category_name("a\u0378b")
     with pytest.raises(ValueError, match="unassigned"):
         normalize_category_description("a\u0378b")
-    if unicodedata.unidata_version.startswith("16."):
+    for raw in ("a\u088fb", "a\u1acfb"):
         with pytest.raises(ValueError, match="unassigned"):
-            normalize_category_name("a\u1acfb")
+            normalize_category_name(raw)
+        with pytest.raises(ValueError, match="unassigned"):
+            normalize_category_description(raw)
     assert len("x" * 121) == 121
     with pytest.raises(ValueError):
         normalize_category_name("x" * 121)
@@ -1075,6 +1077,13 @@ async def test_unassigned_code_point_is_validation(
         _ADMIN, json={"name": "CnDesc", "description": "a\u0378b"}
     )
     assert desc.status_code == 400
+    for raw in ("a\u088fb", "a\u1acfb"):
+        response = await session_client.post(_ADMIN, json={"name": raw})
+        assert response.status_code == 400
+        desc = await session_client.post(
+            _ADMIN, json={"name": "CnDesc2", "description": raw}
+        )
+        assert desc.status_code == 400
 
 
 async def test_audit_category_name_keys_reports_diff_and_collision(
