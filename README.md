@@ -2,7 +2,7 @@
 
 Backend FastAPI de EstudioMusica. Sustituye los almacenes JSON del frontend Next.js.
 
-Este repositorio es todavía el esqueleto inicial: no incluye base de datos ni lógica de negocio. Las siguientes issues añadirán Postgres + SQLAlchemy 2 async + Alembic (incluido `GET /api/v1/health/db`) y el resto de convenciones de API (errores, paginación, OpenAPI y CORS).
+Este repositorio es el esqueleto FastAPI más las convenciones transversales de la API (errores, paginación, OpenAPI y CORS). No incluye base de datos ni lógica de negocio: Postgres + SQLAlchemy 2 async + Alembic (incluido `GET /api/v1/health/db`) llegará en otra PR.
 
 ## Requisitos
 
@@ -31,20 +31,20 @@ uv sync --locked
 ## Arrancar en local
 
 ```bash
-uv run fastapi dev app/main.py
-```
-
-El servidor queda en [http://127.0.0.1:8000](http://127.0.0.1:8000). Equivalente con Uvicorn:
-
-```bash
 uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Host y puerto **no** se leen del `.env`: `fastapi dev` y Uvicorn usan 127.0.0.1:8000 por defecto. Cámbialos con las flags del comando:
+El servidor queda en [http://127.0.0.1:8000](http://127.0.0.1:8000). En desarrollo, equivalente con `fastapi-cli`:
 
 ```bash
-uv run fastapi dev app/main.py --host 127.0.0.1 --port 8001
+uv run fastapi dev app/main.py
+```
+
+Host y puerto **no** se leen del `.env`: Uvicorn y `fastapi dev` usan 127.0.0.1:8000 por defecto. Cámbialos con las flags del comando:
+
+```bash
 uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
+uv run fastapi dev app/main.py --host 127.0.0.1 --port 8001
 ```
 
 Comprueba que responde:
@@ -69,6 +69,8 @@ Desde la raíz del repositorio:
 
 ```bash
 uv run pytest
+uv run pytest -W error
+APP_ENV=prod uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
@@ -80,34 +82,99 @@ Para formatear el código:
 uv run ruff format .
 ```
 
-## Convenciones de API
+## Convenciones de la API
 
-Decisión del 24 de octubre de 2026 (issue #1):
+`create_app()` monta un `api_router` con prefijo **`/api/v1`**. El contrato de salud es `GET /api/v1/health`; `GET /health` en la raíz es un alias de liveness.
 
-- Prefijo global `/api/v1`, aplicado por el router. Las rutas de las issues son relativas a él (`GET /health` → `GET /api/v1/health`).
-- Claves JSON en camelCase.
-- Paginación con `page` / `pageSize`.
-- `PUT` para las actualizaciones, salvo el `PATCH` de autoguardado de la issue #62.
-- Códigos de error y valores de enum en snake_case (`invalid_score`, `in_progress`, `multichoice_single`). La regla camelCase aplica solo a las claves.
+### JSON camelCase, códigos snake_case
 
-El formato de errores, la paginación y CORS se implementarán en la issue de convenciones. `GET /api/v1/health/db` se añadirá cuando exista la base de datos.
+Las claves JSON van en camelCase (`pageSize`, `displayName`, `refreshToken`). Los **códigos de error** y los **valores de enum** se quedan en snake_case (`not_found`, `invalid_score`, `in_progress`, `multichoice_single`).
+
+### Errores
+
+Sobre de [aserec/estudioMusica-webapp#391](https://github.com/aserec/estudioMusica-webapp/issues/391), visto en `src/app/api/notices/route.ts`, la ruta de grading de cuestionarios y `docs/sheet-music-evaluation-contract.md` (commit `4817bcd`):
+
+```json
+{ "error": "validation", "code": "invalid_score", "fields": ["displayName"] }
+```
+
+`error` es el slug. `code` y `fields` (lista de **nombres** de campo, no objetos) son opcionales. La validación de Pydantic responde **400** `{error:"validation", fields:[...]}` y no el 422 de FastAPI. `fields` se sanitiza (máximo 20 claves, 64 caracteres, identificadores seguros).
+
+Manejadores de dominio: `AccessDenied` → 403 `{error:"forbidden"}`, `NotFound` → 404 `{error:"not_found"}`, `Validation` → 400 `{error:"validation", fields}`, `PayloadTooLarge` → 413 `{error:"payload_too_large"}`.
+
+`HTTPException(400, "texto")` responde `{error:"bad_request"}`. Un `HTTPException(422)` se convierte en 400. El `message` de un `detail` dict **no** se expone salvo `EXPOSE_ERRORS=true`.
+
+`message` **no** está en el contrato del frontend. Es opt-in (`EXPOSE_ERRORS=false` por defecto) y no depende de `APP_ENV`. Así un 500 en development no filtra `str(exc)` por accidente.
+
+Los 500 los captura un middleware ASGI **dentro** de CORS (`ApiErrorMiddleware`), no el `ServerErrorMiddleware` de Starlette: el sobre JSON lleva `X-API-Version` y cabeceras CORS.
+
+El cuerpo tiene un tope (`MAX_BODY_BYTES`, 1 MiB por defecto). Un `Content-Length` por encima se rechaza **antes** de leer; en chunked se cuentan los bytes. Ambos casos responden 413 `{error:"payload_too_large"}`.
+
+### Paginación
+
+Query params `page` (por defecto 1, máximo `PAGINATION_MAX_PAGE` = 10000) y `pageSize` (por defecto 20, máximo `PAGINATION_MAX_PAGE_SIZE` = 100). El tope de `page` evita un `OFFSET` enorme. Los límites viven en settings; no se duplican con `Query(le=...)`. Respuesta:
+
+```json
+{
+  "items": [],
+  "page": 1,
+  "pageSize": 20,
+  "total": 0
+}
+```
+
+La #391 pedía `?limit=&cursor=` → `{ items, nextCursor }`. Se mantiene `page`/`pageSize` porque la decisión del 24-10 en [#1](https://github.com/aserec/estudiomusica-backend/issues/1) es más reciente. Los listados de negocio pueden añadir claves extra (`unreadCount`, `categories`) junto a esos metadatos.
+
+### Actualizaciones
+
+**PUT** para actualizar. El único **PATCH** previsto es el autoguardado de intentos de cuestionario (`PATCH /courses/:courseId/quiz/:activityId/attempts/:attemptId`).
+
+### CORS
+
+Orígenes en `CORS_ORIGINS` (por defecto `http://localhost:3000` y `http://127.0.0.1:3000`, el Next.js local). Credenciales activadas. Métodos `GET,POST,PUT,PATCH,DELETE,OPTIONS`. Se expone `X-API-Version`. Con credenciales, `CORS_ORIGINS='*'` o un origen que no sea `http(s)://` se rechazan al arrancar. Un preflight de origen desconocido responde 403 JSON (`{error:"forbidden"}`), no `text/plain`.
+
+### OpenAPI y versión
+
+`GET /docs` y `GET /openapi.json` publican el contrato (prefijo `/api/v1`, sobre de error, `page`/`pageSize`). La versión de API es **v1**: va en la URL y en la cabecera `X-API-Version: v1` (también en 4xx/5xx). `info.version` es la del paquete (`version()`; si no está instalado, `0.0.0`). OpenAPI no fija `servers` a 127.0.0.1:8000. El 422/`HTTPValidationError` de FastAPI se sustituye por un 400 `ErrorResponse`.
+
+### Rutas de demostración
+
+`/api/v1/examples` no es un recurso de negocio: sirve para ejercitar paginación, validación, PUT y 404. **No se monta en `production`** salvo `ENABLE_EXAMPLE_ROUTES=true`. Las issues de cursos, usuarios, etc. reutilizarán los mismos esquemas.
+
+## De dónde salen estas decisiones
+
+La issue de convenciones es [aserec/estudioMusica-webapp#391](https://github.com/aserec/estudioMusica-webapp/issues/391) (texto completo; commit del frontend `4817bcd`). Donde choca con las **decisiones del 24-10-2026** en [aserec/estudiomusica-backend#1](https://github.com/aserec/estudiomusica-backend/issues/1), priman las de #1.
+
+| Decisión | Dónde se vio |
+| --- | --- |
+| Sobre `{ error, code?, fields?: string[] }`; slugs `unauthorized` / `invalid` / `not_found` / `forbidden`; 413 | #391 y `src/app/api/notices/route.ts`, grading de cuestionarios, `docs/sheet-music-evaluation-contract.md` |
+| Validación Pydantic → 400 `{error:"validation", fields:[...]}` | Criterio de aceptación de la #391 |
+| `AccessDenied`→403, `NotFound`→404, `Validation`→400, `PayloadTooLarge`→413 | Alcance de la #391 |
+| Prefijo `/api/v1`, OpenAPI publicado, CORS con credenciales | #391 |
+| Claves JSON camelCase; códigos/enums snake_case; PUT salvo PATCH de #62 | Comentarios de @aserec en #1 (24 oct 2026) |
+| Paginación `page`/`pageSize` + `total` (no `limit`/`cursor`) | #1 (24 oct 2026), más reciente que la #391 (`?limit=&cursor=` → `{items, nextCursor}`) |
 
 ## Estructura de carpetas
 
 ```text
 app/
-  main.py            # Factoría FastAPI y punto de entrada ASGI
+  main.py            # Factoría FastAPI: CORS, handlers, api_router /api/v1
+  middleware.py      # ASGI: versión, 500, tope de cuerpo, preflight rechazado
+  errors.py          # Sobre de error y handlers (validación, HTTP)
+  exceptions.py      # AccessDenied, NotFound, Validation, PayloadTooLarge
   config/            # Ajustes por variables de entorno (pydantic-settings)
-  routers/           # Rutas HTTP (GET /health, montada bajo /api/v1)
-  schemas/           # Modelos Pydantic de request/response
-  services/          # Lógica de aplicación (vacío salvo el chequeo de salud)
+  routers/           # Rutas HTTP (health y examples; health también en la raíz)
+  schemas/           # Modelos Pydantic (camelCase, errores, paginación)
+  services/          # Lógica de aplicación (salud + lista fija de examples)
   models/            # Reservado para modelos SQLAlchemy
-tests/               # Tests de pytest
+tests/               # Tests de pytest por convención
 .env.example         # Plantilla de variables de entorno
 pyproject.toml       # Dependencias, ruff, pytest y mypy
 uv.lock              # Lockfile reproducible de uv
 .python-version      # Python 3.15 (desarrollo)
 ```
+
+`GET /api/v1/health/db` se añadirá cuando exista la base de datos.
 
 ## Versiones fijadas
 
