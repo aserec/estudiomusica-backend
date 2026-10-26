@@ -1908,6 +1908,111 @@ def test_asyncpg_url_translates_sslmode(tmp_path: Any) -> None:
     assert mode_args.get("ssl") == "verify-full"
 
 
+_ALTA_MIX_QUERIES = (
+    "ssl=disable&sslmode=verify-full",
+    "ssl=require&sslmode=disable&sslrootcert=/tmp/r92-ca.pem",
+    "sslmode=disable&sslmode=verify-full",
+)
+
+
+def _exercise_ssl_path(
+    path: str, url: str, monkeypatch: pytest.MonkeyPatch
+) -> str:
+    """App (Settings+engine), alembic-url y alembic-env. No importa env.py."""
+
+    from alembic import command
+
+    from app.config import get_settings
+    from app.config.settings import Settings
+    from app.db import asyncpg_url_and_connect_args
+    from app.migrations.config import make_alembic_config
+
+    if path == "app":
+        settings = Settings(app_env="development", database_url=url)
+        return asyncpg_url_and_connect_args(settings.resolved_database_url())[0]
+    if path == "alembic-url":
+        command.current(make_alembic_config(url))
+        return url
+    if path == "alembic-env":
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.setenv("DATABASE_URL", url)
+        get_settings.cache_clear()
+        try:
+            command.current(make_alembic_config())
+        finally:
+            get_settings.cache_clear()
+        return url
+    raise AssertionError(f"camino SSL desconocido: {path}")
+
+
+def _ssl_path_error(path: str, url: str, monkeypatch: pytest.MonkeyPatch) -> Exception:
+    try:
+        _exercise_ssl_path(path, url, monkeypatch)
+    except Exception as exc:
+        return exc
+    raise AssertionError(f"{path} no falló: {url}")
+
+
+@pytest.mark.parametrize("path", ["app", "alembic-url", "alembic-env"])
+@pytest.mark.parametrize("query", _ALTA_MIX_QUERIES)
+def test_conflicting_ssl_query_rejected_on_all_paths(
+    path: str, query: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MEDIA-1: ssl+sslmode o sslmode repetido no conectan en claro."""
+
+    from app.db import _SSL_CONFLICT_MSG
+
+    url = f"postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?{query}"
+    caught = _ssl_path_error(path, url, monkeypatch)
+    messages = [str(caught)]
+    current: BaseException | None = caught
+    while current is not None:
+        messages.append(str(current))
+        current = current.__cause__ or current.__context__
+    assert any("mezclar ni repetir" in item for item in messages), messages
+    assert any(_SSL_CONFLICT_MSG in item for item in messages), messages
+
+
+@pytest.mark.parametrize("path", ["app", "alembic-url", "alembic-env"])
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    (("SSL=disable", "disable"), ("Ssl=verify-full", "verify-full")),
+)
+def test_uppercase_ssl_query_key_normalizes(
+    path: str, query: str, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``?SSL=`` / ``?Ssl=`` se normalizan a ``ssl=`` (no TypeError de asyncpg)."""
+
+    from sqlalchemy.engine.url import make_url
+
+    from app.config.settings import Settings
+    from app.db import asyncpg_url_and_connect_args, normalize_asyncpg_ssl_url
+
+    url = f"postgresql+asyncpg://u:p@127.0.0.1:1/db_test?{query}"
+    settings = Settings(app_env="development", database_url=url)
+    resolved = settings.resolved_database_url()
+    parsed = make_url(resolved)
+    query_map = {str(key): value for key, value in (parsed.query or {}).items()}
+    assert "SSL" not in query_map
+    assert "Ssl" not in query_map
+    assert query_map.get("ssl") == expected
+    assert make_url(normalize_asyncpg_ssl_url(url)).query.get("ssl") == expected
+    if path == "app":
+        engine_url, args = asyncpg_url_and_connect_args(resolved)
+        assert "SSL=" not in engine_url
+        assert "Ssl=" not in engine_url
+        if expected == "disable":
+            assert args.get("ssl") is False
+        else:
+            assert args.get("ssl") == expected
+        return
+    caught = _ssl_path_error(path, url, monkeypatch)
+    text = f"{type(caught).__name__}: {caught}".lower()
+    assert "ssl" not in type(caught).__name__.lower()
+    assert "unexpected keyword" not in text
+    assert "argument 'ssl'" not in text
+
+
 @pytest.mark.db
 @pytest.mark.timeout(60)
 def test_sslmode_verify_full_without_rootcert_rejects_untrusted(

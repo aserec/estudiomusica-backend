@@ -13,7 +13,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import get_settings
-from app.db import asyncpg_url_and_connect_args
+from app.db import asyncpg_url_and_connect_args, normalize_asyncpg_ssl_url
 from app.migrations.autogen import include_name, process_revision_directives
 from app.models import Base
 
@@ -34,9 +34,9 @@ def get_database_url() -> str:
 
     configured = (config.get_main_option("sqlalchemy.url") or "").strip()
     if configured:
-        return configured
+        return normalize_asyncpg_ssl_url(configured)
     get_settings.cache_clear()
-    return get_settings().resolved_database_url()
+    return normalize_asyncpg_ssl_url(get_settings().resolved_database_url())
 
 
 def run_migrations_offline() -> None:

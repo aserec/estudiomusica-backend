@@ -5,6 +5,7 @@ from __future__ import annotations
 import ssl
 from collections.abc import AsyncIterator, Mapping
 from typing import Annotated, Any
+from urllib.parse import parse_qsl, urlparse
 
 from fastapi import Depends
 from sqlalchemy import event
@@ -33,6 +34,8 @@ _ADAPTER_CALLABLE_KEYS = frozenset(
 )
 _SSLROOTCERT_KEYS = frozenset({"sslrootcert"})
 _SSLMODE_KEYS = frozenset({"sslmode"})
+_SSL_QUERY_KEYS = frozenset({"ssl", "sslmode"})
+_SSL_CONFLICT_MSG = "DATABASE_URL no puede mezclar ni repetir ssl y sslmode"
 
 
 _QUERY_SECRET_KEYS = frozenset({"password", "sslpassword"})
@@ -92,6 +95,54 @@ def _query_scalar(query: Mapping[Any, Any], *keys: str) -> str | None:
     return None
 
 
+def normalize_asyncpg_ssl_url(url: str) -> str:
+    """Una sola regla para ``ssl`` / ``sslmode`` (Settings, engine, Alembic).
+
+    Rechaza ``ssl`` y ``sslmode`` juntos y las claves repetidas.
+    ``SSL`` / ``Ssl`` pasan a ``ssl``. ``sslmode`` pasa a ``ssl``.
+    """
+
+    try:
+        parsed = make_url(url)
+    except Exception:
+        return url
+    pairs = parse_qsl(urlparse(url).query, keep_blank_values=True)
+    counts: dict[str, int] = {}
+    for key, _value in pairs:
+        lowered = key.lower()
+        if lowered in _SSL_QUERY_KEYS:
+            counts[lowered] = counts.get(lowered, 0) + 1
+    if counts.get("ssl", 0) > 1 or counts.get("sslmode", 0) > 1:
+        raise ValueError(_SSL_CONFLICT_MSG)
+    if "ssl" in counts and "sslmode" in counts:
+        raise ValueError(_SSL_CONFLICT_MSG)
+    query = dict(parsed.query or {})
+    ssl_value: object | None = None
+    new_query: dict[Any, Any] = {}
+    for key, value in query.items():
+        lowered = str(key).lower()
+        if lowered in _SSL_QUERY_KEYS:
+            if isinstance(value, (list, tuple)):
+                if len(value) > 1:
+                    raise ValueError(_SSL_CONFLICT_MSG)
+                ssl_value = value[0] if value else None
+            else:
+                ssl_value = value
+            continue
+        new_query[key] = value
+    if ssl_value is not None:
+        new_query["ssl"] = str(ssl_value)
+    return parsed.set(query=new_query).render_as_string(hide_password=False)
+
+
+def _reject_conflicting_ssl_opts(opts: Mapping[str, Any]) -> None:
+    lowered = [str(key).lower() for key in opts]
+    if lowered.count("ssl") > 1 or lowered.count("sslmode") > 1:
+        raise ValueError(_SSL_CONFLICT_MSG)
+    if "ssl" in lowered and "sslmode" in lowered:
+        raise ValueError(_SSL_CONFLICT_MSG)
+
+
 def ssl_context_from_rootcert(cafile: str, ssl_value: object = None) -> ssl.SSLContext:
     """``sslrootcert`` → ``SSLContext`` con ``cafile`` (asyncpg no tiene ese kwarg).
 
@@ -143,6 +194,7 @@ def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
     salvo si ``ssl`` es ``disable`` / ``false`` (misma regla que el engine).
     """
 
+    _reject_conflicting_ssl_opts(opts)
     kwargs: dict[str, Any] = {}
     sslmode = None
     sslrootcert = None
@@ -156,6 +208,9 @@ def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
             continue
         if lowered == "sslmode":
             sslmode = value
+            continue
+        if lowered == "ssl":
+            kwargs["ssl"] = value
             continue
         if lowered in _SSLROOTCERT_KEYS:
             if isinstance(value, (list, tuple)):
@@ -177,6 +232,7 @@ def asyncpg_url_and_connect_args(raw: str) -> tuple[str, dict[str, Any]]:
     El SSL lo decide ``asyncpg_ssl_connect_arg``, la misma función que la sonda.
     """
 
+    raw = normalize_asyncpg_ssl_url(raw)
     parsed = make_url(raw)
     query = dict(parsed.query or {})
     prepared = prepare_asyncpg_connect_kwargs(query)

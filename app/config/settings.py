@@ -93,7 +93,9 @@ class Settings(BaseSettings):
         return self.app_env != "production"
 
     def resolved_database_url(self) -> str:
-        return _normalize_sslmode(self.database_url.get_secret_value())
+        from app.db import normalize_asyncpg_ssl_url
+
+        return normalize_asyncpg_ssl_url(self.database_url.get_secret_value())
 
     @model_validator(mode="after")
     def reject_unsafe_cors(self) -> Self:
@@ -207,22 +209,11 @@ class Settings(BaseSettings):
 
 
 def _normalize_sslmode(url: str) -> str:
-    """``sslmode=`` de la query pasa a ``ssl=`` (asyncpg no acepta sslmode)."""
+    """Delegado al normalizador único de ``app.db`` (Settings, engine, Alembic)."""
 
-    try:
-        parsed = make_url(url)
-    except Exception:
-        return url
-    sslmode = Settings._query_value(parsed, "sslmode")
-    if sslmode is None:
-        return url
-    query = {
-        key: value
-        for key, value in (parsed.query or {}).items()
-        if str(key).lower() != "sslmode"
-    }
-    query["ssl"] = sslmode
-    return parsed.set(query=query).render_as_string(hide_password=False)
+    from app.db import normalize_asyncpg_ssl_url
+
+    return normalize_asyncpg_ssl_url(url)
 
 
 _DSN_FIELD_NAMES = frozenset({"database_url", "DATABASE_URL"})
