@@ -751,6 +751,36 @@ def test_orphan_with_held_life_lock_is_not_dropped(
         _cleanup_named_roles(require_postgres, [orphan])
 
 
+_CHILD_LOCK_NO_RELEASE = """
+import os
+import sys
+
+from app.db import RedactedDsn
+from tests.conftest import _SessionAdvisoryLock
+
+lock = _SessionAdvisoryLock(
+    RedactedDsn(os.environ["TEST_DATABASE_URL"]),
+    "em_prod_tests_1_l6_norelease",
+)
+ok = lock.start()
+sys.exit(0 if ok else 2)
+"""
+
+
+@pytest.mark.db
+@pytest.mark.timeout(15)
+def test_lock_without_release_does_not_hang_interpreter(
+    require_postgres: RedactedDsn,
+    tmp_path: Path,
+) -> None:
+    """L6: sin stop()/release el intérprete no puede quedarse colgado al salir."""
+
+    result = _run_child_script(
+        tmp_path, require_postgres, _CHILD_LOCK_NO_RELEASE, "unused"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 _CHILD_SAME_PID_DROP = """
 import asyncio
 import os
