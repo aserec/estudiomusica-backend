@@ -197,6 +197,56 @@ def test_health_db_ok_body_has_only_db_key(
     assert response.json()["db"] == "ok"
 
 
+def _skip_if_hostssl_rejects_plain(require_postgres: RedactedDsn) -> None:
+    """El proxy habla en claro; un servidor ``hostssl`` rechaza ``ssl=disable``."""
+
+    import threading
+
+    import asyncpg
+    from sqlalchemy.engine.url import make_url
+
+    parsed = make_url(require_postgres.secret())
+
+    async def probe() -> None:
+        connection = await asyncpg.connect(
+            host=parsed.host,
+            port=parsed.port or 5432,
+            user=parsed.username,
+            password=parsed.password,
+            database=parsed.database,
+            ssl=False,
+            timeout=2,
+        )
+        await connection.close()
+
+    error: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            asyncio.run(probe())
+        except BaseException as exc:
+            error.append(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(timeout=5)
+    if not error:
+        return
+    exc = error[0]
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    if (
+        "invalidauthorizationspecification" in name
+        or "ssl" in text
+        or "pg_hba" in text
+    ):
+        pytest.skip(
+            "el servidor rechaza ssl=disable (hostssl); "
+            "el proxy de freeze habla en claro"
+        )
+    raise exc
+
+
 def _frozen_url(require_postgres: RedactedDsn, port: int) -> str:
     """DSN hacia el proxy en claro.
 
@@ -206,6 +256,7 @@ def _frozen_url(require_postgres: RedactedDsn, port: int) -> str:
 
     from sqlalchemy.engine.url import make_url
 
+    _skip_if_hostssl_rejects_plain(require_postgres)
     parsed = make_url(require_postgres.secret())
     query = {
         str(key): value
@@ -723,8 +774,13 @@ def test_health_connect_kwargs_follow_app_dialect(
         health_service.set_health_database_url(cache_url)
         cache_kwargs = health_service._connect_kwargs()
         assert "prepared_statement_cache_size" not in cache_kwargs
-        allowed = set(health_service._asyncpg_connect_params())
-        assert set(cache_kwargs) <= allowed
+        assert "prepared_statement_name_func" not in cache_kwargs
+        assert "async_creator_fn" not in cache_kwargs
+
+        extra_url = _dsn_with_query(base, password="x", foo="bar")
+        health_service.set_health_database_url(extra_url)
+        extra_kwargs = health_service._connect_kwargs()
+        assert extra_kwargs.get("foo") == "bar"
     finally:
         health_service.clear_health_probe()
         get_settings.cache_clear()
@@ -753,6 +809,34 @@ async def test_health_pgbouncer_cache_size_query_is_up(
         result = await health_service.check_database()
         assert result.db == "ok"
         assert "prepared_statement_cache_size" not in health_service._connect_kwargs()
+    finally:
+        health_service.clear_health_probe()
+        get_settings.cache_clear()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_health_unknown_query_key_is_down(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """``?foo=bar`` tumba la sonda igual que la app (TypeError en connect)."""
+
+    from app.config import get_settings
+    from app.db import clear_engine
+
+    url = _dsn_with_query(require_postgres.secret(), foo="bar")
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("DB_HEALTH_CACHE_TTL", "0")
+    get_settings.cache_clear()
+    clear_engine()
+    health_service.clear_health_probe()
+    health_service.set_health_database_url(url)
+    try:
+        result = await health_service.check_database()
+        assert result.db == "down"
+        assert health_service._connect_kwargs().get("foo") == "bar"
     finally:
         health_service.clear_health_probe()
         get_settings.cache_clear()
@@ -1004,7 +1088,7 @@ async def test_health_cache_ttl_reuses_result(
     require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
-    """P12: dentro del TTL no se abre otra conexión."""
+    """Dentro del TTL no se abre otra conexión."""
 
     import asyncpg
 
@@ -1040,7 +1124,7 @@ async def test_health_cache_ttl_reuses_result(
 
 
 def test_health_cache_ttl_helpers() -> None:
-    """P11/P12/SF2/SF14/SF15/SF16: caduca en el TTL, 0 no cachea."""
+    """``_cached`` caduca en el TTL y con TTL 0 no reutiliza."""
 
     ok = DatabaseHealthResponse(db="ok")
     down = DatabaseHealthResponse(db="down")
@@ -1102,7 +1186,7 @@ async def test_health_cache_expires_and_failure_stays_down(
 async def test_health_cache_ttl_zero_does_not_reuse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """P11: TTL 0 abre una conexión por petición."""
+    """TTL 0 abre una conexión por petición."""
 
     import asyncpg
 
@@ -1131,3 +1215,104 @@ async def test_health_cache_ttl_zero_does_not_reuse(
     finally:
         health_service.clear_health_probe()
         get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_set_health_database_url_invalidates_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SF14: cambiar la URL de la sonda dentro del TTL abre otra conexión."""
+
+    import asyncpg
+
+    from app.config import get_settings
+    from app.db import clear_engine
+
+    connects = {"n": 0}
+
+    async def _flip(*_args: object, **_kwargs: object) -> object:
+        connects["n"] += 1
+        if connects["n"] == 1:
+            raise OSError("first-down")
+        raise OSError("second-down")
+
+    _probe_settings(
+        monkeypatch, "postgresql+asyncpg://probe:secret@127.0.0.1:1/probe_db"
+    )
+    monkeypatch.setenv("DB_HEALTH_CACHE_TTL", "30")
+    monkeypatch.setattr(asyncpg, "connect", _flip)
+    get_settings.cache_clear()
+    clear_engine()
+    health_service.clear_health_probe()
+    health_service.set_health_database_url(
+        "postgresql+asyncpg://probe:secret@127.0.0.1:1/first_db"
+    )
+    try:
+        first = await health_service.check_database()
+        assert first.db == "down"
+        assert connects["n"] == 1
+        health_service.set_health_database_url(
+            "postgresql+asyncpg://probe:secret@127.0.0.1:1/second_db"
+        )
+        second = await health_service.check_database()
+        assert second.db == "down"
+        assert connects["n"] == 2
+    finally:
+        health_service.clear_health_probe()
+        get_settings.cache_clear()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_dispose_engine_clears_hung_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """P12: ``dispose_engine`` abandona la sonda colgada y su backend."""
+
+    import asyncpg
+    from sqlalchemy.engine.url import make_url
+
+    from app.config import get_settings
+    from app.db import clear_engine, dispose_engine
+    from tests.pg_freeze_proxy import FreezeAfterLoginProxy
+
+    _skip_if_hostssl_rejects_plain(require_postgres)
+    parsed = make_url(require_postgres.secret())
+    proxy = FreezeAfterLoginProxy(
+        parsed.host or "127.0.0.1", parsed.port or 5432, freeze_on="select_1"
+    )
+    await proxy.start()
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    monkeypatch.setenv("DB_HEALTH_TIMEOUT", "2")
+    monkeypatch.setenv("DB_HEALTH_CACHE_TTL", "0")
+    get_settings.cache_clear()
+    clear_engine()
+    health_service.set_health_database_url(_frozen_url(require_postgres, proxy.port))
+    original = asyncpg.connect
+    baseline = await _count_health_backends(require_postgres, connect=original)
+    task = asyncio.create_task(health_service.check_database())
+    try:
+        for _ in range(50):
+            if health_service._held_raw is not None or (
+                health_service._probe_task is not None
+                and not health_service._probe_task.done()
+            ):
+                break
+            await asyncio.sleep(0.02)
+        assert health_service._probe_task is not None
+        await dispose_engine()
+        assert health_service._probe_task is None
+        assert health_service._held_raw is None
+        leftover = await _count_health_backends(require_postgres, connect=original)
+        assert leftover == baseline
+    finally:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        health_service.clear_health_probe()
+        get_settings.cache_clear()
+        with suppress(Exception):
+            await asyncio.wait_for(proxy.aclose(), timeout=2)

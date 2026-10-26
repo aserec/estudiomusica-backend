@@ -1,6 +1,5 @@
 import asyncio
 import contextlib
-import inspect
 import logging
 from typing import Any
 
@@ -15,7 +14,13 @@ logger = logging.getLogger(__name__)
 
 # Tope para el close ordenado. Un close congelado se termina.
 HEALTH_TIMEOUT_MARGIN_SECONDS = 0.4
-_ASYNCPG_CONNECT_PARAMS = frozenset(inspect.signature(asyncpg.connect).parameters)
+_DIALECT_ONLY_CONNECT_KEYS = frozenset(
+    {
+        "prepared_statement_cache_size",
+        "prepared_statement_name_func",
+        "async_creator_fn",
+    }
+)
 
 _cleanup_tasks: set[asyncio.Task[Any]] = set()
 _health_url_override: str | None = None
@@ -103,21 +108,19 @@ def _abandon_probe(
     _track_cleanup(task)
 
 
-def _asyncpg_connect_params() -> frozenset[str]:
-    """Firma de ``asyncpg.connect`` al importar (los tests la parchean)."""
-
-    return _ASYNCPG_CONNECT_PARAMS
-
-
 def _connect_kwargs() -> dict[str, Any]:
-    """Parámetros de asyncpg: los del dialecto que ``connect`` acepta."""
+    """Parámetros del dialecto menos las claves que solo consume SQLAlchemy."""
 
     from app.db import get_engine
 
     settings = get_settings()
     url = make_url(_health_dsn())
     _args, opts = get_engine().sync_engine.dialect.create_connect_args(url)
-    kwargs = dict(opts)
+    kwargs = {
+        key: value
+        for key, value in dict(opts).items()
+        if key not in _DIALECT_ONLY_CONNECT_KEYS
+    }
     sslmode = None
     for key in list(kwargs):
         if str(key).lower() == "sslmode":
@@ -129,8 +132,7 @@ def _connect_kwargs() -> dict[str, Any]:
     server_settings = dict(kwargs.get("server_settings") or {})
     server_settings["application_name"] = HEALTH_APPLICATION_NAME
     kwargs["server_settings"] = server_settings
-    allowed = _asyncpg_connect_params()
-    return {key: value for key, value in kwargs.items() if key in allowed}
+    return kwargs
 
 
 def clear_health_probe() -> None:
@@ -202,8 +204,8 @@ async def _run_probe() -> DatabaseHealthResponse:
 async def check_database() -> DatabaseHealthResponse:
     """Una sonda asyncpg a la vez; las peticiones concurrentes esperan.
 
-    El DSN se traduce con el dialecto de la app (solo kwargs que
-    ``asyncpg.connect`` acepta). El resultado se cachea
+    El DSN se traduce con el dialecto de la app (sin claves propias
+    del adaptador). El resultado se cachea
     ``db_health_cache_ttl`` segundos. Cada waiter tiene su propio
     ``db_health_timeout`` sobre ``asyncio.shield`` de la tarea compartida.
     La sonda en sí también vive como máximo ``db_health_timeout``.
