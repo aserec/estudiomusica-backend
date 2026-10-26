@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -692,14 +693,12 @@ def test_validation_error_redacts_dsn_without_scheme(
 def test_validation_error_fallback_does_not_blame_database_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.config import settings as settings_mod
-
     real = ValidationError.from_exception_data
     state = {"n": 0}
 
     def flaky(
         title: str,
-        line_errors: list[object],
+        line_errors: list[Any],
         hide_input: bool = False,
     ) -> ValidationError:
         state["n"] += 1
@@ -707,7 +706,7 @@ def test_validation_error_fallback_does_not_blame_database_url(
             raise RuntimeError("cannot rebuild")
         return real(title, line_errors, hide_input=hide_input)
 
-    monkeypatch.setattr(settings_mod.ValidationError, "from_exception_data", flaky)
+    monkeypatch.setattr(ValidationError, "from_exception_data", flaky)
     with pytest.raises(ValidationError) as caught:
         Settings(
             app_env="production",
@@ -744,7 +743,7 @@ def test_validation_error_errors_and_json_redact_auth_secret_type_error() -> Non
         Settings(
             app_env="development",
             database_url=_DEFAULT_DEV_DSN,
-            auth_secret=leaked,  # type: ignore[arg-type]
+            auth_secret=leaked,
             _env_file=None,
         )
     dumped = caught.value.json()
