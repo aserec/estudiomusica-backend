@@ -1769,6 +1769,40 @@ async def test_search_nfd_email_matches_nfc_stored(
     assert listed.json()["items"][0]["email"] == stored
 
 
+@pytest.mark.parametrize("domain", ("ﬁle-r95.es", "ｒ９５.es"))
+async def test_search_idna_domain_matches_login_typed(
+    session_client: Any, db_session: AsyncSession, domain: str
+) -> None:
+    marker = uuid.uuid4().hex[:8]
+    typed = f"{marker}@{domain}"
+    created = await _signup(session_client, email=typed, name=f"Idna {marker}")
+    stored = created["response"].json()["user"]["email"]
+    assert stored == _email_term(typed)
+    assert stored != typed
+    session_client.cookies.clear()
+
+    teacher = await _signup(session_client, email=unique_email("tea-idna"))
+    await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, teacher["id"], _COURSE, CourseRole.TEACHER)
+    found = await session_client.get("/api/v1/users/search", params={"q": typed})
+    assert found.status_code == 200
+    items = found.json()["items"]
+    assert len(items) == 1
+    assert items[0]["email"] == stored
+    assert items[0]["id"] == str(created["id"])
+
+    session_client.cookies.clear()
+    await _signup_role(
+        session_client, db_session, SystemRole.ADMIN, prefix="idna-admin"
+    )
+    admin_search = await session_client.get("/api/v1/users/search", params={"q": typed})
+    assert admin_search.status_code == 200
+    assert admin_search.json()["items"][0]["email"] == stored
+    listed = await session_client.get("/api/v1/admin/users", params={"query": typed})
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["email"] == stored
+
+
 async def test_teacher_exact_email_query_uses_unique_index(
     require_postgres: RedactedDsn,
     migrated_test_database: None,

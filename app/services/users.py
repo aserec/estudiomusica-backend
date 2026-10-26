@@ -4,6 +4,7 @@ import unicodedata
 from datetime import UTC, datetime
 from uuid import UUID
 
+from pydantic import EmailStr, TypeAdapter, ValidationError
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +22,6 @@ from app.models import AuthSession, CourseMembership, User
 from app.models.user import SystemRole
 from app.permissions.matrix import has_site_permission
 from app.permissions.types import CourseRole, Permission
-from app.schemas.auth import normalize_email
 from app.schemas.pagination import Paginated, PaginationQuery
 from app.schemas.users import (
     AdminUserIdentityUpdate,
@@ -36,6 +36,7 @@ _SEARCH_Q_MAX = 200
 _TEACHER_Q_MIN_EFFECTIVE = 3
 _TEACHER_SEARCH_CAP = 10
 _LIKE_WILDCARDS = frozenset("%_")
+_EMAIL_ADAPTER = TypeAdapter(EmailStr)
 
 
 def to_admin_user_view(user: User) -> AdminUserView:
@@ -83,12 +84,16 @@ def _name_match(term: str) -> ColumnElement[bool]:
 
 
 def _email_term(term: str) -> str:
-    """Misma normalización que el login (``strip`` + ``lower`` + NFC)."""
+    """Misma normalización que el login: ``EmailStr`` + ``lower`` (IDNA).
 
-    normalized = normalize_email(term)
-    if not isinstance(normalized, str):
-        return term
-    return unicodedata.normalize("NFC", normalized)
+    Si el término no es un email válido, ``strip`` + ``lower`` + NFC.
+    """
+
+    try:
+        validated = _EMAIL_ADAPTER.validate_python(term)
+    except ValidationError:
+        return unicodedata.normalize("NFC", term.strip().lower())
+    return str(validated).lower()
 
 
 def _visible_user_filters() -> list[ColumnElement[bool]]:
