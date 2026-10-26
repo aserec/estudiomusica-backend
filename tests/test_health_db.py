@@ -2206,6 +2206,37 @@ def test_blank_tls_keys_and_encoded_query_raise() -> None:
             normalize_asyncpg_ssl_url(encoded)
 
 
+def test_ssl_zero_with_sslrootcert_matches_ssl_zero(tmp_path: Any) -> None:
+    """NIT: ``ssl=0&sslrootcert=CA`` no envuelve en SSLContext (igual que ``ssl=0``)."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import (
+        asyncpg_ssl_connect_arg,
+        asyncpg_url_and_connect_args,
+        prepare_asyncpg_connect_kwargs,
+    )
+
+    cafile = _write_unrelated_ca(Path(str(tmp_path)) / "unit-ca.pem")
+    assert asyncpg_ssl_connect_arg("0", None) == "0"
+    assert asyncpg_ssl_connect_arg("0", str(cafile)) == "0"
+    bare = prepare_asyncpg_connect_kwargs({"host": "127.0.0.1", "ssl": "0"})
+    with_ca = prepare_asyncpg_connect_kwargs(
+        {"host": "127.0.0.1", "ssl": "0", "sslrootcert": str(cafile)}
+    )
+    assert bare.get("ssl") == with_ca.get("ssl") == "0"
+    assert not isinstance(with_ca.get("ssl"), ssl_mod.SSLContext)
+    _bare_url, bare_args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?ssl=0"
+    )
+    _ca_url, ca_args = asyncpg_url_and_connect_args(
+        f"postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?ssl=0&sslrootcert={cafile}"
+    )
+    assert bare_args.get("ssl") == ca_args.get("ssl") == "0"
+    assert not isinstance(ca_args.get("ssl"), ssl_mod.SSLContext)
+
+
 def test_normalize_accepts_unencoded_brackets_in_password() -> None:
     """``[`` / ``]`` en la contraseña siguen siendo un DSN válido."""
 

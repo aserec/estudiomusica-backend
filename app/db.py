@@ -37,6 +37,9 @@ _SSL_QUERY_KEYS = frozenset({"ssl", "sslmode"})
 _TLS_QUERY_KEYS = frozenset(
     {"ssl", "sslmode", "sslrootcert", "sslcert", "sslkey", "sslpassword"}
 )
+_SSL_CONTEXT_MODES = frozenset(
+    {"", "allow", "prefer", "require", "verify-ca", "verify-full", "true", "1"}
+)
 _SSL_CONFLICT_MSG = "DATABASE_URL no puede mezclar ni repetir ssl y sslmode"
 _SSL_BLANK_MSG = (
     "DATABASE_URL no admite claves TLS vacías ni una query percent-encoded entera"
@@ -238,6 +241,8 @@ def asyncpg_ssl_connect_arg(ssl_value: object, cafile: str | None) -> object:
     if _ssl_is_disabled(ssl_value):
         return False
     if cafile:
+        if isinstance(ssl_value, str) and ssl_value.lower() not in _SSL_CONTEXT_MODES:
+            return ssl_value
         return ssl_context_from_rootcert(cafile, ssl_value)
     return ssl_value
 
@@ -424,10 +429,7 @@ def route_allows_streaming_session(route: object) -> bool:
             return isinstance(returned, type) and issubclass(
                 returned, StarletteStreaming
             )
-    response_class = getattr(route, "response_class", None)
-    return isinstance(response_class, type) and issubclass(
-        response_class, StarletteStreaming
-    )
+    return False
 
 
 def _reject_non_streaming_route(request: Request) -> None:
@@ -458,21 +460,7 @@ def reject_invalid_streaming_session_routes(application: object) -> None:
         for item in _iter_route_dependants(dependant):
             if getattr(item, "call", None) is not _get_streaming_session:
                 continue
-            endpoint = getattr(route, "endpoint", None)
-            returned = None
-            if endpoint is not None:
-                try:
-                    returned = get_type_hints(endpoint).get("return")
-                except NameError, TypeError:
-                    returned = None
-            from starlette.responses import StreamingResponse as StarletteStreaming
-
-            if (
-                returned is not None
-                and get_origin(returned) is None
-                and isinstance(returned, type)
-                and issubclass(returned, StarletteStreaming)
-            ):
+            if route_allows_streaming_session(route):
                 continue
             raise RuntimeError(
                 "SessionStreamingDep solo en rutas que devuelven StreamingResponse"

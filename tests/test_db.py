@@ -443,6 +443,11 @@ def test_session_streaming_dep_rejects_missing_return_annotation() -> None:
         if getattr(item, "path", None) == "/api/v1/_test/m2f"
     )
     assert not route_allows_streaming_session(route)
+    from fastapi.testclient import TestClient
+
+    with TestClient(application) as client:
+        response = client.post("/api/v1/_test/m2f")
+        assert response.status_code >= 400
     with pytest.raises(RuntimeError, match="StreamingResponse"):
         reject_invalid_streaming_session_routes(application)
 
@@ -452,7 +457,11 @@ def test_session_streaming_dep_rejects_response_class_without_annotation() -> No
 
     from fastapi.responses import StreamingResponse
 
-    from app.db import SessionStreamingDep, reject_invalid_streaming_session_routes
+    from app.db import (
+        SessionStreamingDep,
+        reject_invalid_streaming_session_routes,
+        route_allows_streaming_session,
+    )
     from app.main import create_app
 
     application = create_app()
@@ -466,6 +475,12 @@ def test_session_streaming_dep_rejects_response_class_without_annotation() -> No
         del session
         return {"label": "m2f"}
 
+    route = next(
+        item
+        for item in application.routes
+        if getattr(item, "path", None) == "/api/v1/_test/m2f-sr"
+    )
+    assert not route_allows_streaming_session(route)
     with pytest.raises(RuntimeError, match="StreamingResponse"):
         reject_invalid_streaming_session_routes(application)
 
