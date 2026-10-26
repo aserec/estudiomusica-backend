@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import unicodedata
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -175,6 +176,18 @@ async def test_signup_validation_errors(session_client: Any) -> None:
     assert user["firstName"] == "é" * 41
     assert user["lastName"] == ""
     assert user["name"] == "é" * 41
+
+    nfd_both = "e\u0301" * 50 + " " + "e\u0301" * 50
+    assert len(nfd_both) == 201
+    assert len(unicodedata.normalize("NFC", nfd_both)) == 101
+    both_ok = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(name=nfd_both, email=unique_email("nfc-both")),
+    )
+    assert both_ok.status_code == 201, both_ok.text
+    both_user = both_ok.json()["user"]
+    assert both_user["firstName"] == "é" * 50
+    assert both_user["lastName"] == "é" * 50
 
 
 def test_signup_request_normalizes_email() -> None:

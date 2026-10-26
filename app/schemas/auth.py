@@ -13,8 +13,14 @@ def normalize_email(value: object) -> object:
     return value
 
 
+# El tope semántico es 80+80 tras NFC (split_display_name). El crudo es
+# generoso para no rechazar NFD que cabe (50×``é`` + espacio + 50×``é``
+# son 201 crudos y 101 NFC).
+_SIGNUP_NAME_RAW_MAX = 1601
+
+
 class SignUpRequest(APIModel):
-    name: str = Field(min_length=1, max_length=161)
+    name: str = Field(min_length=1, max_length=_SIGNUP_NAME_RAW_MAX)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128, repr=False)
 
