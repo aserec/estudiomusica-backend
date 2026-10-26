@@ -211,7 +211,7 @@ def _inspector_connect_kwargs(dsn: RedactedDsn) -> dict[str, Any]:
         make_url(dsn.secret())
     )
     prepared = prepare_asyncpg_connect_kwargs(opts)
-    kwargs = {
+    kwargs: dict[str, Any] = {
         key: prepared[key]
         for key in ("host", "port", "user", "password", "database", "ssl")
         if key in prepared and prepared[key] is not None
@@ -1567,9 +1567,7 @@ def test_hostssl_helper_does_not_skip_on_plain_host(
     try:
         _skip_if_hostssl_rejects_plain(require_postgres)
     except pytest.skip.Exception as skipped:
-        pytest.skip(
-            f"{skipped}; K1 en hostssl real exige REQUIRE_FREEZE_TESTS"
-        )
+        pytest.skip(f"{skipped}; K1 en hostssl real exige REQUIRE_FREEZE_TESTS")
 
 
 def test_hostssl_helper_reraises_other_errors(
@@ -1836,8 +1834,8 @@ def test_ssl_require_rootcert_rejects_hostname_mismatch(
 ) -> None:
     """T1/T11: hostname distinto con ``ssl=require`` + CA no conecta."""
 
-    import ssl as ssl_mod
     import socket as sock
+    import ssl as ssl_mod
 
     from sqlalchemy.engine.url import make_url
 
