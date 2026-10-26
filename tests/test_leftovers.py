@@ -1,6 +1,9 @@
 """L1/L2: las limpiezas de leftovers de conftest son comportamentales."""
 
 import asyncio
+import os
+import subprocess
+import sys
 
 import pytest
 from sqlalchemy import text
@@ -9,6 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.db import RedactedDsn
 from tests.conftest import (
+    ROOT,
     _drop_leftover_test_databases,
     _drop_leftover_test_tables,
     drop_database_if_exists,
@@ -83,16 +87,74 @@ def test_drop_leftover_test_databases_removes_known_names(
     drop_database_if_exists(leftover)
 
 
-def test_migrated_fixture_calls_leftover_cleanup() -> None:
-    """L1/L2: el fixture de sesión sí llama a los drops (no un no-op)."""
+@pytest.mark.db
+def test_migrated_fixture_teardown_drops_planted_leftover(
+    require_postgres: RedactedDsn,
+) -> None:
+    """L1b: el teardown de sesión borra leftovers plantados durante el test."""
 
-    import inspect
+    probe = ROOT / "tests" / "_probe_plant_session_leftover.py"
+    probe.write_text(
+        "import asyncio\n"
+        "import pytest\n"
+        "from sqlalchemy import text\n"
+        "from sqlalchemy.ext.asyncio import create_async_engine\n"
+        "\n"
+        "from tests.conftest import resolve_test_database_url\n"
+        "\n"
+        "@pytest.mark.db\n"
+        "def test_plant_leftover(migrated_test_database):\n"
+        "    async def plant() -> None:\n"
+        "        engine = create_async_engine(resolve_test_database_url())\n"
+        "        try:\n"
+        "            async with engine.begin() as connection:\n"
+        "                await connection.execute(\n"
+        "                    text(\n"
+        "                        'CREATE TABLE IF NOT EXISTS "
+        "session_probe_leak (id integer)'\n"
+        "                    )\n"
+        "                )\n"
+        "        finally:\n"
+        "            await engine.dispose()\n"
+        "    asyncio.run(plant())\n"
+    )
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env["TEST_DATABASE_URL"] = require_postgres.secret()
+    env["REQUIRE_POSTGRES"] = "1"
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-p",
+                "no:cacheprovider",
+                "-q",
+                str(probe.relative_to(ROOT)),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+            check=False,
+        )
+    finally:
+        probe.unlink(missing_ok=True)
+    assert result.returncode == 0, result.stdout + result.stderr
 
-    from tests.conftest import migrated_test_database
+    async def leftover() -> object:
+        engine = create_async_engine(require_postgres.secret())
+        try:
+            async with engine.connect() as connection:
+                return await connection.scalar(
+                    text("SELECT to_regclass('public.session_probe_leak')")
+                )
+        finally:
+            await engine.dispose()
 
-    source = inspect.getsource(migrated_test_database)
-    assert source.count("_drop_leftover_test_tables") >= 2
-    assert source.count("_drop_leftover_test_databases") >= 2
+    assert asyncio.run(leftover()) is None
 
 
 def test_own_schema_names_includes_public() -> None:

@@ -102,16 +102,24 @@ def derive_alembic_database_url(test_url: str) -> str:
 
 
 def resolve_test_database_url() -> str:
-    return require_test_database_url(
-        os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
+    from app.config.settings import _normalize_sslmode
+
+    return _normalize_sslmode(
+        require_test_database_url(
+            os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
+        )
     )
 
 
 def resolve_alembic_database_url() -> str:
+    from app.config.settings import _normalize_sslmode
+
     raw = os.environ.get("ALEMBIC_TEST_DATABASE_URL")
     if raw is None:
         raw = derive_alembic_database_url(resolve_test_database_url())
-    return require_test_database_url(raw, env_name="ALEMBIC_TEST_DATABASE_URL")
+    return _normalize_sslmode(
+        require_test_database_url(raw, env_name="ALEMBIC_TEST_DATABASE_URL")
+    )
 
 
 def alembic_config(database_url: str | RedactedDsn) -> Config:
@@ -474,6 +482,28 @@ def _as_redacted_dsn(database_url: str | RedactedDsn) -> RedactedDsn:
     return RedactedDsn(database_url)
 
 
+def _redacted_exception_detail(exc: BaseException, dsn: RedactedDsn) -> str:
+    """Texto de la causa sin la contraseña del DSN."""
+
+    from urllib.parse import quote
+
+    text = str(exc)
+    secret = dsn.secret()
+    if secret:
+        text = text.replace(secret, str(dsn))
+    try:
+        password = make_url(secret).password
+    except Exception:
+        password = None
+    if password:
+        text = text.replace(password, "***")
+        text = text.replace(quote(password, safe=""), "***")
+    text = " ".join(text.split())
+    if len(text) > 240:
+        text = text[:240] + "…"
+    return text
+
+
 def ensure_database_exists(database_url: str | RedactedDsn) -> None:
     """Crea la base conectando a la BD de mantenimiento ``postgres``."""
 
@@ -555,21 +585,25 @@ def drop_database_if_exists(database_url: str | RedactedDsn) -> None:
     try:
         asyncio.run(drop())
     except Exception as exc:
+        detail = _redacted_exception_detail(exc, dsn)
         if _is_connection_error(exc):
             raise ConnectionError(
-                f"No se pudo borrar la base de test ({type(exc).__name__}). {dsn}"
-            ) from exc
+                f"No se pudo borrar la base de test "
+                f"({type(exc).__name__}: {detail}). {dsn}"
+            ) from None
         raise RuntimeError(
-            f"No se pudo borrar la base de test ({type(exc).__name__}). {dsn}"
-        ) from exc
+            f"No se pudo borrar la base de test ({type(exc).__name__}: {detail}). {dsn}"
+        ) from None
 
 
 def _ping_postgres(database_url: str | RedactedDsn) -> None:
+    from app.config.settings import _normalize_sslmode
+
     dsn = _as_redacted_dsn(database_url)
 
     async def ping() -> None:
         engine = create_async_engine(
-            dsn.secret(),
+            _normalize_sslmode(dsn.secret()),
             pool_pre_ping=False,
             connect_args={
                 "timeout": _PING_CONNECT_TIMEOUT,
