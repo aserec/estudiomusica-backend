@@ -186,8 +186,21 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
             assert schema.get("type") in {"string", "integer"}
     assert create_props["name"].get("minLength") == 1
     assert create_props["name"].get("maxLength") == 120
+    assert "NFC" in str(create_props["name"].get("description", ""))
     assert update_props["name"].get("minLength") == 1
     assert update_props["name"].get("maxLength") == 120
+    assert "NFC" in str(update_props["name"].get("description", ""))
+
+    def _int_bound(schema: dict[str, Any], key: str) -> object:
+        if key in schema:
+            return schema[key]
+        for item in schema.get("anyOf", []):
+            if isinstance(item, dict) and item.get("type") == "integer":
+                return item.get(key)
+        return None
+
+    assert _int_bound(create_props["sortOrder"], "minimum") == 0
+    assert _int_bound(update_props["sortOrder"], "minimum") == 0
 
     def _string_max_length(schema: dict[str, Any]) -> int | None:
         if schema.get("type") == "string":
@@ -202,3 +215,8 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
 
     assert _string_max_length(create_props["description"]) == 2000
     assert _string_max_length(update_props["description"]) == 2000
+    assert "NFC" in str(create_props["description"].get("description", "")) or any(
+        "NFC" in str(item.get("description", ""))
+        for item in create_props["description"].get("anyOf", [])
+        if isinstance(item, dict)
+    )

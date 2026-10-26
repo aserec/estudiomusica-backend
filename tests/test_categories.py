@@ -1,10 +1,14 @@
 import asyncio
+import shutil
+import subprocess
 import unicodedata
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
 from sqlalchemy import delete, select, text
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +17,7 @@ from app.models import Category
 from app.models.user import SystemRole
 from app.permissions.types import Permission
 from app.schemas.categories import (
+    _CF_STRIP_CHARS,
     CategoryCreate,
     CategoryUpdate,
     category_name_key,
@@ -369,6 +374,15 @@ async def test_single_level_rejects_grandchildren_and_non_root_parent(
     assert self_parent.json()["error"] == "validation"
     assert "parentId" in self_parent.json()["fields"]
 
+    leaf_self = await session_client.put(
+        f"{_ADMIN}/{child['id']}",
+        json={"parentId": child["id"]},
+    )
+    assert leaf_self.status_code == 400
+    assert leaf_self.json()["error"] == "validation"
+    assert "parentId" in leaf_self.json()["fields"]
+    assert leaf_self.status_code != 500
+
     parent_under_child = await session_client.put(
         f"{_ADMIN}/{root['id']}",
         json={"parentId": child["id"]},
@@ -472,16 +486,25 @@ async def test_student_can_list_but_not_create(
     assert admin["email"] not in denied.text
 
 
-_LEGITIMATE_CF_NAMES: tuple[str, ...] = (
-    "👨‍👩‍👧",
-    "🌈\ufe0f",
-    "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f",
-    "שלום\u200f",
-    "سلام\u061c",
-    "क्‍ष",
-    "എന്‍റെ",
-    "ব্যক্তি",
-    "می‌خواهم",
+_FLAG_ENGLAND = "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f"
+_FLAG_SCOTLAND = (
+    "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
+)
+_FLAG_WALES = "\U0001f3f4\U000e0067\U000e0062\U000e0077\U000e006c\U000e0073\U000e007f"
+_BLACK_FLAG = "\U0001f3f4"
+_DEVANAGARI_ZWJ = "क्\u200dष"
+_DEVANAGARI_ZWNJ = "क्\u200cष"
+
+_LEGITIMATE_CF_NAMES: tuple[tuple[str, str], ...] = (
+    ("👨‍👩‍👧", "👨‍👩‍👧"),
+    ("🌈\ufe0f", "🌈\ufe0f"),
+    (_FLAG_ENGLAND, _FLAG_ENGLAND),
+    ("שלום\u200f", "שלום"),
+    ("سلام\u061c", "سلام"),
+    ("क्‍ष", "क्‍ष"),
+    ("എന്‍റെ", "എന്‍റെ"),
+    ("ব্যক্তি", "ব্যক্তি"),
+    ("می‌خواهم", "می‌خواهم"),
 )
 
 
@@ -496,10 +519,11 @@ def test_normalize_category_name_nfc_spaces_and_invisibles() -> None:
     assert normalize_category_name("Piano\u200bI") == "Piano\u200bI"
     assert normalize_category_name("Piano\u200dI") == "Piano\u200dI"
     assert normalize_category_name("\u200bPiano\u200b") == "Piano"
-    for name in _LEGITIMATE_CF_NAMES:
-        got = normalize_category_name(name)
-        assert got
-        assert any(unicodedata.category(char)[0] not in {"C", "Z", "M"} for char in got)
+    for raw, expected in _LEGITIMATE_CF_NAMES:
+        assert normalize_category_name(raw) == expected
+    assert normalize_category_name(f"  {_FLAG_ENGLAND}  ") == _FLAG_ENGLAND
+    assert normalize_category_name(f"{_FLAG_ENGLAND} piano") == f"{_FLAG_ENGLAND} piano"
+    assert normalize_category_name(f"piano {_FLAG_ENGLAND}") == f"piano {_FLAG_ENGLAND}"
     with pytest.raises(ValueError):
         normalize_category_name("\u200b")
     with pytest.raises(ValueError):
@@ -522,7 +546,26 @@ def test_normalize_category_name_nfc_spaces_and_invisibles() -> None:
         normalize_category_description("a\udc00")
     with pytest.raises(ValueError):
         normalize_category_description("ok\x00")
+    with pytest.raises(ValueError):
+        normalize_category_name("ok\ufffc")
+    with pytest.raises(ValueError):
+        normalize_category_name("abc\u202e")
+    with pytest.raises(ValueError):
+        normalize_category_name("abc\u2066def")
+    smuggled = "Hola" + "".join(chr(0xE0000 + ord(char)) for char in "IGNORA")
+    with pytest.raises(ValueError):
+        normalize_category_name(smuggled)
+    with pytest.raises(ValueError):
+        normalize_category_name("x\U000e0001")
+    with pytest.raises(ValueError):
+        normalize_category_name(f"{_BLACK_FLAG}\U000e007f")
     assert category_name_key("a\u200bb") == category_name_key("ab")
+    assert category_name_key("  a  b  ") == "a b"
+    assert category_name_key("a\u200b  b") == "a b"
+    assert category_name_key("\u200ba\u200b") == "a"
+    assert category_name_key(_FLAG_ENGLAND) != category_name_key(_FLAG_SCOTLAND)
+    assert category_name_key(_FLAG_ENGLAND) != category_name_key(_BLACK_FLAG)
+    assert category_name_key(_DEVANAGARI_ZWJ) != category_name_key(_DEVANAGARI_ZWNJ)
     assert len("x" * 121) == 121
     with pytest.raises(ValueError):
         normalize_category_name("x" * 121)
@@ -573,12 +616,33 @@ async def test_name_rejects_zero_width_and_nul(
         assert response.json()["error"] == "validation"
         assert "name" in response.json()["fields"]
 
-    for name in _LEGITIMATE_CF_NAMES:
-        created = await _create(session_client, name=name)
-        assert created["name"] == normalize_category_name(name)
+    for raw, expected in _LEGITIMATE_CF_NAMES:
+        created = await _create(session_client, name=raw)
+        assert created["name"] == expected
 
     inside = await _create(session_client, name="Piano\u200bI")
     assert inside["name"] == "Piano\u200bI"
+
+    scotland = await _create(session_client, name=_FLAG_SCOTLAND)
+    assert scotland["name"] == _FLAG_SCOTLAND
+    wales = await _create(session_client, name=_FLAG_WALES)
+    assert wales["name"] == _FLAG_WALES
+    black = await _create(session_client, name=_BLACK_FLAG)
+    assert black["name"] == _BLACK_FLAG
+    zwnj = await _create(session_client, name=_DEVANAGARI_ZWNJ)
+    assert zwnj["name"] == _DEVANAGARI_ZWNJ
+
+    for payload in (
+        "ok\ufffc",
+        "abc\u202e",
+        "abc\u2066x",
+        "Hola" + "".join(chr(0xE0000 + ord(char)) for char in "IGNORA"),
+        f"{_BLACK_FLAG}\U000e007f",
+    ):
+        response = await session_client.post(_ADMIN, json={"name": payload})
+        assert response.status_code == 400
+        assert response.json()["error"] == "validation"
+        assert "name" in response.json()["fields"]
 
 
 async def test_nfd_length_and_nfc_expansion(
@@ -589,12 +653,30 @@ async def test_nfd_length_and_nfc_expansion(
     created = await _create(session_client, name=nfd_hundred)
     assert created["name"] == "é" * 100
 
+    nfd_max = unicodedata.normalize("NFD", "é" * 120)
+    assert len(nfd_max) > 120
+    created_nfd_max = await _create(session_client, name=nfd_max)
+    assert created_nfd_max["name"] == "é" * 120
+
+    padded = await _create(session_client, name=f"  {'z' * 120}  ")
+    assert padded["name"] == "z" * 120
+
+    nfd_over = unicodedata.normalize("NFD", "é" * 121)
+    too_nfd = await session_client.post(_ADMIN, json={"name": nfd_over})
+    assert too_nfd.status_code in {400, 422}
+    assert too_nfd.status_code != 500
+
     huge = await session_client.post(
         _ADMIN,
         json={"name": "Ok", "description": "\u0344" * 2000},
     )
     assert huge.status_code in {400, 422}
     assert huge.status_code != 500
+
+    desc_nfd = unicodedata.normalize("NFD", "é" * 2000)
+    assert len(desc_nfd) > 2000
+    with_desc = await _create(session_client, name="DescNfc", description=desc_nfd)
+    assert with_desc["description"] == "é" * 2000
 
     too_long = await session_client.post(_ADMIN, json={"name": "n" * 121})
     assert too_long.status_code in {400, 422}
@@ -860,13 +942,65 @@ async def test_unique_indexes_filter_deleted_and_name_is_citext(
         )
     )
     assert key_udt == "citext"
-    samples = ("ab", "a\u200bb", "می‌خواهم", "👨‍👩‍👧", "Café")
+    samples = (
+        "ab",
+        "a\u200bb",
+        "  a  b  ",
+        "\u200ba\u200b",
+        "می‌خواهم",
+        "👨‍👩‍👧",
+        "Café",
+        _FLAG_ENGLAND,
+        _FLAG_SCOTLAND,
+        _DEVANAGARI_ZWJ,
+        _DEVANAGARI_ZWNJ,
+        f"  {_FLAG_ENGLAND}  ",
+    )
     for sample in samples:
         db_key = await db_session.scalar(
-            text("SELECT category_name_key(CAST(:n AS citext))"),
+            text("SELECT public.category_name_key(CAST(:n AS public.citext))"),
             {"n": sample},
         )
         assert db_key == category_name_key(sample)
+    for char in _CF_STRIP_CHARS:
+        for sample in (f"a{char} b", f"{char} a", f"a {char}"):
+            db_key = await db_session.scalar(
+                text("SELECT public.category_name_key(CAST(:n AS public.citext))"),
+                {"n": sample},
+            )
+            assert db_key == category_name_key(sample)
+    meta = await db_session.execute(
+        text(
+            "SELECT p.provolatile, p.proisstrict, p.proconfig "
+            "FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'public' AND p.proname = 'category_name_key'"
+        )
+    )
+    row = meta.one()
+    assert row.provolatile in {"i", b"i"}
+    assert bool(row.proisstrict) is True
+    config = row.proconfig or []
+    assert any("search_path" in item and "pg_catalog" in item for item in config)
+
+
+async def test_category_name_key_works_with_empty_search_path(
+    db_session: AsyncSession,
+) -> None:
+    await db_session.execute(text("SET LOCAL search_path = ''"))
+    key = await db_session.scalar(
+        text("SELECT public.category_name_key(CAST(:n AS public.citext))"),
+        {"n": "a\u200bb"},
+    )
+    assert key == category_name_key("ab")
+    inserted = await db_session.scalar(
+        text(
+            "INSERT INTO public.categories (name, sort_order) "
+            "VALUES ('SearchPathProbe', 0) "
+            "RETURNING public.categories.name_key"
+        )
+    )
+    assert inserted == category_name_key("SearchPathProbe")
 
 
 def test_tree_lock_is_transactional_not_session(
@@ -897,14 +1031,23 @@ def test_tree_lock_is_transactional_not_session(
             await session.scalar(
                 text(
                     "SELECT count(*) FROM pg_locks "
-                    "WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
-                )
+                    "WHERE locktype = 'advisory' "
+                    "AND classid = :classid AND objid = :objid"
+                ),
+                {"classid": classid, "objid": objid},
             )
             or 0
         )
 
+    async def assert_lock_released(factory: Any) -> None:
+        async with factory() as probe:
+            assert await leftover_locks(probe) == 0
+            assert await try_tree_lock(probe) is True
+            await probe.rollback()
+            assert await leftover_locks(probe) == 0
+
     async def run() -> None:
-        engine = create_async_engine(dsn.secret(), pool_size=2, max_overflow=0)
+        engine = create_async_engine(dsn.secret(), pool_size=4, max_overflow=0)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory() as setup:
@@ -929,6 +1072,14 @@ def test_tree_lock_is_transactional_not_session(
                     CategoryCreate(name=f"lockn-{suffix}", parent_id=parent.id),
                 )
                 tracked.append(born.id)
+                async with factory() as probe:
+                    assert await try_tree_lock(probe) is False
+                    other_key = await probe.scalar(
+                        text("SELECT pg_try_advisory_xact_lock(:classid, :objid)"),
+                        {"classid": classid, "objid": 99},
+                    )
+                    assert bool(other_key) is True
+                    await probe.rollback()
 
                 async def blocked_create() -> str:
                     async with factory() as waiter:
@@ -944,13 +1095,13 @@ def test_tree_lock_is_transactional_not_session(
                 await asyncio.sleep(0.4)
                 assert pending.done() is False
                 await holder.commit()
-                assert await leftover_locks(holder) == 0
                 assert await pending == "ok"
+                await assert_lock_released(factory)
 
             async with factory() as free:
                 assert await try_tree_lock(free) is True
                 await free.rollback()
-                assert await leftover_locks(free) == 0
+                await assert_lock_released(factory)
 
             async with factory() as holder:
                 await update_category(
@@ -960,7 +1111,7 @@ def test_tree_lock_is_transactional_not_session(
                     assert await try_tree_lock(waiter) is False
                     await waiter.rollback()
                 await holder.commit()
-                assert await leftover_locks(holder) == 0
+                await assert_lock_released(factory)
 
             async with factory() as holder:
                 await delete_category(holder, child.id)
@@ -968,7 +1119,7 @@ def test_tree_lock_is_transactional_not_session(
                     assert await try_tree_lock(waiter) is False
                     await waiter.rollback()
                 await holder.commit()
-                assert await leftover_locks(holder) == 0
+                await assert_lock_released(factory)
         finally:
             await engine.dispose()
 
@@ -1029,6 +1180,292 @@ def test_duplicate_create_keeps_session_usable(
         asyncio.run(run())
     finally:
         asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+def test_duplicate_update_maps_integrity_error(
+    require_postgres: Any,
+    migrated_test_database: None,
+) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret(), pool_size=1, max_overflow=0)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                first = await create_category(
+                    session, CategoryCreate(name=f"DupUpd-{suffix}")
+                )
+                second = await create_category(
+                    session, CategoryCreate(name=f"DupUpd2-{suffix}")
+                )
+                tracked.extend((first.id, second.id))
+
+                async def never_taken(*_args: object, **_kwargs: object) -> bool:
+                    return False
+
+                from app.services import categories as categories_svc
+
+                original = categories_svc._name_taken
+                categories_svc._name_taken = never_taken
+                try:
+                    with pytest.raises(CategoryNameTaken):
+                        await update_category(
+                            session,
+                            second.id,
+                            CategoryUpdate(name=f"DupUpd-{suffix}"),
+                        )
+                finally:
+                    categories_svc._name_taken = original
+                await session.rollback()
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+def test_delete_takes_tree_lock_before_row(
+    require_postgres: Any,
+    migrated_test_database: None,
+) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+    classid, objid = _CATEGORY_TREE_LOCK_KEY
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret(), pool_size=3, max_overflow=0)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as setup:
+                row = await create_category(
+                    setup, CategoryCreate(name=f"dellock-{suffix}")
+                )
+                tracked.append(row.id)
+                await setup.commit()
+
+            async with factory() as holder:
+                locked = await holder.scalar(
+                    text("SELECT id FROM categories WHERE id = :id FOR UPDATE"),
+                    {"id": row.id},
+                )
+                assert locked == row.id
+
+                async def do_delete() -> str:
+                    async with factory() as waiter:
+                        await delete_category(waiter, row.id)
+                        await waiter.commit()
+                    return "ok"
+
+                pending = asyncio.create_task(do_delete())
+                await asyncio.sleep(0.4)
+                assert pending.done() is False
+                async with factory() as probe:
+                    got = await probe.scalar(
+                        text("SELECT pg_try_advisory_xact_lock(:classid, :objid)"),
+                        {"classid": classid, "objid": objid},
+                    )
+                    assert bool(got) is False
+                    await probe.rollback()
+                await holder.rollback()
+                assert await pending == "ok"
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+def test_update_locks_row_before_name_check(
+    require_postgres: Any,
+    migrated_test_database: None,
+) -> None:
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+    from app.services import categories as categories_svc
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_name_taken(*_args: object, **_kwargs: object) -> bool:
+        started.set()
+        await release.wait()
+        return False
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret(), pool_size=2, max_overflow=0)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        original = categories_svc._name_taken
+        try:
+            async with factory() as setup:
+                row = await create_category(
+                    setup, CategoryCreate(name=f"forupd-{suffix}")
+                )
+                tracked.append(row.id)
+                await setup.commit()
+
+            categories_svc._name_taken = blocked_name_taken
+            async with factory() as holder:
+
+                async def do_update() -> None:
+                    await update_category(
+                        holder, row.id, CategoryUpdate(name=f"forupd2-{suffix}")
+                    )
+                    await holder.commit()
+
+                pending = asyncio.create_task(do_update())
+                await asyncio.wait_for(started.wait(), timeout=2)
+                async with factory() as probe:
+                    with pytest.raises(DBAPIError):
+                        await probe.execute(
+                            text(
+                                "SELECT id FROM categories "
+                                "WHERE id = :id FOR UPDATE NOWAIT"
+                            ),
+                            {"id": row.id},
+                        )
+                    await probe.rollback()
+                release.set()
+                await pending
+        finally:
+            categories_svc._name_taken = original
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+def test_category_dump_restore_preserves_rows(
+    require_postgres: Any,
+    migrated_test_database: None,
+) -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.db import RedactedDsn
+    from tests.conftest import drop_database_if_exists, ensure_database_exists
+
+    if shutil.which("pg_dump") is None or shutil.which("pg_restore") is None:
+        pytest.skip("pg_dump/pg_restore no está en PATH")
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    parsed = make_url(dsn.secret())
+    libpq = parsed.set(drivername="postgresql").render_as_string(hide_password=False)
+    suffix = uuid.uuid4().hex[:8]
+    marker = f"DumpRestore-{suffix}"
+
+    async def seed() -> str:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                row_id = await connection.scalar(
+                    text(
+                        "INSERT INTO categories (name, description, sort_order) "
+                        "VALUES (:name, :description, 3) RETURNING id"
+                    ),
+                    {"name": marker, "description": "pg_dump"},
+                )
+                return str(row_id)
+        finally:
+            await engine.dispose()
+
+    row_id = asyncio.run(seed())
+    dump_dir = Path("/tmp") / f"cat-dump-{suffix}"
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    custom = dump_dir / "categories.dump"
+    plain = dump_dir / "categories.sql"
+    try:
+        subprocess.run(
+            ["pg_dump", "--no-owner", "--no-acl", "-Fc", "-f", str(custom), libpq],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["pg_dump", "--no-owner", "--no-acl", "-f", str(plain), libpq],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        def restore_custom(dest: str) -> None:
+            subprocess.run(
+                ["pg_restore", "--no-owner", "--no-acl", "-d", dest, str(custom)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        def restore_plain(dest: str) -> None:
+            subprocess.run(
+                ["psql", "-v", "ON_ERROR_STOP=1", "-d", dest, "-f", str(plain)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        for kind, dest_name, restore in (
+            ("custom", "name_key_restore_custom_test", restore_custom),
+            ("plain", "name_key_restore_plain_test", restore_plain),
+        ):
+            dest = RedactedDsn(
+                parsed.set(database=dest_name).render_as_string(hide_password=False)
+            )
+            drop_database_if_exists(dest)
+            ensure_database_exists(dest)
+            dest_libpq = parsed.set(
+                drivername="postgresql", database=dest_name
+            ).render_as_string(hide_password=False)
+            restore(dest_libpq)
+
+            async def restored(url: str) -> tuple[object, object]:
+                engine = create_async_engine(url)
+                try:
+                    async with engine.connect() as connection:
+                        name = await connection.scalar(
+                            text("SELECT name FROM categories WHERE id = :id"),
+                            {"id": row_id},
+                        )
+                        key = await connection.scalar(
+                            text("SELECT name_key FROM categories WHERE id = :id"),
+                            {"id": row_id},
+                        )
+                        return name, key
+                finally:
+                    await engine.dispose()
+
+            name, key = asyncio.run(restored(dest.secret()))
+            assert name == marker, kind
+            assert key == category_name_key(marker), kind
+            drop_database_if_exists(dest)
+    finally:
+        shutil.rmtree(dump_dir, ignore_errors=True)
+        asyncio.run(_cleanup_ids(dsn.secret(), [uuid.UUID(row_id)]))
 
 
 def test_cleanup_production_deletes_prod_categories(

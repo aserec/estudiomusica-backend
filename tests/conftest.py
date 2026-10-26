@@ -937,6 +937,8 @@ _LEFTOVER_TEST_DATABASES = (
     "autogen_hook_probe_test",
     "schema_autogen_probe_test",
     "autogen_empty_probe_test",
+    "name_key_restore_custom_test",
+    "name_key_restore_plain_test",
 )
 
 

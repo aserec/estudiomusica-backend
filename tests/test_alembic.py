@@ -78,7 +78,10 @@ def _wipe_alembic_schema(dsn: RedactedDsn) -> None:
                 await connection.execute(text('DROP TABLE IF EXISTS "order" CASCADE'))
                 await connection.execute(text("DROP SCHEMA IF EXISTS catalogo CASCADE"))
                 await connection.execute(
-                    text("DROP FUNCTION IF EXISTS category_name_key(citext)")
+                    text(
+                        "DROP FUNCTION IF EXISTS "
+                        "public.category_name_key(public.citext)"
+                    )
                 )
                 await connection.execute(text("DROP EXTENSION IF EXISTS citext"))
                 await connection.execute(
@@ -371,6 +374,22 @@ def test_0002_downgrade_keeps_preinstalled_citext(
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
 
 
+def test_0004_does_not_import_app_schemas() -> None:
+    from app.schemas.categories import _CF_STRIP_CHARS
+
+    path = ROOT / "app/migrations/versions/0004_course_categories.py"
+    source = path.read_text(encoding="utf-8")
+    assert "app.schemas" not in source
+    tree = ast.parse(source)
+    found: str | None = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "_CF_STRIP_CHARS":
+                    found = ast.literal_eval(node.value)
+    assert found == _CF_STRIP_CHARS
+
+
 def test_alembic_revision_chain_is_linear() -> None:
     config = alembic_config(resolve_alembic_database_url())
     script = ScriptDirectory.from_config(config)
@@ -387,8 +406,22 @@ def test_alembic_revision_chain_is_linear() -> None:
         if isinstance(down, list | tuple):
             raise AssertionError(f"revisión ramificada: {down}")
         assert down == parent.revision
-    assert [revision.revision for revision in chain] == [
-        revision.revision for revision in script.walk_revisions()
+    followed: list[str] = []
+    current: str | None = heads[0]
+    while current is not None:
+        if current in followed:
+            raise AssertionError(f"ciclo en revisiones: {current}")
+        followed.append(current)
+        down = script.get_revision(current).down_revision
+        if isinstance(down, list | tuple):
+            raise AssertionError(f"revisión ramificada: {down}")
+        current = down
+    assert followed == [revision.revision for revision in chain]
+    assert followed == [
+        "0004_course_categories",
+        "0003_system_roles",
+        "0002_auth_users",
+        "0001_initial",
     ]
     assert len(chain) == len({revision.revision for revision in chain})
 
