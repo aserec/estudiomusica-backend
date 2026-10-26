@@ -342,7 +342,13 @@ async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
     row_fold = {row.id: key for row, key in zip(live, folded, strict=True)}
     taken: dict[tuple[UUID | None, str], Category] = {}
     for (parent_id, key), members in groups.items():
-        members.sort(key=lambda item: (item.sort_order, item.id))
+        members.sort(
+            key=lambda item: (
+                item.sort_order,
+                category_name_key(item.name) != item.name,
+                item.id,
+            )
+        )
         taken[(parent_id, key)] = members[0]
     for members in groups.values():
         if len(members) < 2:

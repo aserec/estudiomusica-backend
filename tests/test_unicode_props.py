@@ -1,4 +1,7 @@
+import hashlib
 import runpy
+import subprocess
+import sys
 from pathlib import Path
 
 from app.schemas.categories import category_name_key
@@ -70,3 +73,18 @@ def test_rgi_zwj_sequences_keep_every_zwj() -> None:
         if seq.count("\u200d") != category_name_key(seq).count("\u200d")
     ]
     assert lost == []
+
+
+def test_generate_unicode_tables_help_does_not_rewrite() -> None:
+    target = ROOT / "app" / "schemas" / "unicode_props.py"
+    before = hashlib.sha256(target.read_bytes()).hexdigest()
+    script = ROOT / "scripts" / "generate_unicode_tables.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "usage" in result.stdout.lower()
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == before

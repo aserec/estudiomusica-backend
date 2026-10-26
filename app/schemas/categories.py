@@ -99,16 +99,14 @@ def _joining_type(char: str) -> str:
     return "U"
 
 
-def _last_vs16(value: str, start: int, end: int, step: int) -> bool:
+def _last_vs16(value: str, start: int, end: int) -> bool:
     """El último selector de variación (VS15/VS16) manda: VS15 anula VS16."""
 
     last: str | None = None
-    cursor = start
-    while 0 <= cursor < len(value) and (end - cursor) * step > 0:
+    for cursor in range(max(start, 0), min(end, len(value))):
         char = value[cursor]
         if char in _VARIATION_SELECTORS:
             last = char
-        cursor += step
     return last == _VS16
 
 
@@ -117,9 +115,9 @@ def _skip_transparent(value: str, index: int, step: int) -> tuple[int, bool]:
     while 0 <= cursor < len(value) and _joining_type(value[cursor]) == "T":
         cursor += step
     if step < 0:
-        saw_vs16 = _last_vs16(value, cursor + 1, index, 1)
+        saw_vs16 = _last_vs16(value, cursor + 1, index)
     else:
-        saw_vs16 = _last_vs16(value, index + 1, cursor, 1)
+        saw_vs16 = _last_vs16(value, index + 1, cursor)
     return cursor, saw_vs16
 
 
@@ -145,8 +143,6 @@ def _keep_zwj(value: str, index: int) -> bool:
             return False
         left -= 1
         left_vs = True
-    if not 0 <= left < len(value):
-        return False
     if right + 1 < len(value) and 0x1F3FB <= ord(value[right + 1]) <= 0x1F3FF:
         if _in_ranges(ord(value[right]), EMOJI_MODIFIER_BASE):
             right_vs = True
@@ -154,7 +150,7 @@ def _keep_zwj(value: str, index: int) -> bool:
         trail = right + 1
         while trail < len(value) and value[trail] in _VARIATION_SELECTORS:
             trail += 1
-        right_vs = right_vs or _last_vs16(value, right + 1, trail, 1)
+        right_vs = right_vs or _last_vs16(value, right + 1, trail)
     return _is_emoji_zwj_side(value[left], left_vs) and _is_emoji_zwj_side(
         value[right], right_vs
     )

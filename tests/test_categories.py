@@ -1808,6 +1808,30 @@ def test_fix_locks_before_select() -> None:
     assert advisory_at < select_at
 
 
+async def test_fix_prefers_already_normalized_keeper(
+    db_session: AsyncSession,
+) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (id, name, name_key, sort_order) VALUES "
+            "(CAST(:dirty AS uuid), 'Vio\u200dla', 'dirty', 0), "
+            "(CAST(:clean AS uuid), 'Viola', 'clean', 0)"
+        ),
+        {
+            "dirty": "00000000-0000-4000-8000-000000000001",
+            "clean": "00000000-0000-4000-8000-000000000099",
+        },
+    )
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    names = {
+        row.name
+        for row in (await db_session.execute(text("SELECT name FROM categories"))).all()
+    }
+    assert "Viola" in names
+    assert "Vio\u200dla (dup 1)" in names
+
+
 async def test_fix_two_phase_swaps_keys(db_session: AsyncSession) -> None:
     await db_session.execute(
         text(

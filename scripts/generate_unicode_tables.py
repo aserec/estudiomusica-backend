@@ -9,6 +9,7 @@ emoji-zwj-sequences.txt, GraphemeBreakProperty.txt, IndicConjunctBreak.txt.
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 UCD_VERSION = "16.0.0"
@@ -169,10 +170,21 @@ def render(tables: dict[str, tuple[tuple[int, int], ...]]) -> str:
     return "\n".join(chunks)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Genera app/schemas/unicode_props.py desde la UCD 16.0.0 vendida."
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=OUT,
+        help="Fichero de salida (por defecto app/schemas/unicode_props.py)",
+    )
+    args = parser.parse_args(argv)
     tables = parse_tables(UCD_DIR)
-    OUT.write_text(render(tables), encoding="utf-8")
-    print(f"wrote {OUT.relative_to(ROOT)}")
+    args.output.write_text(render(tables), encoding="utf-8")
+    print(f"wrote {args.output}")
 
 
 if __name__ == "__main__":
