@@ -20,6 +20,7 @@ from app.models import AuthSession, CourseMembership, User
 from app.models.user import SystemRole
 from app.permissions.matrix import has_site_permission
 from app.permissions.types import CourseRole, Permission
+from app.schemas.auth import normalize_email
 from app.schemas.pagination import Paginated, PaginationQuery
 from app.schemas.users import (
     AdminUserIdentityUpdate,
@@ -80,8 +81,23 @@ def _name_match(term: str) -> ColumnElement[bool]:
     )
 
 
+def _email_term(term: str) -> str:
+    """Misma normalización que el login (``strip`` + ``lower``)."""
+
+    normalized = normalize_email(term)
+    return normalized if isinstance(normalized, str) else term
+
+
+def _visible_user_filters() -> list[ColumnElement[bool]]:
+    return [User.deleted_at.is_(None), User.suspended_at.is_(None)]
+
+
+def _exact_email_clause(email_term: str) -> ColumnElement[bool]:
+    return User.email == email_term
+
+
 def _text_match(term: str) -> ColumnElement[bool]:
-    pattern = f"%{_escape_like(term)}%"
+    pattern = f"%{_escape_like(_email_term(term))}%"
     return or_(
         User.email.ilike(pattern, escape="\\"),
         _name_match(term),
@@ -154,6 +170,7 @@ async def _lock_actor_and_target(
     target = by_id.get(target_id)
     if actor is None:
         raise AccessDenied()
+    _require_active_admin_actor(actor)
     if target is None or target.deleted_at is not None:
         raise NotFound()
     return actor, target
@@ -188,6 +205,7 @@ async def _lock_actor_target_and_active_admins(
     target = by_id.get(target_id)
     if actor is None:
         raise AccessDenied()
+    _require_active_admin_actor(actor)
     if target is None or target.deleted_at is not None:
         raise NotFound()
     return actor, target, rows
@@ -296,9 +314,9 @@ async def set_user_admin(
     actor_row, target, locked = await _lock_actor_target_and_active_admins(
         session, actor_id=actor.id, target_id=user_id
     )
+    _require_active_admin_actor(actor_row)
     if actor_row.id == target.id:
         raise CannotModifySelf()
-    _require_active_admin_actor(actor_row)
     already_admin = target.is_site_admin
     if already_admin and _is_active_admin(target):
         _ensure_admin_remains(locked, actor=actor_row, target=target)
@@ -330,9 +348,9 @@ async def set_user_suspended(
     actor_row, target, locked = await _lock_actor_target_and_active_admins(
         session, actor_id=actor.id, target_id=user_id
     )
+    _require_active_admin_actor(actor_row)
     if actor_row.id == target.id:
         raise CannotModifySelf()
-    _require_active_admin_actor(actor_row)
     if target.suspended_at is None and _is_active_admin(target):
         _ensure_admin_remains(locked, actor=actor_row, target=target)
     if target.suspended_at is None:
@@ -349,9 +367,9 @@ async def soft_delete_user(
     actor_row, target, locked = await _lock_actor_target_and_active_admins(
         session, actor_id=actor.id, target_id=user_id
     )
+    _require_active_admin_actor(actor_row)
     if actor_row.id == target.id:
         raise CannotModifySelf()
-    _require_active_admin_actor(actor_row)
     if _is_active_admin(target):
         _ensure_admin_remains(locked, actor=actor_row, target=target)
     target.deleted_at = datetime.now(UTC)
@@ -388,6 +406,7 @@ async def search_users(
     if not await actor_can_search_users(session, actor):
         raise AccessDenied()
     term = q.strip()
+    email_term = _email_term(term)
     if len(term) > _SEARCH_Q_MAX:
         raise Validation(fields=["q"])
     full_search = _actor_has_full_search(actor)
@@ -401,16 +420,9 @@ async def search_users(
     if not full_search and _effective_search_len(term) < _TEACHER_Q_MIN_EFFECTIVE:
         raise Validation(fields=["q"])
 
-    filters: list[ColumnElement[bool]] = [
-        User.deleted_at.is_(None),
-        User.suspended_at.is_(None),
-    ]
+    visible = _visible_user_filters()
     if full_search:
-        filters.append(_text_match(term))
-    else:
-        filters.append(or_(_name_match(term), User.email == term))
-
-    if full_search:
+        filters = [*visible, _text_match(term)]
         total = int(
             await session.scalar(select(func.count()).select_from(User).where(*filters))
             or 0
@@ -426,23 +438,35 @@ async def search_users(
             )
         )
     else:
-        fetched = list(
+        exact = await session.scalar(
+            select(User).where(*visible, _exact_email_clause(email_term))
+        )
+        name_rows = list(
             await session.scalars(
                 select(User)
-                .where(*filters)
+                .where(*visible, _name_match(term))
                 .order_by(User.created_at.desc(), User.id.desc())
                 .limit(_TEACHER_SEARCH_CAP)
             )
         )
+        by_id: dict[UUID, User] = {}
+        if exact is not None:
+            by_id[exact.id] = exact
+        for user in name_rows:
+            by_id.setdefault(user.id, user)
+        fetched = sorted(
+            by_id.values(),
+            key=lambda user: (user.created_at, user.id),
+            reverse=True,
+        )[:_TEACHER_SEARCH_CAP]
         total = len(fetched)
         offset = (pagination.page - 1) * pagination.page_size
         rows = fetched[offset : offset + pagination.page_size]
 
-    exact_email = term.lower()
     items = [
         to_search_hit(
             user,
-            include_email=full_search or user.email.lower() == exact_email,
+            include_email=full_search or _email_term(user.email) == email_term,
         )
         for user in rows
     ]

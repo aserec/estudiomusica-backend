@@ -11,15 +11,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.auth.tokens import encode_session_token
 from app.config import get_settings
 from app.db import RedactedDsn
-from app.exceptions import AccessDenied, LastAdmin
+from app.exceptions import AccessDenied, LastAdmin, NotFound
 from app.models import AuthSession, CourseMembership, SystemRoleRow, User
 from app.models.user import SystemRole
 from app.permissions.types import CourseRole
+from app.schemas.auth import normalize_email
 from app.schemas.users import AdminUserIdentityUpdate
 from app.services.roles import assign_system_role
 from app.services.users import (
     _active_admin_clause,
+    _email_term,
     _ensure_admin_remains,
+    _exact_email_clause,
     set_user_admin,
     set_user_suspended,
     soft_delete_user,
@@ -740,6 +743,64 @@ async def _has_waiting_lock(engine: Any) -> bool:
     return int(waiting or 0) > 0
 
 
+async def _held_lock_degrade_actor(
+    engine: Any,
+    *,
+    actor_id: UUID,
+    hold_ids: tuple[UUID, ...],
+    act: Any,
+) -> None:
+    """Carga el actor con session.get, otra conexión retiene FOR UPDATE y lo degrada."""
+
+    actor_loaded = asyncio.Event()
+    lock_ready = asyncio.Event()
+    actor_started = asyncio.Event()
+    act_task: asyncio.Task[None] | None = None
+
+    async def _hold() -> None:
+        await actor_loaded.wait()
+        async with AsyncSession(engine) as session, session.begin():
+            await session.scalars(
+                select(User)
+                .where(User.id.in_(hold_ids))
+                .order_by(User.id)
+                .with_for_update()
+            )
+            row = await session.get(User, actor_id)
+            assert row is not None
+            row.is_admin = False
+            row.system_role_id = SystemRole.ALUMNO
+            await session.flush()
+            lock_ready.set()
+            await actor_started.wait()
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while asyncio.get_running_loop().time() < deadline:
+                if act_task is not None and act_task.done():
+                    return
+                if await _has_waiting_lock(engine):
+                    return
+                await asyncio.sleep(0.05)
+
+    async def _run() -> None:
+        async with AsyncSession(engine) as session, session.begin():
+            actor = await session.get(User, actor_id)
+            assert actor is not None
+            actor_loaded.set()
+            await lock_ready.wait()
+            actor_started.set()
+            await act(session, actor)
+
+    hold_task = asyncio.create_task(_hold())
+    act_task = asyncio.create_task(_run())
+    try:
+        await asyncio.wait_for(asyncio.shield(act_task), timeout=8)
+        pytest.fail("expected AccessDenied")
+    except AccessDenied:
+        pass
+    finally:
+        await hold_task
+
+
 def _apply_fate(user: User, fate: str) -> None:
     if fate == "demote":
         user.is_admin = False
@@ -1042,6 +1103,7 @@ async def test_concurrent_mutual_admin_ops_leave_one_admin(
         both_loaded = asyncio.Event()
 
         async def _act(actor_id: UUID, target_id: UUID) -> None:
+            # La barrera corre siempre: sin ella el test no mata el mutante.
             nonlocal loaded
             async with AsyncSession(engine) as session, session.begin():
                 actor = await session.get(User, actor_id)
@@ -1067,6 +1129,7 @@ async def test_concurrent_mutual_admin_ops_leave_one_admin(
             _act(admin_b, admin_a),
             return_exceptions=True,
         )
+        assert both_loaded.is_set()
         denied = [item for item in results if isinstance(item, AccessDenied)]
         failures = [
             item
@@ -1125,6 +1188,191 @@ async def test_stale_same_session_actor_cannot_remove_last_active_admin(
             leftover = await session.get(User, target_id)
             assert leftover is not None
             assert leftover.is_admin is True
+    finally:
+        async with AsyncSession(engine) as session, session.begin():
+            await _restore_parked_admins(session, extras, ids)
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "action",
+    ("promote_existing", "promote_new", "identity", "unsuspend"),
+)
+async def test_held_lock_actor_target_kills_k3a_and_n5(
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+    action: str,
+) -> None:
+    """K3a: sin FOR UPDATE en actor+destino no espera. N5: promover sin
+    revalidar devolvería el destino si ya es admin.
+    """
+
+    dsn = RedactedDsn(resolve_test_database_url())
+    engine = create_async_engine(dsn.secret(), pool_size=4, max_overflow=0)
+    extras: list[tuple[UUID, str, bool]] = []
+    ids: list[UUID] = []
+    try:
+        async with AsyncSession(engine) as session, session.begin():
+            extras = await _park_existing_admins(session)
+            actor_id = await _insert_admin(session, f"k3a-{action}-a")
+            if action == "promote_new":
+                target = User(
+                    first_name="K3a",
+                    last_name="Alumno",
+                    email=unique_email(f"k3a-{action}-t"),
+                    password_hash="x",
+                    system_role_id=SystemRole.ALUMNO,
+                    is_admin=False,
+                )
+                session.add(target)
+                await session.flush()
+                target_id = target.id
+            else:
+                target_id = await _insert_admin(session, f"k3a-{action}-t")
+            ids = [actor_id, target_id]
+            if action == "unsuspend":
+                row = await session.get(User, target_id)
+                assert row is not None
+                row.suspended_at = datetime.now(UTC)
+
+        async def _act(session: AsyncSession, actor: User) -> None:
+            if action in {"promote_existing", "promote_new"}:
+                await set_user_admin(
+                    session, actor=actor, user_id=target_id, is_admin=True
+                )
+            elif action == "identity":
+                await update_user_identity(
+                    session,
+                    actor=actor,
+                    user_id=target_id,
+                    body=AdminUserIdentityUpdate(first_name="K3a"),
+                )
+            else:
+                await set_user_suspended(
+                    session, actor=actor, user_id=target_id, suspended=False
+                )
+
+        await _held_lock_degrade_actor(
+            engine,
+            actor_id=actor_id,
+            hold_ids=(actor_id, target_id),
+            act=_act,
+        )
+
+        async with AsyncSession(engine) as session:
+            target = await session.get(User, target_id)
+            actor = await session.get(User, actor_id)
+            assert target is not None
+            assert actor is not None
+            assert actor.is_admin is False
+            if action == "promote_new":
+                assert target.is_admin is False
+                assert target.system_role_id == SystemRole.ALUMNO
+            elif action == "identity":
+                assert target.first_name != "K3a"
+            elif action == "unsuspend":
+                assert target.suspended_at is not None
+            else:
+                assert target.is_admin is True
+    finally:
+        async with AsyncSession(engine) as session, session.begin():
+            await _restore_parked_admins(session, extras, ids)
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("action", ("demote", "suspend", "delete"))
+async def test_stale_actor_on_self_is_403_not_409(
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+    action: str,
+) -> None:
+    dsn = RedactedDsn(resolve_test_database_url())
+    engine = create_async_engine(dsn.secret(), pool_size=4, max_overflow=0)
+    extras: list[tuple[UUID, str, bool]] = []
+    ids: list[UUID] = []
+    try:
+        async with AsyncSession(engine) as session, session.begin():
+            extras = await _park_existing_admins(session)
+            actor_id = await _insert_admin(session, f"self403-{action}")
+            peer_id = await _insert_admin(session, f"self403-peer-{action}")
+            ids = [actor_id, peer_id]
+
+        async with AsyncSession(engine) as session, session.begin():
+            actor = await session.get(User, actor_id)
+            assert actor is not None
+            async with AsyncSession(engine) as other, other.begin():
+                row = await other.get(User, actor_id)
+                assert row is not None
+                row.is_admin = False
+                row.system_role_id = SystemRole.ALUMNO
+            with pytest.raises(AccessDenied):
+                if action == "delete":
+                    await soft_delete_user(session, actor=actor, user_id=actor_id)
+                elif action == "suspend":
+                    await set_user_suspended(
+                        session, actor=actor, user_id=actor_id, suspended=True
+                    )
+                else:
+                    await set_user_admin(
+                        session, actor=actor, user_id=actor_id, is_admin=False
+                    )
+
+        async with AsyncSession(engine) as session:
+            leftover = await session.get(User, actor_id)
+            assert leftover is not None
+            assert leftover.deleted_at is None
+            assert leftover.suspended_at is None
+    finally:
+        async with AsyncSession(engine) as session, session.begin():
+            await _restore_parked_admins(session, extras, ids)
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("action", ("identity", "unsuspend", "delete"))
+async def test_stale_actor_on_deleted_target_is_403_not_404(
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+    action: str,
+) -> None:
+    dsn = RedactedDsn(resolve_test_database_url())
+    engine = create_async_engine(dsn.secret(), pool_size=4, max_overflow=0)
+    extras: list[tuple[UUID, str, bool]] = []
+    ids: list[UUID] = []
+    try:
+        async with AsyncSession(engine) as session, session.begin():
+            extras = await _park_existing_admins(session)
+            actor_id = await _insert_admin(session, f"del403-{action}")
+            target_id = await _insert_admin(session, f"del403-t-{action}")
+            ids = [actor_id, target_id]
+            target = await session.get(User, target_id)
+            assert target is not None
+            target.deleted_at = datetime.now(UTC)
+            if action == "unsuspend":
+                target.suspended_at = datetime.now(UTC)
+
+        async with AsyncSession(engine) as session, session.begin():
+            actor = await session.get(User, actor_id)
+            assert actor is not None
+            async with AsyncSession(engine) as other, other.begin():
+                row = await other.get(User, actor_id)
+                assert row is not None
+                row.is_admin = False
+                row.system_role_id = SystemRole.ALUMNO
+            with pytest.raises(AccessDenied) as caught:
+                if action == "delete":
+                    await soft_delete_user(session, actor=actor, user_id=target_id)
+                elif action == "unsuspend":
+                    await set_user_suspended(
+                        session, actor=actor, user_id=target_id, suspended=False
+                    )
+                else:
+                    await update_user_identity(
+                        session,
+                        actor=actor,
+                        user_id=target_id,
+                        body=AdminUserIdentityUpdate(first_name="Gone"),
+                    )
+            assert not isinstance(caught.value, NotFound)
     finally:
         async with AsyncSession(engine) as session, session.begin():
             await _restore_parked_admins(session, extras, ids)
@@ -1420,6 +1668,62 @@ async def test_teacher_exact_email_uses_lower_not_casefold(
     )
     assert folded.status_code == 200
     assert folded.json()["items"] == []
+
+
+async def test_teacher_search_normalizes_istanbul_email_like_login(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    typed = "İstanbul"
+    marker = uuid.uuid4().hex[:8]
+    typed_email = f"{typed}-{marker}@example.com"
+    stored = normalize_email(typed_email)
+    assert isinstance(stored, str)
+    teacher = await _signup(session_client, email=unique_email("tea-ist"))
+    await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, teacher["id"], _COURSE, CourseRole.TEACHER)
+    db_session.add(
+        User(
+            first_name="Istanbul",
+            last_name=marker,
+            email=stored,
+            password_hash="x",
+            system_role_id=SystemRole.ALUMNO,
+        )
+    )
+    await db_session.flush()
+    assert _email_term(typed_email) == stored
+    found = await session_client.get("/api/v1/users/search", params={"q": typed_email})
+    assert found.status_code == 200
+    items = found.json()["items"]
+    assert len(items) == 1
+    assert items[0]["email"] == stored
+
+
+async def test_teacher_exact_email_query_uses_unique_index(
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    dsn = RedactedDsn(resolve_test_database_url())
+    engine = create_async_engine(dsn.secret())
+    email = _email_term("Explain-Unique@example.com")
+    assert _exact_email_clause(email) is not None
+    try:
+        async with engine.connect() as conn, conn.begin():
+            await conn.execute(text("SET LOCAL enable_seqscan = off"))
+            rows = await conn.execute(
+                text(
+                    "EXPLAIN SELECT id FROM users "
+                    "WHERE deleted_at IS NULL AND suspended_at IS NULL "
+                    "AND email = :email"
+                ),
+                {"email": email},
+            )
+            plan = "\n".join(str(row[0]) for row in rows)
+        assert "uq_users_email" in plan
+        assert "Index" in plan and "Scan" in plan
+        assert "Seq Scan" not in plan
+    finally:
+        await engine.dispose()
 
 
 async def test_deactivated_alumno_cannot_demote_admin(
