@@ -1467,15 +1467,32 @@ async def test_frozen_close_returns_down_under_one_second(
     original = asyncpg.connect
     held: dict[str, Any] = {}
 
-    async def _connect_and_freeze_close(*args: object, **kwargs: object) -> object:
-        connection = await original(*args, **kwargs)
-        held["c"] = connection
+    class _FrozenClose:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
 
-        async def _hung_close(*_a: object, **_k: object) -> None:
+        async def execute(self, *args: object, **kwargs: object) -> object:
+            return await self._inner.execute(*args, **kwargs)
+
+        async def close(self, *args: object, **kwargs: object) -> None:
             await asyncio.Event().wait()
 
-        connection.close = _hung_close
-        return connection
+        def terminate(self) -> None:
+            terminate = getattr(self._inner, "terminate", None)
+            if callable(terminate):
+                terminate()
+
+        def is_closed(self) -> bool:
+            is_closed = getattr(self._inner, "is_closed", None)
+            if callable(is_closed):
+                return bool(is_closed())
+            return False
+
+    async def _connect_and_freeze_close(*args: object, **kwargs: object) -> object:
+        connection = await original(*args, **kwargs)
+        frozen = _FrozenClose(connection)
+        held["c"] = frozen
+        return frozen
 
     monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     monkeypatch.setenv("DB_HEALTH_TIMEOUT", "2")

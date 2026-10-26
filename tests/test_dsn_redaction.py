@@ -292,6 +292,28 @@ def test_drop_database_redacts_auth_failure_runtime_error(
     assert "***" in message
 
 
+def test_redacted_exception_detail_replaces_full_dsn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S6: sin extraer contraseñas, el DSN completo se sustituye por el redactado."""
+
+    from tests.conftest import _redacted_exception_detail
+
+    monkeypatch.setattr("tests.conftest._dsn_secret_values", lambda _dsn: ())
+    dsn = RedactedDsn(
+        f"postgresql+asyncpg://leaky_user:{SENTINEL_QUOTED}@127.0.0.1:1/no_such_db_test"
+    )
+    message = _redacted_exception_detail(
+        RuntimeError(f"boom {dsn.secret()} marker"),
+        dsn,
+    )
+    assert SENTINEL not in message
+    assert SENTINEL_QUOTED not in message
+    assert dsn.secret() not in message
+    assert str(dsn) in message
+    assert "marker" in message
+
+
 def test_redact_database_url_invalid_dsn() -> None:
     """R5: un DSN inválido no se parsea; no aparece el secreto."""
 
