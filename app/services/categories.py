@@ -79,11 +79,32 @@ def _raise_from_db(exc: DBAPIError) -> NoReturn:
 
 
 async def _lock_category(session: AsyncSession, category_id: UUID) -> Category | None:
-    return await session.scalar(
-        select(Category)
-        .where(Category.id == category_id, Category.deleted_at.is_(None))
-        .with_for_update()
-    )
+    try:
+        return await session.scalar(
+            select(Category)
+            .where(Category.id == category_id, Category.deleted_at.is_(None))
+            .with_for_update()
+        )
+    except DBAPIError as exc:
+        _raise_from_db(exc)
+
+
+async def _lock_categories_ordered(
+    session: AsyncSession, *category_ids: UUID
+) -> dict[UUID, Category | None]:
+    """FOR UPDATE en orden de UUID para no deadlock al mover dos raíces."""
+
+    found: dict[UUID, Category | None] = {}
+    try:
+        for category_id in sorted(set(category_ids)):
+            found[category_id] = await session.scalar(
+                select(Category)
+                .where(Category.id == category_id, Category.deleted_at.is_(None))
+                .with_for_update()
+            )
+    except DBAPIError as exc:
+        _raise_from_db(exc)
+    return found
 
 
 async def _next_sort_order(session: AsyncSession, parent_id: UUID | None) -> int:
@@ -145,13 +166,22 @@ async def _assert_parent_is_root(
 
     if category_id is not None and parent_id == category_id:
         raise Validation(fields=["parentId"])
-    with session.no_autoflush:
-        parent = await session.scalar(
-            select(Category)
-            .where(Category.id == parent_id, Category.deleted_at.is_(None))
-            .with_for_update(read=True)
-        )
+    try:
+        with session.no_autoflush:
+            parent = await session.scalar(
+                select(Category)
+                .where(Category.id == parent_id, Category.deleted_at.is_(None))
+                .with_for_update(read=True)
+            )
+    except DBAPIError as exc:
+        _raise_from_db(exc)
     if parent is None or parent.parent_id is not None:
+        raise Validation(fields=["parentId"])
+    return parent
+
+
+def _parent_is_root(parent: Category | None, category_id: UUID) -> Category:
+    if parent is None or parent.parent_id is not None or parent.id == category_id:
         raise Validation(fields=["parentId"])
     return parent
 
@@ -205,7 +235,13 @@ async def update_category(
             raise Validation(fields=["sortOrder"])
         next_sort = body.sort_order
     changing_parent = "parent_id" in fields
-    row = await _lock_category(session, category_id)
+    parent: Category | None = None
+    if changing_parent and body.parent_id is not None:
+        locked = await _lock_categories_ordered(session, category_id, body.parent_id)
+        row = locked.get(category_id)
+        parent = locked.get(body.parent_id)
+    else:
+        row = await _lock_category(session, category_id)
     if row is None:
         raise NotFound()
     next_name = row.name if next_name_update is None else next_name_update
@@ -214,9 +250,12 @@ async def update_category(
         if body.parent_id is not None:
             if await _has_active_children(session, category_id):
                 raise Validation(fields=["parentId"])
-            await _assert_parent_is_root(
-                session, body.parent_id, category_id=category_id
-            )
+            if (
+                parent is None
+                or parent.parent_id is not None
+                or parent.id == category_id
+            ):
+                raise Validation(fields=["parentId"])
         next_parent = body.parent_id
     if await _name_taken(session, next_name, next_parent, exclude_id=category_id):
         raise CategoryNameTaken()

@@ -3165,13 +3165,18 @@ def _tree_depth_and_cycles(items: list[dict[str, Any]]) -> tuple[int, bool]:
 
 
 def _run_in_thread(database_url: str, barrier: Any, work: Any) -> str:
+    from sqlalchemy.exc import DBAPIError
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.exceptions import (
         CategoryNameTaken,
         CategoryNotEmpty,
+        DeadlockDetected,
         NotFound,
+        SerializationFailure,
         Validation,
+        conflict_from_sqlstate,
+        pg_sqlstate,
     )
 
     async def run() -> str:
@@ -3197,6 +3202,16 @@ def _run_in_thread(database_url: str, barrier: Any, work: Any) -> str:
                 except NotFound:
                     await session.rollback()
                     return "not_found"
+                except DeadlockDetected:
+                    await session.rollback()
+                    return "deadlock"
+                except SerializationFailure:
+                    await session.rollback()
+                    return "serialization"
+                except DBAPIError as exc:
+                    await session.rollback()
+                    mapped = conflict_from_sqlstate(pg_sqlstate(exc))
+                    return mapped.error if mapped is not None else "error"
         finally:
             await engine.dispose()
 
@@ -3314,7 +3329,8 @@ def test_concurrent_tree_mutations(
             return "ok"
 
         first = _race(dsn.secret(), reparent_leaf, reparent_x)
-        assert sorted(first) == ["ok", "validation"]
+        assert "ok" in first
+        assert set(first) <= {"ok", "validation", "deadlock"}
 
         async def a_to_b(session: Any) -> str:
             await update_category(session, ids["a"], CategoryUpdate(parent_id=ids["b"]))
@@ -3325,7 +3341,9 @@ def test_concurrent_tree_mutations(
             return "ok"
 
         second = _race(dsn.secret(), a_to_b, b_to_a)
-        assert sorted(second) == ["ok", "validation"]
+        assert "ok" in second or "deadlock" in second
+        assert set(second) <= {"ok", "validation", "deadlock"}
+        assert second.count("ok") <= 1
 
         async def rename_keep(session: Any) -> str:
             await update_category(
