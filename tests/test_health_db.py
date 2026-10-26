@@ -772,6 +772,44 @@ async def test_run_probe_dies_under_continuous_waiters(
         get_settings.cache_clear()
 
 
+@pytest.mark.asyncio
+async def test_waiter_timeout_bounds_injected_hanging_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W1/W4: el wait_for del waiter es el tope si la sonda no acaba."""
+
+    from app.config import get_settings
+    from app.db import clear_engine
+
+    async def _hang() -> DatabaseHealthResponse:
+        await asyncio.Event().wait()
+        return DatabaseHealthResponse(db="ok")
+
+    _probe_settings(
+        monkeypatch, "postgresql+asyncpg://probe:secret@127.0.0.1:1/probe_db"
+    )
+    monkeypatch.setenv("DB_HEALTH_TIMEOUT", "0.6")
+    get_settings.cache_clear()
+    clear_engine()
+    health_service.clear_health_probe()
+    hanging = asyncio.create_task(_hang())
+    health_service._probe_task = hanging
+    try:
+        started = time.monotonic()
+        result = await health_service.check_database()
+        elapsed = time.monotonic() - started
+        timeout = get_settings().db_health_timeout
+        assert result.db == "down"
+        assert 0.9 * timeout <= elapsed < timeout + 0.25
+    finally:
+        health_service.clear_health_probe()
+        if not hanging.done():
+            hanging.cancel()
+            with suppress(asyncio.CancelledError):
+                await hanging
+        get_settings.cache_clear()
+
+
 def _probe_settings(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
     from app.config import get_settings
     from app.db import clear_engine
@@ -1211,6 +1249,9 @@ def test_health_cache_ttl_helpers() -> None:
         assert health_service._cached(101.0, 1.0) is None
         assert health_service._cached(101.5, 1.0) is None
         assert health_service._cached(100.4, 0.0) is None
+        # W6: TTL=0 no reutiliza aunque el sello esté en el futuro.
+        health_service._cache = (101.0, ok)
+        assert health_service._cached(100.0, 0.0) is None
         health_service._cache = (100.0, down)
         cached_down = health_service._cached(100.4, 1.0)
         assert cached_down is down
