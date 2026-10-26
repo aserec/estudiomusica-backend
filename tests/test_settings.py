@@ -689,6 +689,28 @@ def test_validation_error_redacts_dsn_without_scheme(
     get_settings.cache_clear()
 
 
+def test_validation_error_errors_and_json_redact_auth_secret_type_error() -> None:
+    """K2: un error de tipo no debe filtrar auth_secret en json()/errors()."""
+
+    leaked = 123
+    with pytest.raises(ValidationError) as caught:
+        Settings(
+            app_env="development",
+            database_url=_DEFAULT_DEV_DSN,
+            auth_secret=leaked,  # type: ignore[arg-type]
+            _env_file=None,
+        )
+    dumped = caught.value.json()
+    assert "123" not in dumped
+    assert "123" not in str(caught.value)
+    assert "123" not in repr(caught.value)
+    for error in caught.value.errors():
+        assert error.get("input") != leaked
+        assert "123" not in str(error.get("input"))
+        assert "123" not in repr(error.get("input"))
+        assert "123" not in repr(error.get("ctx"))
+
+
 def test_validation_error_errors_and_json_redact_auth_secret_on_model_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
