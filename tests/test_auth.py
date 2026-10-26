@@ -160,6 +160,57 @@ async def test_signup_validation_errors(session_client: Any) -> None:
     assert blank_name.json() == {"error": "validation", "fields": ["name"]}
 
 
+async def test_signup_and_login_reject_nul(session_client: Any) -> None:
+    """NUL en texto que llega a Postgres no debe ser 500 internal_error."""
+
+    name = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(name="a\u0000b"),
+    )
+    assert name.status_code == 400
+    assert name.json() == {"error": "validation", "fields": ["name"]}
+
+    email = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(email="a\u0000b@example.com"),
+    )
+    assert email.status_code == 400
+    assert email.json() == {"error": "validation", "fields": ["email"]}
+
+    password = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(password="pass\u0000word12"),
+    )
+    assert password.status_code == 400
+    assert password.json() == {"error": "validation", "fields": ["password"]}
+    assert "pass\u0000word12" not in password.text
+
+    login_email = await session_client.post(
+        "/api/v1/auth/login",
+        json={"email": "a\u0000b@example.com", "password": PASSWORD},
+    )
+    assert login_email.status_code == 400
+    assert login_email.json() == {"error": "validation", "fields": ["email"]}
+
+    login_password = await session_client.post(
+        "/api/v1/auth/login",
+        json={"email": unique_email("nul"), "password": "pass\u0000word"},
+    )
+    assert login_password.status_code == 400
+    assert login_password.json() == {"error": "validation", "fields": ["password"]}
+    assert "pass\u0000word" not in login_password.text
+
+
+def test_signup_request_rejects_nul() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as caught:
+        SignUpRequest.model_validate(
+            {"name": "a\u0000b", "email": "ada@example.com", "password": PASSWORD}
+        )
+    assert "name" in {err["loc"][-1] for err in caught.value.errors()}
+
+
 def test_signup_request_normalizes_email() -> None:
     body = SignUpRequest.model_validate(
         {"name": "  Ada  ", "email": " Ada@Example.COM ", "password": PASSWORD}

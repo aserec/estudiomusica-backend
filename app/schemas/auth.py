@@ -6,7 +6,16 @@ from app.models.user import SystemRole
 from app.schemas.base import APIModel
 
 
+def reject_nul(value: object) -> object:
+    """Postgres rechaza ``\\u0000`` en texto (UTF8 0x00 → 500)."""
+
+    if isinstance(value, str) and "\x00" in value:
+        raise ValueError("nul not allowed")
+    return value
+
+
 def normalize_email(value: object) -> object:
+    value = reject_nul(value)
     if isinstance(value, str):
         return value.strip().lower()
     return value
@@ -20,6 +29,7 @@ class SignUpRequest(APIModel):
     @field_validator("name")
     @classmethod
     def strip_name(cls, value: str) -> str:
+        reject_nul(value)
         stripped = value.strip()
         if not stripped:
             raise ValueError("name required")
@@ -30,6 +40,11 @@ class SignUpRequest(APIModel):
     def normalize_signup_email(cls, value: object) -> object:
         return normalize_email(value)
 
+    @field_validator("password", mode="before")
+    @classmethod
+    def reject_nul_signup_password(cls, value: object) -> object:
+        return reject_nul(value)
+
 
 class LogInRequest(APIModel):
     email: EmailStr
@@ -39,6 +54,11 @@ class LogInRequest(APIModel):
     @classmethod
     def normalize_login_email(cls, value: object) -> object:
         return normalize_email(value)
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def reject_nul_login_password(cls, value: object) -> object:
+        return reject_nul(value)
 
 
 class PublicUser(APIModel):
