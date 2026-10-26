@@ -212,6 +212,32 @@ def test_allow_test_database_still_rejects_default_user(
     assert "otra-clave" not in str(caught.value)
 
 
+def test_allow_test_database_covers_uppercase_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.config.settings.allow_test_database", lambda: True)
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://app:s3cret@127.0.0.1:5432/x_TEST",
+        auth_secret="production-auth-secret-at-least-32ch",
+        _env_file=None,
+    )
+    assert settings.resolved_database_url().endswith("/x_TEST")
+
+
+def test_allow_test_database_still_requires_explicit_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.config.settings.allow_test_database", lambda: True)
+    with pytest.raises(ValidationError, match="explícitamente"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://app:s3cret@127.0.0.1:5432",
+            auth_secret="production-auth-secret-at-least-32ch",
+            _env_file=None,
+        )
+
+
 def test_production_accepts_non_default_database_url() -> None:
     settings = Settings(
         app_env="production",

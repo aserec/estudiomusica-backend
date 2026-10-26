@@ -84,7 +84,8 @@ def test_alembic_upgrade_head_and_downgrade_base(
     config = alembic_config(dsn)
 
     command.upgrade(config, "head")
-    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0002_auth_users"
+    head = ScriptDirectory.from_config(config).get_current_head()
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
     assert (
         _scalar(dsn, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
         == "set_updated_at"
@@ -128,7 +129,8 @@ def test_alembic_upgrade_head_and_downgrade_base(
     )
 
     command.upgrade(config, "head")
-    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0002_auth_users"
+    head = ScriptDirectory.from_config(config).get_current_head()
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
 
 
@@ -170,9 +172,11 @@ def test_alembic_revision_chain_is_linear() -> None:
     config = alembic_config(resolve_alembic_database_url())
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0002_auth_users"]
-    assert script.get_revision("0002_auth_users").down_revision == "0001_initial"
-    assert script.get_revision("0001_initial").down_revision is None
+    bases = script.get_bases()
+    assert len(heads) == 1
+    assert len(bases) == 1
+    assert script.get_revision(heads[0]).down_revision == bases[0]
+    assert script.get_revision(bases[0]).down_revision is None
 
 
 class MigratedTriggerProbe(PersistentModel):
@@ -839,13 +843,14 @@ def test_autogenerate_from_env_adds_trigger_not_lambda(
     ensure_database_exists(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = _alembic_config_for(dest, dsn)
+    existing = {path.name for path in (dest / "versions").glob("*.py")}
     try:
         command.upgrade(config, "head")
         command.revision(config, message="hook_probe", autogenerate=True)
         generated = [
             path
             for path in (dest / "versions").glob("*.py")
-            if path.name != "0001_initial.py" and path.name != "__init__.py"
+            if path.name not in existing
         ]
         assert generated
         source = generated[0].read_text()
@@ -868,11 +873,15 @@ def test_alembic_check_is_clean_after_schema_table(
 
     dest = tmp_path / "migrations"
     shutil.copytree(ROOT / "app" / "migrations", dest)
-    (dest / "versions" / "0002_schema_probe.py").write_text(
-        '''"""schema probe
+    parent = ScriptDirectory.from_config(
+        _alembic_config_for(dest, require_postgres)
+    ).get_current_head()
+    assert parent is not None
+    (dest / "versions" / "0003_schema_probe.py").write_text(
+        f'''"""schema probe
 
-Revision ID: 0002_schema_probe
-Revises: 0001_initial
+Revision ID: 0003_schema_probe
+Revises: {parent}
 Create Date: 2026-10-26
 """
 
@@ -883,8 +892,8 @@ from alembic import op
 
 from app.migrations.ops import op_create_updated_at_trigger, op_drop_updated_at_trigger
 
-revision: str = "0002_schema_probe"
-down_revision: str | None = "0001_initial"
+revision: str = "0003_schema_probe"
+down_revision: str | None = {parent!r}
 branch_labels: str | Sequence[str | None] | None = None
 depends_on: str | Sequence[str | None] | None = None
 
@@ -929,14 +938,14 @@ def downgrade() -> None:
     ensure_database_exists(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = _alembic_config_for(dest, dsn)
+    existing = {path.name for path in (dest / "versions").glob("*.py")}
     try:
         command.upgrade(config, "head")
         command.revision(config, message="after_schema", autogenerate=True)
         generated = [
             path
             for path in (dest / "versions").glob("*.py")
-            if path.name
-            not in {"0001_initial.py", "0002_schema_probe.py", "__init__.py"}
+            if path.name not in existing
         ]
         assert generated
         source = generated[0].read_text()
