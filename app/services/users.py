@@ -22,6 +22,7 @@ from app.models import AuthSession, CourseMembership, User
 from app.models.user import SystemRole
 from app.permissions.matrix import has_site_permission
 from app.permissions.types import CourseRole, Permission
+from app.schemas.auth import normalize_email
 from app.schemas.pagination import Paginated, PaginationQuery
 from app.schemas.users import (
     AdminUserIdentityUpdate,
@@ -84,16 +85,19 @@ def _name_match(term: str) -> ColumnElement[bool]:
 
 
 def _email_term(term: str) -> str:
-    """Misma normalización que el login: ``EmailStr`` + ``lower`` (IDNA).
+    """Misma normalización que el login: ``strip`` + ``lower`` y luego ``EmailStr``.
 
-    Si el término no es un email válido, ``strip`` + ``lower`` + NFC.
+    ``EmailStr`` aplica NFC e IDNA al dominio. Si el término no es un
+    email válido, ``strip`` + ``lower`` + NFC.
     """
 
+    prepared = normalize_email(term)
+    if not isinstance(prepared, str):
+        prepared = term.strip().lower()
     try:
-        validated = _EMAIL_ADAPTER.validate_python(term)
+        return str(_EMAIL_ADAPTER.validate_python(prepared))
     except ValidationError:
-        return unicodedata.normalize("NFC", term.strip().lower())
-    return str(validated).lower()
+        return unicodedata.normalize("NFC", prepared)
 
 
 def _visible_user_filters() -> list[ColumnElement[bool]]:

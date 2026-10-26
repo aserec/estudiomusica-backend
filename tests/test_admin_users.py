@@ -1803,6 +1803,53 @@ async def test_search_idna_domain_matches_login_typed(
     assert listed.json()["items"][0]["email"] == stored
 
 
+async def test_search_j_caron_email_matches_login_nfc(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    marker = uuid.uuid4().hex[:8]
+    typed = f"J\u030cX-{marker}@example.com"
+    stored = f"\u01f0x-{marker}@example.com"
+    created = await _signup(session_client, email=typed, name=f"Jcaron {marker}")
+    assert created["response"].json()["user"]["email"] == stored
+    session_client.cookies.clear()
+
+    teacher = await _signup(session_client, email=unique_email("tea-jcaron"))
+    await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, teacher["id"], _COURSE, CourseRole.TEACHER)
+    found = await session_client.get("/api/v1/users/search", params={"q": typed})
+    assert found.status_code == 200
+    items = found.json()["items"]
+    assert len(items) == 1
+    assert items[0]["email"] == stored
+    assert items[0]["id"] == str(created["id"])
+
+
+def test_email_term_fallback_applies_nfc_after_strip_lower() -> None:
+    assert _email_term("  J\u030cX  ") == "\u01f0x"
+    assert _email_term("J\u030cX") == "\u01f0x"
+    assert _email_term("j\u030cx") == "\u01f0x"
+
+
+async def test_admin_search_fallback_nfd_local_finds_nfc_email(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    marker = uuid.uuid4().hex[:8]
+    typed = f"J\u030cX-{marker}@example.com"
+    stored = f"\u01f0x-{marker}@example.com"
+    created = await _signup(session_client, email=typed, name=f"Fb {marker}")
+    assert created["response"].json()["user"]["email"] == stored
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    fragment = f"J\u030cX-{marker}"
+    found = await session_client.get("/api/v1/users/search", params={"q": fragment})
+    assert found.status_code == 200
+    items = found.json()["items"]
+    assert len(items) == 1
+    assert items[0]["email"] == stored
+    listed = await session_client.get("/api/v1/admin/users", params={"query": fragment})
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["email"] == stored
+
+
 async def test_teacher_exact_email_query_uses_unique_index(
     require_postgres: RedactedDsn,
     migrated_test_database: None,
