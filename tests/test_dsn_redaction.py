@@ -185,6 +185,7 @@ def test_broken_migration_does_not_leak_password_with_showlocals(
         "    _conftest._ping_postgres = ok\n"
         "    _conftest.ensure_database_exists = ok\n"
         "    _conftest._drop_leftover_test_tables = ok\n"
+        "    _conftest.drop_production_test_role = ok\n"
         "    command.upgrade = boom\n"
     )
     result = _run_suite_with_showlocals(
