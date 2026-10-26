@@ -12,10 +12,16 @@ from sqlalchemy.engine.url import make_url
 
 from app.db import RedactedDsn
 from tests.conftest import (
+    PRODUCTION_TEST_USER,
     ROOT,
+    _admin_engine,
     _create_async_engine,
     _drop_leftover_test_databases,
     _drop_leftover_test_tables,
+    _drop_named_production_test_role,
+    _orphan_production_test_role,
+    _pg_ident,
+    _pg_literal,
     drop_database_if_exists,
     ensure_database_exists,
 )
@@ -221,6 +227,143 @@ def test_migrated_fixture_setup_and_teardown_drop_leftovers(
         asyncio.run(_database_exists(require_postgres, "autogen_sa_probe_test")) is None
     )
     drop_database_if_exists(_leftover_db(require_postgres))
+
+
+@pytest.mark.db
+def test_leftover_child_then_production_role(
+    require_postgres: RedactedDsn,
+    tmp_path: Path,
+    production_test_database_url: RedactedDsn,
+) -> None:
+    """El hijo de leftovers no tumba el rol de production del padre."""
+
+    _plant_session_leftovers(require_postgres)
+    result = _run_leftover_probe(tmp_path, require_postgres, _CHILD_SETUP_AND_PLANT)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    async def prod_alive() -> object:
+        engine = _create_async_engine(production_test_database_url.secret())
+        try:
+            async with engine.connect() as connection:
+                return await connection.scalar(text("SELECT current_user"))
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(prod_alive()) == PRODUCTION_TEST_USER
+    assert asyncio.run(_table_exists(require_postgres)) is None
+    assert (
+        asyncio.run(_database_exists(require_postgres, "autogen_sa_probe_test")) is None
+    )
+    drop_database_if_exists(_leftover_db(require_postgres))
+
+
+def _unused_pid() -> int:
+    for candidate in range(2_000_000, 2_000_400):
+        try:
+            os.kill(candidate, 0)
+        except ProcessLookupError:
+            return candidate
+        except OSError:
+            continue
+    raise RuntimeError("no se encontró un pid libre para el rol huérfano")
+
+
+async def _role_exists(dsn: RedactedDsn, name: str) -> object:
+    engine = _create_async_engine(dsn.secret())
+    try:
+        async with engine.connect() as connection:
+            return await connection.scalar(
+                text("SELECT 1 FROM pg_roles WHERE rolname = :name"),
+                {"name": name},
+            )
+    finally:
+        await engine.dispose()
+
+
+_CHILD_ORPHAN_SETUP = """
+def test_setup_clears_orphans(migrated_test_database):
+    assert True
+"""
+
+
+@pytest.mark.db
+def test_setup_drops_orphan_production_test_role(
+    require_postgres: RedactedDsn,
+    tmp_path: Path,
+) -> None:
+    """Tras kill -9 queda em_prod_tests_<pid> muerto; el setup lo borra."""
+
+    dead_pid = _unused_pid()
+    orphan = f"em_prod_tests_{dead_pid}"
+    assert _orphan_production_test_role(orphan) is True
+    assert _orphan_production_test_role(PRODUCTION_TEST_USER) is False
+    role = _pg_ident(orphan)
+
+    async def plant() -> None:
+        engine = _admin_engine(require_postgres)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(
+                    text(
+                        f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                        f"PASSWORD {_pg_literal('orphan-role-secret')}"
+                    )
+                )
+                await connection.execute(
+                    text("CREATE TABLE IF NOT EXISTS orphan_owned_by_dead_pid (id int)")
+                )
+                await connection.execute(
+                    text(f"ALTER TABLE orphan_owned_by_dead_pid OWNER TO {role}")
+                )
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(plant())
+        assert asyncio.run(_role_exists(require_postgres, orphan)) == 1
+        result = _run_leftover_probe(tmp_path, require_postgres, _CHILD_ORPHAN_SETUP)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert asyncio.run(_role_exists(require_postgres, orphan)) is None
+        assert (
+            asyncio.run(
+                _table_exists_named(require_postgres, "orphan_owned_by_dead_pid")
+            )
+            is None
+        )
+    finally:
+
+        async def cleanup_orphan() -> None:
+            engine = _admin_engine(require_postgres)
+            try:
+                async with engine.connect() as connection:
+                    await _drop_named_production_test_role(connection, orphan)
+                    await connection.execute(
+                        text("DROP TABLE IF EXISTS orphan_owned_by_dead_pid")
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(cleanup_orphan())
+
+
+async def _table_exists_named(dsn: RedactedDsn, name: str) -> object:
+    engine = _create_async_engine(dsn.secret())
+    try:
+        async with engine.connect() as connection:
+            return await connection.scalar(
+                text("SELECT to_regclass(:reg)"),
+                {"reg": f"public.{name}"},
+            )
+    finally:
+        await engine.dispose()
+
+
+def test_orphan_production_test_role_ignores_live_and_foreign_names() -> None:
+    assert _orphan_production_test_role(PRODUCTION_TEST_USER) is False
+    assert _orphan_production_test_role("em_prod_tests") is False
+    assert _orphan_production_test_role("em_prod_tests_abc") is False
+    assert _orphan_production_test_role("other_1") is False
+    assert _orphan_production_test_role(f"em_prod_tests_{_unused_pid()}") is True
 
 
 def test_own_schema_names_includes_public() -> None:

@@ -52,3 +52,31 @@ class PayloadTooLarge(DomainError):
 
     status_code = 413
     error = "payload_too_large"
+
+
+class Unauthorized(DomainError):
+    """401 {error: unauthorized}."""
+
+    status_code = 401
+    error = "unauthorized"
+
+
+class InvalidCredentials(DomainError):
+    """401 {error: invalid_credentials}."""
+
+    status_code = 401
+    error = "invalid_credentials"
+
+
+class AccountSuspended(DomainError):
+    """403 {error: account_suspended}."""
+
+    status_code = 403
+    error = "account_suspended"
+
+
+class EmailTaken(DomainError):
+    """409 {error: email_taken}."""
+
+    status_code = 409
+    error = "email_taken"

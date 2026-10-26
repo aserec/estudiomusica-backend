@@ -65,9 +65,9 @@ def test_http_exception_422_becomes_400(probe_client: TestClient) -> None:
 
 
 def test_http_exception_detail_message_hidden_in_production(
-    production_client: TestClient,
+    offline_production_client: TestClient,
 ) -> None:
-    response = production_client.get("/api/v1/_test/http-400-dict")
+    response = offline_production_client.get("/api/v1/_test/http-400-dict")
 
     assert response.status_code == 400
     body = response.json()
@@ -156,8 +156,31 @@ def test_mid_stream_exception_is_reraised(
     assert "mid-stream" in caplog.text
 
 
-def test_production_500_has_no_message(production_client: TestClient) -> None:
-    response = production_client.get("/api/v1/_test/boom")
+def test_offline_production_client_is_production(
+    offline_production_client: TestClient,
+) -> None:
+    from fastapi import Response
+
+    from app.auth.cookies import attach_session_cookie
+    from app.config import get_settings
+
+    settings = get_settings()
+    assert settings.app_env == "production"
+    assert settings.auth_cookie_secure() is True
+    assert settings.expose_errors is False
+    assert settings.example_routes_enabled() is False
+    response = Response()
+    attach_session_cookie(response, "dummy-token", settings)
+    cookie = str(response.headers.get("set-cookie", ""))
+    assert "Secure" in cookie
+    assert "HttpOnly" in cookie
+    assert "samesite=lax" in cookie.lower()
+
+
+def test_production_500_has_no_message(
+    offline_production_client: TestClient,
+) -> None:
+    response = offline_production_client.get("/api/v1/_test/boom")
 
     assert response.status_code == 500
     assert response.json() == {"error": "internal_error"}
@@ -218,8 +241,10 @@ def test_put_updates_example(client: TestClient) -> None:
     assert response.json() == {"id": "ex-1", "displayName": "Nombre nuevo"}
 
 
-def test_examples_are_disabled_in_production(production_client: TestClient) -> None:
-    response = production_client.get("/api/v1/examples")
+def test_examples_are_disabled_in_production(
+    offline_production_client: TestClient,
+) -> None:
+    response = offline_production_client.get("/api/v1/examples")
 
     assert response.status_code == 404
     assert response.json() == {"error": "not_found"}

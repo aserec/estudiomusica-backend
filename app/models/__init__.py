@@ -1,9 +1,6 @@
-"""Modelos de persistencia SQLAlchemy 2 (async).
+"""Modelos de persistencia SQLAlchemy 2 (async)."""
 
-No hay tablas de negocio en este ticket. ``PersistentModel`` fija el
-id UUID, ``created_at`` / ``updated_at`` y el borrado lógico ``deleted_at``.
-"""
-
+from app.models.auth_session import AuthSession
 from app.models.base import (
     Base,
     PersistentMixin,
@@ -15,11 +12,15 @@ from app.models.base import (
     updated_at_trigger_name,
     updated_at_trigger_sql,
 )
+from app.models.user import SystemRole, User
 
 __all__ = [
+    "AuthSession",
     "Base",
     "PersistentMixin",
     "PersistentModel",
+    "SystemRole",
+    "User",
     "attach_updated_at_trigger",
     "qualify_table",
     "quote_ident",

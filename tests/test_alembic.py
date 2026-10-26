@@ -45,22 +45,84 @@ def _scalar(dsn: RedactedDsn, sql: str) -> object:
     return asyncio.run(run())
 
 
+def _wipe_alembic_schema(dsn: RedactedDsn) -> None:
+    """Quita restos de 0001/0002 para que los tests no se pisen el DSN."""
+
+    async def wipe() -> None:
+        engine = _create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
+                await connection.execute(
+                    text("DROP TABLE IF EXISTS auth_sessions CASCADE")
+                )
+                await connection.execute(text("DROP TABLE IF EXISTS users CASCADE"))
+                await connection.execute(text("DROP TABLE IF EXISTS dep_trig CASCADE"))
+                await connection.execute(
+                    text("DROP TABLE IF EXISTS migrated_trigger_probes CASCADE")
+                )
+                await connection.execute(
+                    text('DROP TABLE IF EXISTS "ListaCanciones" CASCADE')
+                )
+                await connection.execute(text('DROP TABLE IF EXISTS "order" CASCADE'))
+                await connection.execute(text("DROP SCHEMA IF EXISTS catalogo CASCADE"))
+                await connection.execute(text("DROP EXTENSION IF EXISTS citext"))
+                await connection.execute(
+                    text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(wipe())
+
+
 def test_alembic_upgrade_head_and_downgrade_base(
     monkeypatch: pytest.MonkeyPatch,
     require_postgres: RedactedDsn,
 ) -> None:
     dsn = RedactedDsn(resolve_alembic_database_url())
     ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = alembic_config(dsn)
 
     command.upgrade(config, "head")
-    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0001_initial"
+    head = ScriptDirectory.from_config(config).get_current_head()
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
     assert (
         _scalar(dsn, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
         == "set_updated_at"
     )
     assert _scalar(dsn, "SELECT gen_random_uuid() IS NOT NULL") is True
+    assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
+    assert _scalar(dsn, "SELECT to_regclass('public.auth_sessions')") == "auth_sessions"
+    assert (
+        _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
+        == "citext"
+    )
+    for table in ("users", "auth_sessions"):
+        name = updated_at_trigger_name(table)
+        assert (
+            _scalar(
+                dsn,
+                "SELECT tgname FROM pg_trigger "
+                f"WHERE tgrelid = '{table}'::regclass AND tgname = '{name}'",
+            )
+            == name
+        )
+
+    command.downgrade(config, "0001_initial")
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0001_initial"
+    assert _scalar(dsn, "SELECT to_regclass('public.users')") is None
+    assert _scalar(dsn, "SELECT to_regclass('public.auth_sessions')") is None
+    assert (
+        _scalar(dsn, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
+        == "set_updated_at"
+    )
+    assert (
+        _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
+        == "citext"
+    )
 
     command.downgrade(config, "base")
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") is None
@@ -70,7 +132,43 @@ def test_alembic_upgrade_head_and_downgrade_base(
     )
 
     command.upgrade(config, "head")
-    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0001_initial"
+    head = ScriptDirectory.from_config(config).get_current_head()
+    assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
+    assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
+
+
+def test_0002_downgrade_keeps_preinstalled_citext(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
+
+    async def preinstall() -> None:
+        engine = _create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text("CREATE EXTENSION IF NOT EXISTS citext"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(preinstall())
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = alembic_config(dsn)
+    command.upgrade(config, "head")
+    command.downgrade(config, "0001_initial")
+    assert (
+        _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
+        == "citext"
+    )
+    command.downgrade(config, "base")
+    assert (
+        _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
+        == "citext"
+    )
+    command.upgrade(config, "head")
+    assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
 
 
 def test_alembic_current_accepts_sslmode(
@@ -89,12 +187,15 @@ def test_alembic_current_accepts_sslmode(
     command.current(alembic_config(with_mode))
 
 
-def test_alembic_has_a_single_initial_revision() -> None:
+def test_alembic_revision_chain_is_linear() -> None:
     config = alembic_config(resolve_alembic_database_url())
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0001_initial"]
-    assert script.get_revision("0001_initial").down_revision is None
+    bases = script.get_bases()
+    assert len(heads) == 1
+    assert len(bases) == 1
+    assert script.get_revision(heads[0]).down_revision == bases[0]
+    assert script.get_revision(bases[0]).down_revision is None
 
 
 class MigratedTriggerProbe(PersistentModel):
@@ -156,8 +257,8 @@ def test_env_wires_autogen_hook_offline_and_online() -> None:
 
 _PROBE_REVISION = '''"""Probe PersistentModel created via Alembic, not create_all.
 
-Revision ID: 0002_migrated_trigger
-Revises: 0001_initial
+Revision ID: 0003_migrated_trigger
+Revises: 0002_auth_users
 Create Date: 2026-10-25
 """
 
@@ -168,8 +269,8 @@ from alembic import op
 
 from app.migrations.ops import op_create_updated_at_trigger, op_drop_updated_at_trigger
 
-revision: str = "0002_migrated_trigger"
-down_revision: str | None = "0001_initial"
+revision: str = "0003_migrated_trigger"
+down_revision: str | None = "0002_auth_users"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -221,10 +322,11 @@ def test_migrated_database_has_updated_at_trigger_without_create_all(
 ) -> None:
     dest = tmp_path / "migrations"
     shutil.copytree(ROOT / "app" / "migrations", dest)
-    (dest / "versions" / "0002_migrated_trigger_probe.py").write_text(_PROBE_REVISION)
+    (dest / "versions" / "0003_migrated_trigger_probe.py").write_text(_PROBE_REVISION)
 
     dsn = RedactedDsn(resolve_alembic_database_url())
     ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = _alembic_config_for(dest, dsn)
     command.upgrade(config, "head")
@@ -434,6 +536,7 @@ def test_0001_upgrade_after_stamp_base_is_clear(
 ) -> None:
     dsn = RedactedDsn(resolve_alembic_database_url())
     ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = alembic_config(dsn)
     command.upgrade(config, "head")
@@ -442,19 +545,7 @@ def test_0001_upgrade_after_stamp_base_is_clear(
         with pytest.raises(Exception, match="medio migrar"):
             command.upgrade(config, "head")
     finally:
-
-        async def cleanup() -> None:
-            engine = _create_async_engine(dsn.secret())
-            try:
-                async with engine.begin() as connection:
-                    await connection.execute(
-                        text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
-                    )
-            finally:
-                await engine.dispose()
-
-        asyncio.run(cleanup())
-        command.stamp(config, "base")
+        _wipe_alembic_schema(dsn)
 
 
 def test_0001_downgrade_with_business_trigger_is_clear(
@@ -465,6 +556,7 @@ def test_0001_downgrade_with_business_trigger_is_clear(
 
     dsn = RedactedDsn(resolve_alembic_database_url())
     ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = alembic_config(dsn)
     command.upgrade(config, "head")
@@ -485,20 +577,7 @@ def test_0001_downgrade_with_business_trigger_is_clear(
         with pytest.raises(Exception, match="triggers de negocio"):
             command.downgrade(config, "base")
     finally:
-
-        async def cleanup() -> None:
-            engine = _create_async_engine(dsn.secret())
-            try:
-                async with engine.begin() as connection:
-                    await connection.execute(text("DROP TABLE IF EXISTS dep_trig"))
-                    await connection.execute(
-                        text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
-                    )
-            finally:
-                await engine.dispose()
-
-        asyncio.run(cleanup())
-        command.stamp(config, "base")
+        _wipe_alembic_schema(dsn)
 
 
 _TABLE_DDL = """
@@ -527,6 +606,7 @@ def test_updated_at_trigger_quotes_uppercase_reserved_and_schema(
 
     dsn = RedactedDsn(resolve_alembic_database_url())
     ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     command.upgrade(alembic_config(dsn), "head")
 
@@ -783,13 +863,14 @@ def test_autogenerate_from_env_adds_trigger_not_lambda(
     ensure_database_exists(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = _alembic_config_for(dest, dsn)
+    existing = {path.name for path in (dest / "versions").glob("*.py")}
     try:
         command.upgrade(config, "head")
         command.revision(config, message="hook_probe", autogenerate=True)
         generated = [
             path
             for path in (dest / "versions").glob("*.py")
-            if path.name != "0001_initial.py" and path.name != "__init__.py"
+            if path.name not in existing
         ]
         assert generated
         source = generated[0].read_text()
@@ -812,11 +893,15 @@ def test_alembic_check_is_clean_after_schema_table(
 
     dest = tmp_path / "migrations"
     shutil.copytree(ROOT / "app" / "migrations", dest)
-    (dest / "versions" / "0002_schema_probe.py").write_text(
-        '''"""schema probe
+    parent = ScriptDirectory.from_config(
+        _alembic_config_for(dest, require_postgres)
+    ).get_current_head()
+    assert parent is not None
+    (dest / "versions" / "0003_schema_probe.py").write_text(
+        f'''"""schema probe
 
-Revision ID: 0002_schema_probe
-Revises: 0001_initial
+Revision ID: 0003_schema_probe
+Revises: {parent}
 Create Date: 2026-10-26
 """
 
@@ -827,8 +912,8 @@ from alembic import op
 
 from app.migrations.ops import op_create_updated_at_trigger, op_drop_updated_at_trigger
 
-revision: str = "0002_schema_probe"
-down_revision: str | None = "0001_initial"
+revision: str = "0003_schema_probe"
+down_revision: str | None = {parent!r}
 branch_labels: str | Sequence[str | None] | None = None
 depends_on: str | Sequence[str | None] | None = None
 
@@ -873,14 +958,14 @@ def downgrade() -> None:
     ensure_database_exists(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
     config = _alembic_config_for(dest, dsn)
+    existing = {path.name for path in (dest / "versions").glob("*.py")}
     try:
         command.upgrade(config, "head")
         command.revision(config, message="after_schema", autogenerate=True)
         generated = [
             path
             for path in (dest / "versions").glob("*.py")
-            if path.name
-            not in {"0001_initial.py", "0002_schema_probe.py", "__init__.py"}
+            if path.name not in existing
         ]
         assert generated
         source = generated[0].read_text()

@@ -11,9 +11,21 @@ from sqlalchemy.engine.url import make_url
 _DEFAULT_DEV_PASSWORD = "estudiomusica"
 _DEFAULT_DEV_USER = "estudiomusica"
 _DATABASE_NAME_QUERY_KEYS = ("database", "dbname")
+DEFAULT_DEV_AUTH_SECRET = "dev-insecure-auth-secret-change-me"
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_FILE = _PROJECT_ROOT / ".env"
+
+
+def allow_test_database() -> bool:
+    """Opt-in de tests para un DSN ``*_test`` fuera de development.
+
+    Siempre ``False`` en runtime. No es un setting ni lee el entorno: un
+    despliegue no puede activarlo. Los tests lo sustituyen con
+    ``monkeypatch.setattr``.
+    """
+
+    return False
 
 
 class Settings(BaseSettings):
@@ -61,12 +73,33 @@ class Settings(BaseSettings):
     db_max_overflow: int = Field(default=10, ge=0)
     db_pool_timeout: float = Field(default=30.0, gt=0)
     db_pool_recycle: int = Field(default=1800, ge=-1)
+    auth_secret: SecretStr = Field(
+        default=SecretStr(DEFAULT_DEV_AUTH_SECRET),
+        min_length=1,
+        description=(
+            "Secreto HS256 de la cookie/JWT de sesión. El valor por defecto "
+            "solo vale en development."
+        ),
+        repr=False,
+    )
+    auth_cookie_name: str = Field(default="session", min_length=1)
+    auth_session_ttl_seconds: int = Field(default=60 * 60 * 24 * 7, ge=60)
+    bootstrap_admin_emails: str = Field(
+        default="",
+        description="Lista separada por comas. Esos emails salen de signup como admin.",
+    )
+    auth_argon2_time_cost: int = Field(default=3, ge=1)
+    auth_argon2_memory_cost: int = Field(default=65_536, ge=8_192)
+    auth_argon2_parallelism: int = Field(default=4, ge=1)
 
     def __init__(self, **data: Any) -> None:
+        redacted: ValidationError | None = None
         try:
             super().__init__(**data)
         except ValidationError as exc:
-            raise _validation_error_without_secrets(exc) from None
+            redacted = _validation_error_without_secrets(exc)
+        if redacted is not None:
+            raise redacted
 
     def cors_origin_list(self) -> list[str]:
         return [
@@ -95,6 +128,9 @@ class Settings(BaseSettings):
     def resolved_database_url(self) -> str:
         return _normalize_sslmode(self.database_url.get_secret_value())
 
+    def resolved_auth_secret(self) -> str:
+        return self.auth_secret.get_secret_value()
+
     @model_validator(mode="after")
     def reject_unsafe_cors(self) -> Self:
         if not self.cors_allow_credentials:
@@ -120,10 +156,28 @@ class Settings(BaseSettings):
             value = lowered.get(key)
             if value is None:
                 continue
-            if isinstance(value, (list, tuple)):
+            if isinstance(value, list | tuple):
                 return str(value[0]) if value else None
             return str(value)
         return None
+
+    @staticmethod
+    def _unique_query_value(parsed: object, *keys: str) -> str | None:
+        query = getattr(parsed, "query", {}) or {}
+        found: list[str] = []
+        wanted = {key.lower() for key in keys}
+        for raw_key, value in query.items():
+            if str(raw_key).lower() not in wanted:
+                continue
+            if isinstance(value, list | tuple):
+                found.extend(str(item) for item in value)
+            else:
+                found.append(str(value))
+        if len(found) > 1:
+            raise ValueError(
+                "DATABASE_URL no puede repetir database/dbname en la query"
+            )
+        return found[0] if found else None
 
     @model_validator(mode="after")
     def reject_default_database_credentials(self) -> Self:
@@ -133,16 +187,17 @@ class Settings(BaseSettings):
         explícitos: no se heredan de ``PGUSER`` / ``PGPASSWORD`` /
         ``PGDATABASE`` (asyncpg usaría el usuario como nombre de base).
         La comparación de usuario y del sufijo ``_test`` no distingue
-        mayúsculas. asyncpg acepta ``password``, ``user``, ``database`` y
-        ``dbname`` en la query; se aplican como override antes de validar.
-        También se rechazan ``passfile`` / ``.pgpass`` y certificado de
-        cliente (``sslcert`` / ``sslkey`` / ``sslpassword``, o
-        ``PGPASSFILE`` / ``PGSSLCERT`` / ``PGSSLKEY``).
+        mayúsculas (path o query). asyncpg acepta ``password``, ``user``,
+        ``database`` y ``dbname`` en la query; se aplican como override
+        antes de validar. También se rechazan ``passfile`` / ``.pgpass``
+        y certificado de cliente (``sslcert`` / ``sslkey`` /
+        ``sslpassword``, o ``PGPASSFILE`` / ``PGSSLCERT`` / ``PGSSLKEY``).
         ``sslrootcert`` en la query se traduce a un ``SSLContext`` con
         ``cafile`` (asyncpg no acepta ese kwarg). ``PGSSLROOTCERT`` es
         la alternativa por entorno. Ambos se permiten (``verify-full``).
         El cliente no puede rechazar autenticación peer: eso lo decide
-        ``pg_hba.conf``.
+        ``pg_hba.conf``. Los tests pueden optar in a ``*_test`` con
+        ``allow_test_database`` (no es variable de entorno).
         """
 
         if self.app_env == "development":
@@ -153,7 +208,7 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_URL no es un DSN válido") from None
         query_password = self._query_value(parsed, "password")
         query_user = self._query_value(parsed, "user")
-        query_database = self._query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
+        query_database = self._unique_query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
         password = query_password if query_password is not None else parsed.password
         username = query_user if query_user is not None else parsed.username
         database = query_database if query_database is not None else parsed.database
@@ -178,7 +233,7 @@ class Settings(BaseSettings):
                 "DATABASE_URL no puede usar la contraseña o el usuario "
                 "por defecto de desarrollo fuera de APP_ENV=development"
             )
-        if database.lower().endswith("_test"):
+        if database.lower().endswith("_test") and not allow_test_database():
             raise ValueError(
                 "DATABASE_URL no puede apuntar a una base *_test "
                 "fuera de APP_ENV=development"
@@ -205,6 +260,35 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @model_validator(mode="after")
+    def reject_default_auth_secret(self) -> Self:
+        """El secreto de desarrollo no vale fuera de development."""
+
+        if self.app_env == "development":
+            return self
+        secret = self.resolved_auth_secret()
+        if secret == DEFAULT_DEV_AUTH_SECRET:
+            raise ValueError(
+                "AUTH_SECRET no puede usar el valor por defecto de "
+                "desarrollo fuera de APP_ENV=development"
+            )
+        if len(secret) < 32:
+            raise ValueError(
+                "AUTH_SECRET debe tener al menos 32 caracteres fuera de "
+                "APP_ENV=development"
+            )
+        return self
+
+    def bootstrap_admin_email_set(self) -> set[str]:
+        return {
+            email.strip().lower()
+            for email in self.bootstrap_admin_emails.split(",")
+            if email.strip()
+        }
+
+    def auth_cookie_secure(self) -> bool:
+        return self.app_env != "development"
+
 
 def _normalize_sslmode(url: str) -> str:
     """``sslmode=`` de la query pasa a ``ssl=`` (asyncpg no acepta sslmode)."""
@@ -226,46 +310,69 @@ def _normalize_sslmode(url: str) -> str:
 
 
 _DSN_FIELD_NAMES = frozenset({"database_url", "DATABASE_URL"})
+_AUTH_SECRET_FIELD_NAMES = frozenset({"auth_secret", "AUTH_SECRET"})
+
+
+def _loc_has_field(loc: object, names: frozenset[str]) -> bool:
+    if isinstance(loc, (tuple, list)):
+        return any(part in names for part in loc)
+    return loc in names
 
 
 def _loc_is_dsn(loc: object) -> bool:
-    if isinstance(loc, (tuple, list)):
-        return any(part in _DSN_FIELD_NAMES for part in loc)
-    return loc in _DSN_FIELD_NAMES
+    return _loc_has_field(loc, _DSN_FIELD_NAMES)
 
 
 def _redact_error_input(value: object, *, dsn_field: bool = False) -> object:
-    """Si el campo es el DSN, se sustituye entero (sin parsear)."""
+    """Si el campo es el DSN, se sustituye entero (sin parsear).
+
+    ``auth_secret`` / ``AUTH_SECRET`` también se ocultan: el input de un
+    ``model_validator`` es el dict crudo, no un ``SecretStr``.
+    """
 
     if dsn_field:
         if isinstance(value, dict):
             return {
-                key: _redact_error_input(item, dsn_field=key in _DSN_FIELD_NAMES)
-                for key, item in value.items()
+                key: _redact_named_error_input(key, item) for key, item in value.items()
             }
         return "<dsn-redactado>"
     if isinstance(value, SecretStr):
         return "**********"
     if isinstance(value, dict):
         return {
-            key: _redact_error_input(item, dsn_field=key in _DSN_FIELD_NAMES)
-            for key, item in value.items()
+            key: _redact_named_error_input(key, item) for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):
         return [_redact_error_input(item) for item in value]
     return value
 
 
+def _redact_named_error_input(key: object, value: object) -> object:
+    if key in _DSN_FIELD_NAMES:
+        return _redact_error_input(value, dsn_field=True)
+    if key in _AUTH_SECRET_FIELD_NAMES:
+        return "**********"
+    return _redact_error_input(value)
+
+
 def _validation_error_without_secrets(exc: ValidationError) -> ValidationError:
-    """Copia el ValidationError sin el DSN original en ``input`` / ``json()``."""
+    """Copia el ValidationError sin DSN ni AUTH_SECRET en ``input`` / ``json()``."""
 
     line_errors: list[Any] = []
     for error in exc.errors(include_url=False):
-        dsn_field = _loc_is_dsn(error.get("loc"))
+        loc = error.get("loc")
+        dsn_field = _loc_is_dsn(loc)
+        raw_input = error.get("input")
+        if _loc_has_field(loc, _AUTH_SECRET_FIELD_NAMES) and not isinstance(
+            raw_input, dict
+        ):
+            redacted_input: object = "**********"
+        else:
+            redacted_input = _redact_error_input(raw_input, dsn_field=dsn_field)
         item: dict[str, Any] = {
             "type": error.get("type", "value_error"),
             "loc": error.get("loc", ()),
-            "input": _redact_error_input(error.get("input"), dsn_field=dsn_field),
+            "input": redacted_input,
         }
         ctx = error.get("ctx")
         if ctx is not None:
@@ -278,7 +385,18 @@ def _validation_error_without_secrets(exc: ValidationError) -> ValidationError:
     except Exception:
         return ValidationError.from_exception_data(
             exc.title,
-            [{"type": "value_error", "loc": ("database_url",), "input": None}],
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("settings",),
+                    "input": None,
+                    "ctx": {
+                        "error": ValueError(
+                            "no se pudo reescribir el error de validación sin secretos"
+                        )
+                    },
+                }
+            ],
             hide_input=True,
         )
 

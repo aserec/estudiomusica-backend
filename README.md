@@ -2,7 +2,7 @@
 
 Backend FastAPI de EstudioMusica. Sustituye los almacenes JSON del frontend Next.js.
 
-Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS) y la persistencia: Postgres, SQLAlchemy 2 async y Alembic. No incluye modelos de negocio.
+Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS), la persistencia (Postgres, SQLAlchemy 2 async y Alembic) y la API de autenticación (`/api/v1/auth`).
 
 ## Requisitos
 
@@ -71,6 +71,25 @@ Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde 
 
 Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
+## Autenticación
+
+`POST /api/v1/auth/signup` `{name,email,password}` → 201 `{user}` y cookie HttpOnly `session`.
+`POST /api/v1/auth/login` `{email,password}` → 200 `{user}` y cookie.
+`POST /api/v1/auth/logout` → 204 (revoca la sesión y borra la cookie).
+`GET /api/v1/auth/me` → 200 `{user, systemRole, isAdmin}` (cookie o `Authorization: Bearer`).
+
+Errores de negocio (slugs en snake_case, convención #91): `email_taken` (409), `invalid_credentials` (401), `account_suspended` (403). Sin sesión o token caducado/manipulado: `unauthorized` (401).
+
+El secreto `AUTH_SECRET` firma un JWT HS256. El valor por defecto solo vale en `development`. La cookie es HttpOnly, SameSite=Lax y Secure fuera de development. Logout escribe `revoked_at` en `auth_sessions` para que el JWT no se pueda reutilizar.
+
+```bash
+curl -c /tmp/em-cookies -sS -X POST http://127.0.0.1:8000/api/v1/auth/signup \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Ada Lovelace","email":"ada@example.com","password":"password12"}'
+curl -b /tmp/em-cookies -sS http://127.0.0.1:8000/api/v1/auth/me
+curl -b /tmp/em-cookies -c /tmp/em-cookies -sS -X POST http://127.0.0.1:8000/api/v1/auth/logout
+```
+
 ## Postgres, migraciones y tests con BD
 
 El DSN se lee de `DATABASE_URL` (pydantic-settings). El valor por defecto coincide con `docker-compose.yml`:
@@ -85,7 +104,7 @@ postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
 docker compose up -d
 ```
 
-Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings exige usuario, contraseña y base **explícitos** en el DSN (no se heredan de `PGUSER` / `PGPASSWORD` / `PGDATABASE`; asyncpg usaría el usuario como nombre de base) y rechaza la contraseña por defecto, el usuario por defecto (`estudiomusica`, p. ej. `estudiomusica:otra@…`) y las bases `*_test` (sin distinguir mayúsculas, p. ej. `x_TEST`). También rechaza `.pgpass` (`passfile` en la query o `PGPASSFILE`) y certificado de cliente (`sslcert` / `sslkey` / `sslpassword` en la query, o `PGSSLCERT` / `PGSSLKEY`). `sslrootcert` en la query se traduce a un `SSLContext` con `cafile` (asyncpg no tiene ese kwarg); `PGSSLROOTCERT` es la alternativa por entorno. Ambos se permiten (`verify-full`) y aceptan una CA sin `keyUsage`, como libpq (Python 3.13+ activa `VERIFY_X509_STRICT` en `create_default_context`). Un `sslrootcert` que solo contenga una intermedia no basta: no se activa `VERIFY_X509_PARTIAL_CHAIN` (igual que libpq/asyncpg). `ssl=require` + `sslrootcert` también verifica el hostname (más estricto que libpq, que con `require` no comprueba ni CA ni hostname). El cliente no puede rechazar autenticación peer: eso lo decide `pg_hba.conf`. No se validan `PGSSLMODE`, `PGSSLPASSWORD`, `?service=` / `PGSERVICEFILE` ni los certificados por defecto de `~/.postgresql`. Los overrides de query (`password`, `user`, `database`, `dbname`) se aplican antes de validar. `sslmode=` de la query se traduce a `ssl=` (asyncpg no acepta `sslmode` como kwarg). En development un DSN sin credenciales sí puede heredar `PGUSER`/`PGPASSWORD`. Los errores de validación no muestran el DSN (`hide_input_in_errors`; tampoco en `.errors()` / `.json()`). Espera a que el healthcheck esté sano:
+Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings exige usuario, contraseña y base **explícitos** en el DSN (no se heredan de `PGUSER` / `PGPASSWORD` / `PGDATABASE`; asyncpg usaría el usuario como nombre de base) y rechaza la contraseña por defecto, el usuario por defecto (`estudiomusica`, p. ej. `estudiomusica:otra@…`, también en la query) y las bases `*_test` (path o query, sin distinguir mayúsculas, p. ej. `x_TEST`). También rechaza `.pgpass` (`passfile` en la query o `PGPASSFILE`) y certificado de cliente (`sslcert` / `sslkey` / `sslpassword` en la query, o `PGSSLCERT` / `PGSSLKEY`). `sslrootcert` en la query se traduce a un `SSLContext` con `cafile` (asyncpg no tiene ese kwarg); `PGSSLROOTCERT` es la alternativa por entorno. Ambos se permiten (`verify-full`) y aceptan una CA sin `keyUsage`, como libpq (Python 3.13+ activa `VERIFY_X509_STRICT` en `create_default_context`). Un `sslrootcert` que solo contenga una intermedia no basta: no se activa `VERIFY_X509_PARTIAL_CHAIN` (igual que libpq/asyncpg). `ssl=require` + `sslrootcert` también verifica el hostname (más estricto que libpq, que con `require` no comprueba ni CA ni hostname). El cliente no puede rechazar autenticación peer: eso lo decide `pg_hba.conf`. No se validan `PGSSLMODE`, `PGSSLPASSWORD`, `?service=` / `PGSERVICEFILE` ni los certificados por defecto de `~/.postgresql`. Los overrides de query (`password`, `user`, `database`, `dbname`) se aplican antes de validar; `database`/`dbname` duplicados se rechazan. `sslmode=` de la query se traduce a `ssl=` (asyncpg no acepta `sslmode` como kwarg). Los tests de production activan un opt-in (`allow_test_database`) que **no** lee el entorno. En development un DSN sin credenciales sí puede heredar `PGUSER`/`PGPASSWORD`. Los errores de validación no muestran el DSN ni `AUTH_SECRET` (`hide_input_in_errors`; tampoco en `.errors()` / `.json()`, aunque el fallo sea a nivel de modelo y el input sea el dict crudo). Espera a que el healthcheck esté sano:
 
 ```bash
 docker compose ps
@@ -119,7 +138,7 @@ En el repo, o con el wheel, también vale `alembic -c app/alembic.ini upgrade he
 uv run alembic revision -m "descripcion" --autogenerate
 ```
 
-Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones; no hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes).
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. No hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext` si falta, `users` y `auth_sessions`, y monta ese trigger en ambas. El downgrade de 0002 **no** hace `DROP EXTENSION citext` (puede venir preinstalada o usarla otra revisión).
 
 `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
@@ -145,7 +164,17 @@ uv run pytest
 
 `uv run pytest` sin Postgres en marcha **salta** los tests de BD solo si el error es de conexión (refused, host desconocido, timeout). Un fallo de autenticación o una migración rota **falla**. En CI: `REQUIRE_POSTGRES=1 uv run pytest` (también `true`/`yes`/`on`, como Pydantic) convierte el skip en fallo; un valor desconocido aborta. Los mensajes y `--showlocals` no incluyen la contraseña. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
 
-Los tests de `?sslrootcert=` (`tls_postgres`) levantan un Postgres TLS efímero con Docker. Si `docker` no está en el `PATH`, se saltan, salvo `REQUIRE_TLS_TESTS=1` (entonces fallan). Para reutilizar un servidor TLS ya levantado:
+El fixture `production_client` crea el rol `em_prod_tests_<pid>` (LOGIN, **sin** SUPERUSER / CREATEDB / CREATEROLE) con contraseña aleatoria por ejecución y lo borra al terminar la suite, también si falla. El sufijo es el pid del pytest padre: un hijo (p. ej. `test_leftovers`) que ejecute `migrated_test_database` no borra el rol del padre. Grants mínimos, los mismos que un rol de producción:
+
+- `CONNECT` en la base de test
+- `USAGE` en el esquema `public`
+- `SELECT, INSERT, UPDATE, DELETE` en las tablas de `public`
+- `USAGE, SELECT` en las secuencias de `public`
+- `USAGE` en el tipo `citext` (email)
+
+No puede migrar ni crear bases. Las filas de esos tests (`prod-%@example.com`) se borran al terminar.
+
+Los tests de `?sslrootcert=` (`tls_postgres`) levantan un Postgres TLS efímero con Docker. Si `docker` no está en el `PATH` y no hay `TLS_TEST_DATABASE_URL` + `TLS_TEST_CAFILE`, se saltan **antes** de generar certificados con `openssl`. `REQUIRE_TLS_TESTS=1` lo exige (falla, no salta; también si `TLS_TEST_CAFILE` no existe o el Postgres TLS efímero no arranca). Un valor desconocido aborta, como `REQUIRE_POSTGRES`. Para reutilizar un servidor TLS ya levantado:
 
 ```bash
 export TLS_TEST_DATABASE_URL=postgresql+asyncpg://tlsprobe:tlsprobe-secret@127.0.0.1:55433/tlsprobe_test
@@ -254,10 +283,11 @@ app/
   errors.py          # Sobre de error y handlers (validación, HTTP)
   exceptions.py      # AccessDenied, NotFound, Validation, PayloadTooLarge
   config/            # Ajustes por variables de entorno (pydantic-settings)
-  routers/           # Rutas HTTP (health, health/db y examples)
-  schemas/           # Modelos Pydantic (camelCase, errores, paginación)
-  services/          # Lógica de aplicación (salud + lista fija de examples)
-  models/            # Base SQLAlchemy y mixin PersistentModel
+  routers/           # Rutas HTTP (health, health/db, auth y examples)
+  schemas/           # Modelos Pydantic (camelCase, errores, paginación, auth)
+  services/          # Lógica de aplicación (salud, auth, examples)
+  auth/              # Hash argon2, JWT HS256 y cookie de sesión
+  models/            # PersistentModel, User y AuthSession
   migrations/        # Alembic (env.py async + versions/ + config programático)
   alembic.ini        # Fuente de verdad empaquetada
 docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
@@ -282,6 +312,9 @@ uv.lock              # Lockfile reproducible de uv
 | SQLAlchemy | 2.1.6 (extra asyncio) |
 | asyncpg | 0.32.0 |
 | Alembic | 1.20.1 |
+| argon2-cffi | 25.1.0 |
+| PyJWT | 2.15.1 |
+| email-validator | 2.3.0 |
 | pytest-asyncio | 1.4.0 |
 | pytest | 9.1.1 |
 | pytest-timeout | 2.4.0 |
