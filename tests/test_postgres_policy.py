@@ -506,7 +506,10 @@ def test_require_tls_without_postgres_fails_the_suite() -> None:
         timeout=60,
         check=False,
     )
-    assert result.returncode != 0, result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert "no está disponible" in output
+    assert "Failed" in output or "ERROR" in output or "failed" in output.lower()
 
 
 def test_apply_test_migrations_raises_not_skips(
