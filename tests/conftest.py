@@ -421,7 +421,7 @@ def production_database_url(test_url: str | RedactedDsn, password: str) -> Redac
 
 
 def _admin_engine(admin: RedactedDsn) -> AsyncEngine:
-    return create_async_engine(
+    return _create_async_engine(
         admin.secret(),
         isolation_level="AUTOCOMMIT",
         connect_args={

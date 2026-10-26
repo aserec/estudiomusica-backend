@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.passwords import dummy_hash_for, hash_password, verify_password
 from app.auth.tokens import TokenError, decode_session_token, encode_session_token
@@ -17,7 +17,11 @@ from app.config import get_settings
 from app.db import RedactedDsn
 from app.models import AuthSession, User
 from app.schemas.auth import SignUpRequest
-from tests.conftest import PRODUCTION_AUTH_SECRET, PRODUCTION_TEST_USER
+from tests.conftest import (
+    PRODUCTION_AUTH_SECRET,
+    PRODUCTION_TEST_USER,
+    _create_async_engine,
+)
 
 pytestmark = pytest.mark.db
 
@@ -519,7 +523,7 @@ def test_production_test_role_is_not_superuser(
     require_postgres: RedactedDsn,
 ) -> None:
     async def rolsuper() -> object:
-        engine = create_async_engine(require_postgres.secret())
+        engine = _create_async_engine(require_postgres.secret())
         try:
             async with engine.connect() as connection:
                 return await connection.scalar(
