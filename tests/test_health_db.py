@@ -1955,9 +1955,44 @@ def test_asyncpg_url_translates_sslmode(tmp_path: Any) -> None:
 
 _ALTA_MIX_QUERIES = (
     "ssl=disable&sslmode=verify-full",
-    "ssl=require&sslmode=disable&sslrootcert=/tmp/r92-ca.pem",
+    "sslmode=verify-full&ssl=disable",
     "sslmode=disable&sslmode=verify-full",
+    "sslmode=verify-full&sslmode=disable",
+    "ssl=disable&ssl=verify-full",
+    "SSL=disable&sslmode=verify-full",
+    "sslmode=verify-full&SSLMODE=disable",
+    "ssl=verify-full&Ssl=disable",
+    "ssl=verify-full&SSL=disable",
+    "%73slmode=verify-full&ssl=disable",
+    "ssl=disable&%73slmode=verify-full",
+    "ssl%6Dode=verify-full&SSL=disable",
+    "ssl=require&sslmode=disable&sslrootcert=@CA@",
+    "sslmode=verify-full&ssl=disable&sslrootcert=@CA@",
+    "sslmode=verify-full#&ssl=disable",
+    "ssl=disable#&sslmode=verify-full",
 )
+
+
+def _mix_query(query: str, cafile: str = "/tmp/r92-ca.pem") -> str:
+    return query.replace("@CA@", cafile)
+
+
+def _mix_dsn(base: str, query: str, *, shape: str = "plain") -> str:
+    """DSN crudo. ``hash`` / ``qm`` dejan ``#`` / ``?`` sin codificar."""
+
+    from sqlalchemy.engine.url import make_url
+
+    parsed = make_url(base)
+    user = parsed.username or "u"
+    password = parsed.password or "p"
+    host = parsed.host or "127.0.0.1"
+    port = parsed.port or 5432
+    database = parsed.database or "db_test"
+    if shape == "hash":
+        password = f"Hq#{password}"
+    elif shape == "qm":
+        password = f"Hq?{password}"
+    return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{database}?{query}"
 
 
 def _exercise_ssl_path(path: str, url: str, monkeypatch: pytest.MonkeyPatch) -> str:
@@ -1998,14 +2033,19 @@ def _ssl_path_error(path: str, url: str, monkeypatch: pytest.MonkeyPatch) -> Exc
 
 @pytest.mark.parametrize("path", ["app", "alembic-url", "alembic-env"])
 @pytest.mark.parametrize("query", _ALTA_MIX_QUERIES)
+@pytest.mark.parametrize("shape", ["plain", "hash", "qm"])
 def test_conflicting_ssl_query_rejected_on_all_paths(
-    path: str, query: str, monkeypatch: pytest.MonkeyPatch
+    path: str, query: str, shape: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """MEDIA-1: ssl+sslmode o sslmode repetido no conectan en claro."""
 
     from app.db import _SSL_CONFLICT_MSG
 
-    url = f"postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?{query}"
+    url = _mix_dsn(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test",
+        _mix_query(query),
+        shape=shape,
+    )
     caught = _ssl_path_error(path, url, monkeypatch)
     messages = [str(caught)]
     current: BaseException | None = caught
@@ -2014,6 +2054,45 @@ def test_conflicting_ssl_query_rejected_on_all_paths(
         current = current.__cause__ or current.__context__
     assert any("mezclar ni repetir" in item for item in messages), messages
     assert any(_SSL_CONFLICT_MSG in item for item in messages), messages
+
+
+@pytest.mark.db
+@pytest.mark.timeout(120)
+def test_conflicting_ssl_query_rejected_on_live_tls(
+    monkeypatch: pytest.MonkeyPatch,
+    tls_postgres: tuple[Any, Any, str],
+) -> None:
+    """ALTA: mezcla / repetición / ``#`` / ``?`` no conectan en claro (TLS vivo)."""
+
+    from app.db import _SSL_CONFLICT_MSG
+
+    cafile, _bad_ca, dsn = tls_postgres
+    cases = [
+        (path, query, shape)
+        for path in ("app", "alembic-url", "alembic-env")
+        for query in _ALTA_MIX_QUERIES
+        for shape in ("plain", "hash", "qm")
+    ]
+    for path, query, shape in cases:
+        url = _mix_dsn(dsn, _mix_query(query, str(cafile)), shape=shape)
+        caught = _ssl_path_error(path, url, monkeypatch)
+        messages = [str(caught)]
+        current: BaseException | None = caught
+        while current is not None:
+            messages.append(str(current))
+            current = current.__cause__ or current.__context__
+        assert any("mezclar ni repetir" in item for item in messages), (
+            path,
+            shape,
+            query,
+            messages,
+        )
+        assert any(_SSL_CONFLICT_MSG in item for item in messages), (
+            path,
+            shape,
+            query,
+            messages,
+        )
 
 
 @pytest.mark.parametrize("path", ["app", "alembic-url", "alembic-env"])

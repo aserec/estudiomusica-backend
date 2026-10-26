@@ -5,7 +5,6 @@ from __future__ import annotations
 import ssl
 from collections.abc import AsyncIterator, Mapping
 from typing import Annotated, Any, get_origin, get_type_hints
-from urllib.parse import parse_qsl, urlparse
 
 from fastapi import Depends, Request
 from sqlalchemy import event
@@ -99,6 +98,10 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
     """Una sola regla para ``ssl`` / ``sslmode`` (Settings, engine, Alembic).
 
     Rechaza ``ssl`` y ``sslmode`` juntos y las claves repetidas.
+    La detección usa ``make_url(url).query`` (claves en minúsculas;
+    una tupla es repetición). No usa ``urlparse``: un ``#`` / ``?``
+    sin codificar no puede ocultar claves, y ``[`` / ``]`` en la
+    contraseña siguen siendo válidos.
     ``SSL`` / ``Ssl`` pasan a ``ssl``. ``sslmode`` pasa a ``ssl``.
     """
 
@@ -106,7 +109,8 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
         parsed = make_url(url)
     except Exception:
         return url
-    pairs = parse_qsl(urlparse(url).query, keep_blank_values=True)
+    query = dict(parsed.query or {})
+    pairs: list[tuple[str, Any]] = [(str(key), value) for key, value in query.items()]
     counts: dict[str, int] = {}
     for key, _value in pairs:
         lowered = key.lower()
@@ -116,7 +120,6 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
         raise ValueError(_SSL_CONFLICT_MSG)
     if "ssl" in counts and "sslmode" in counts:
         raise ValueError(_SSL_CONFLICT_MSG)
-    query = dict(parsed.query or {})
     ssl_value: object | None = None
     new_query: dict[Any, Any] = {}
     for key, value in query.items():
