@@ -321,6 +321,24 @@ def test_production_rejects_pgpassfile_and_client_cert_env(
     get_settings.cache_clear()
 
 
+def test_production_rejects_sslpassword_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SR3: ``?sslpassword=`` se rechaza fuera de development."""
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?sslpassword=client-secret",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="sslpassword|certificado") as caught:
+        Settings()
+    assert "client-secret" not in str(caught.value)
+    assert "s3cret" not in str(caught.value)
+    get_settings.cache_clear()
+
+
 def test_production_allows_sslrootcert_and_pgsslrootcert(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

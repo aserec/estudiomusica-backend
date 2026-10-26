@@ -138,9 +138,11 @@ class Settings(BaseSettings):
         También se rechazan ``passfile`` / ``.pgpass`` y certificado de
         cliente (``sslcert`` / ``sslkey`` / ``sslpassword``, o
         ``PGPASSFILE`` / ``PGSSLCERT`` / ``PGSSLKEY``).
-        ``sslrootcert`` / ``PGSSLROOTCERT`` son la CA del servidor
-        (hace falta para ``verify-full``) y se permiten. El cliente no
-        puede rechazar autenticación peer: eso lo decide ``pg_hba.conf``.
+        ``sslrootcert`` en la query se traduce a un ``SSLContext`` con
+        ``cafile`` (asyncpg no acepta ese kwarg). ``PGSSLROOTCERT`` es
+        la alternativa por entorno. Ambos se permiten (``verify-full``).
+        El cliente no puede rechazar autenticación peer: eso lo decide
+        ``pg_hba.conf``.
         """
 
         if self.app_env == "development":
