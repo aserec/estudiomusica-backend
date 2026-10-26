@@ -2138,6 +2138,51 @@ def test_email_term_fallback_applies_nfc_after_strip_lower() -> None:
     assert _email_term(ligature) != "fi"
 
 
+async def test_search_name_match_keeps_nfc_not_nfkc(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    marker = uuid.uuid4().hex[:8]
+    ligature = f"\ufb01le{marker}"
+    ascii_name = f"file{marker}"
+    assert unicodedata.normalize("NFC", ligature) == ligature
+    assert unicodedata.normalize("NFKC", ligature) == ascii_name
+    admin = await _signup_role(
+        session_client, db_session, SystemRole.ADMIN, prefix="g9-admin"
+    )
+    lig_user = await _signup(
+        session_client, email=unique_email("g9-lig"), name=f"{ligature} Lig"
+    )
+    ascii_user = await _signup(
+        session_client, email=unique_email("g9-asc"), name=f"{ascii_name} Asc"
+    )
+    assert lig_user["response"].json()["user"]["firstName"] == ligature
+    await session_client.post(
+        "/api/v1/auth/login",
+        json={"email": admin["email"], "password": PASSWORD},
+    )
+    by_lig = await session_client.get(
+        "/api/v1/users/search", params={"q": ligature, "pageSize": 20}
+    )
+    assert by_lig.status_code == 200, by_lig.text
+    lig_ids = {item["id"] for item in by_lig.json()["items"]}
+    assert str(lig_user["id"]) in lig_ids
+    assert str(ascii_user["id"]) not in lig_ids
+    by_ascii = await session_client.get(
+        "/api/v1/users/search", params={"q": ascii_name, "pageSize": 20}
+    )
+    assert by_ascii.status_code == 200
+    ascii_ids = {item["id"] for item in by_ascii.json()["items"]}
+    assert str(ascii_user["id"]) in ascii_ids
+    assert str(lig_user["id"]) not in ascii_ids
+    listed = await session_client.get(
+        "/api/v1/admin/users", params={"query": ligature, "pageSize": 20}
+    )
+    assert listed.status_code == 200
+    listed_ids = {item["id"] for item in listed.json()["items"]}
+    assert str(lig_user["id"]) in listed_ids
+    assert str(ascii_user["id"]) not in listed_ids
+
+
 async def test_identity_put_keeps_nfc_not_nfkc_ligature(
     session_client: Any, db_session: AsyncSession
 ) -> None:
