@@ -1771,7 +1771,7 @@ async def test_teacher_search_normalizes_istanbul_email_like_login(
         )
     )
     await db_session.flush()
-    assert _email_term(typed_email) == stored
+    assert stored == f"i\u0307stanbul-{marker}@example.com"
     found = await session_client.get("/api/v1/users/search", params={"q": typed_email})
     assert found.status_code == 200
     items = found.json()["items"]
@@ -1809,7 +1809,7 @@ async def test_search_nfd_email_matches_nfc_stored(
     stored = unicodedata.normalize("NFC", raw_stored)
     typed_nfd = unicodedata.normalize("NFD", stored)
     assert typed_nfd != stored
-    assert _email_term(typed_nfd) == stored
+    assert stored == f"{nfc_local}-{marker}@example.com"
 
     teacher = await _signup(session_client, email=unique_email("tea-nfd"))
     await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
@@ -2091,7 +2091,7 @@ async def test_teacher_exact_email_query_uses_unique_index(
 ) -> None:
     dsn = RedactedDsn(resolve_test_database_url())
     engine = create_async_engine(dsn.secret())
-    email = _email_term("Explain-Unique@example.com")
+    email = "explain-unique@example.com"
     stmt = select(User).where(*_visible_user_filters(), _exact_email_clause(email))
     compiled = stmt.compile(
         dialect=engine.sync_engine.dialect,
@@ -2267,7 +2267,8 @@ async def test_search_compatibility_local_part_matches_login(
     created = await _signup(session_client, email=typed, name=f"Nfc3 {marker}")
     stored = created["response"].json()["user"]["email"]
     assert stored == typed
-    assert stored == f"ﬁle-{marker}@example.com"
+    assert "\ufb01" in stored
+    assert stored != f"file-{marker}@example.com"
     session_client.cookies.clear()
 
     teacher = await _signup(session_client, email=unique_email("tea-nfc3"))

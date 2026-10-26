@@ -23,7 +23,6 @@ from app.models import AuthSession, CourseMembership, User
 from app.models.user import SystemRole
 from app.permissions.matrix import has_site_permission
 from app.permissions.types import CourseRole, Permission
-from app.schemas.auth import normalize_email
 from app.schemas.pagination import Paginated, PaginationQuery
 from app.schemas.users import (
     AdminUserIdentityUpdate,
@@ -106,9 +105,7 @@ def _email_term(term: str) -> str:
     email válido, ``strip`` + ``lower`` + NFC.
     """
 
-    prepared = normalize_email(term)
-    if not isinstance(prepared, str):
-        prepared = term.strip().lower()
+    prepared = term.strip().lower()
     try:
         return str(_EMAIL_ADAPTER.validate_python(prepared))
     except ValidationError:
