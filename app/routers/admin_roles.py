@@ -1,9 +1,8 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_session
+from app.db import SessionDep
 from app.models import User
 from app.permissions.deps import require_site_permission
 from app.permissions.types import Permission
@@ -41,7 +40,7 @@ _ADMIN = require_site_permission(Permission.SITE_MANAGE_ADMINS)
 )
 async def get_system_roles(
     _admin: Annotated[User, Depends(_ADMIN)],
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: SessionDep,
 ) -> list[SystemRoleResponse]:
     rows = await list_system_roles(session)
     return [to_system_role_response(row) for row in rows]
@@ -72,7 +71,7 @@ async def patch_system_role(
     role_id: str,
     body: SystemRoleUpdate,
     _admin: Annotated[User, Depends(_ADMIN)],
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: SessionDep,
 ) -> SystemRoleResponse:
     row = await update_system_role(session, role_id, body)
     return to_system_role_response(row)
@@ -96,7 +95,7 @@ async def patch_system_role(
 async def remove_system_role(
     role_id: str,
     _admin: Annotated[User, Depends(_ADMIN)],
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: SessionDep,
 ) -> Response:
     await delete_system_role(session, role_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
