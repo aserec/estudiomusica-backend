@@ -192,8 +192,6 @@ async def test_signup_validation_errors(session_client: Any) -> None:
 
 async def test_signup_name_bounds_after_nfc_and_raw(session_client: Any) -> None:
     nfd_e = "e\u0301"
-    assert len(unicodedata.normalize("NFC", nfd_e * 80)) == 80
-    assert len(unicodedata.normalize("NFC", nfd_e * 81)) == 81
 
     first_ok = await session_client.post(
         "/api/v1/auth/signup",
@@ -216,7 +214,6 @@ async def test_signup_name_bounds_after_nfc_and_raw(session_client: Any) -> None
             json=signup_body(name=raw, email=unique_email("c-first81")),
         )
         assert first_over.status_code == 400, first_over.text
-        assert first_over.status_code != 500
         assert first_over.json()["error"] == "validation"
         assert "name" in first_over.json()["fields"]
 
@@ -241,9 +238,7 @@ async def test_signup_name_bounds_after_nfc_and_raw(session_client: Any) -> None
             json=signup_body(name=raw, email=unique_email("c-last81")),
         )
         assert last_over.status_code == 400, last_over.text
-        assert last_over.status_code != 500
         assert last_over.json()["error"] == "validation"
-        assert last_over.json() != {"error": "internal_error"}
         assert "name" in last_over.json()["fields"]
 
     raw_ok = "A" + (" " * 1600)
