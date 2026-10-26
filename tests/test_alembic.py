@@ -476,8 +476,17 @@ def test_0001_downgrade_with_business_trigger_is_clear(
         engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
+                await connection.execute(text("SET LOCAL lock_timeout = '8s'"))
                 await connection.execute(
-                    text("CREATE TABLE IF NOT EXISTS dep_trig (updated_at timestamptz)")
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = current_database() "
+                        "AND pid <> pg_backend_pid()"
+                    )
+                )
+                await connection.execute(text("DROP TABLE IF EXISTS dep_trig"))
+                await connection.execute(
+                    text("CREATE TABLE dep_trig (updated_at timestamptz)")
                 )
                 await connection.execute(text(updated_at_trigger_sql("dep_trig")))
         finally:
@@ -493,6 +502,14 @@ def test_0001_downgrade_with_business_trigger_is_clear(
             engine = _create_async_engine(dsn.secret())
             try:
                 async with engine.begin() as connection:
+                    await connection.execute(text("SET LOCAL lock_timeout = '8s'"))
+                    await connection.execute(
+                        text(
+                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                            "WHERE datname = current_database() "
+                            "AND pid <> pg_backend_pid()"
+                        )
+                    )
                     await connection.execute(text("DROP TABLE IF EXISTS dep_trig"))
                     await connection.execute(
                         text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")

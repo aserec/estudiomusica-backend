@@ -2186,7 +2186,9 @@ def test_blank_tls_keys_and_encoded_query_raise() -> None:
     )
     for query in cases:
         url = f"postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?{query}"
-        with pytest.raises(ValueError, match="claves TLS vacías|percent-encoded") as caught:
+        with pytest.raises(
+            ValueError, match="claves TLS vacías|percent-encoded"
+        ) as caught:
             normalize_asyncpg_ssl_url(url)
         assert str(caught.value) == _SSL_BLANK_MSG
     for shape in ("plain", "hash", "qm"):
