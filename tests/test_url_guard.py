@@ -88,17 +88,44 @@ def test_resolve_alembic_database_url_derives_from_test(
     assert url.endswith("/app_alembic_test")
 
 
-def _revision_graph() -> dict[str, str | None]:
+def _ast_down_revision(value: ast.AST | None) -> str | tuple[str, ...] | None:
+    """``down_revision``: ``None``, un id, o una tupla de merge."""
+
+    if value is None:
+        return None
+    if isinstance(value, ast.Constant):
+        return value.value if isinstance(value.value, str) else None
+    if isinstance(value, ast.Tuple | ast.List):
+        parents = tuple(
+            elt.value
+            for elt in value.elts
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+        )
+        return parents or None
+    return None
+
+
+def _flatten_down_revisions(down: str | tuple[str, ...] | None) -> tuple[str, ...]:
+    if down is None:
+        return ()
+    if isinstance(down, tuple):
+        return down
+    return (down,)
+
+
+def _revision_graph(
+    versions: Path | None = None,
+) -> dict[str, str | tuple[str, ...] | None]:
     """revision → down_revision parseado de los ficheros (no de Alembic)."""
 
-    versions = ROOT / "app" / "migrations" / "versions"
-    graph: dict[str, str | None] = {}
-    for path in versions.glob("*.py"):
+    directory = versions or (ROOT / "app" / "migrations" / "versions")
+    graph: dict[str, str | tuple[str, ...] | None] = {}
+    for path in directory.glob("*.py"):
         if path.name == "__init__.py":
             continue
         tree = ast.parse(path.read_text())
         rev: str | None = None
-        down: str | None = None
+        down: str | tuple[str, ...] | None = None
         for node in tree.body:
             if not isinstance(node, ast.AnnAssign) or not isinstance(
                 node.target, ast.Name
@@ -110,18 +137,18 @@ def _revision_graph() -> dict[str, str | None]:
                 and isinstance(node.value.value, str)
             ):
                 rev = node.value.value
-            if node.target.id == "down_revision" and isinstance(
-                node.value, ast.Constant
-            ):
-                down = node.value.value if isinstance(node.value.value, str) else None
+            if node.target.id == "down_revision":
+                down = _ast_down_revision(node.value)
         if rev is not None:
             graph[rev] = down
     return graph
 
 
-def _expected_heads() -> list[str]:
-    graph = _revision_graph()
-    downs = {down for down in graph.values() if down}
+def _expected_heads(versions: Path | None = None) -> list[str]:
+    graph = _revision_graph(versions)
+    downs: set[str] = set()
+    for down in graph.values():
+        downs.update(_flatten_down_revisions(down))
     return sorted(revision for revision in graph if revision not in downs)
 
 
@@ -170,6 +197,23 @@ def test_root_alembic_ini_is_not_a_symlink() -> None:
     path = ROOT / "alembic.ini"
     assert path.is_file()
     assert not path.is_symlink()
+
+
+def test_expected_heads_does_not_treat_merge_as_root(tmp_path: Path) -> None:
+    """Una merge ``down_revision = ('a', 'b')`` no es cabeza; sus padres sí."""
+
+    (tmp_path / "0001_a.py").write_text(
+        "revision: str = 'a'\ndown_revision: str | None = None\n"
+    )
+    (tmp_path / "0002_b.py").write_text(
+        "revision: str = 'b'\ndown_revision: str | None = None\n"
+    )
+    (tmp_path / "0003_merge.py").write_text(
+        "revision: str = 'merge'\ndown_revision: tuple[str, ...] = ('a', 'b')\n"
+    )
+    assert _expected_heads(tmp_path) == ["merge"]
+    graph = _revision_graph(tmp_path)
+    assert graph["merge"] == ("a", "b")
 
 
 def test_make_alembic_config_loads_packaged_ini() -> None:
