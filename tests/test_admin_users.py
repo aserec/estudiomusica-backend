@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.auth.tokens import encode_session_token
@@ -2260,10 +2261,11 @@ async def test_admin_search_fallback_keeps_nfc_not_nfkc_ligature(
 
 
 def test_name_match_compiles_without_concat() -> None:
-    compiled = _name_match("ana").compile(compile_kwargs={"literal_binds": True})
+    compiled = _name_match("ana").compile(dialect=postgresql.dialect())
     sql = str(compiled)
     assert "concat(" not in sql.lower()
-    assert "||" in sql
+    assert "users.first_name || ' ' || users.last_name" in sql
+    assert list(compiled.params.values()) == ["%ana%"]
 
 
 async def test_teacher_exact_email_query_uses_unique_index(
