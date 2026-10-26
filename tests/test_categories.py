@@ -22,11 +22,13 @@ from app.schemas.categories import (
     CategoryCreate,
     CategoryUpdate,
     category_name_key,
+    clip_to_grapheme_limit,
     normalize_category_description,
     normalize_category_name,
 )
 from app.services.categories import (
     _CATEGORY_TREE_LOCK_KEY,
+    _dup_name,
     _integrity_name,
     _name_taken,
     _raise_from_integrity,
@@ -1286,6 +1288,130 @@ async def test_fix_category_name_keys_renames_duplicates(
     assert rows[0].name_key == category_name_key(rows[0].name)
     assert rows[1].name_key == category_name_key(rows[1].name)
     assert rows[0].name_key != rows[1].name_key
+
+
+async def test_fix_pop_only_if_taken_is_row(db_session: AsyncSession) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('Y (dup 1)', 'y-dup-a', 0), "
+            "('y (DUP 1)', 'y-dup-b', 1), "
+            "('Y', 'y-root-a', 2), "
+            "('y', 'y-root-b', 3)"
+        )
+    )
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    names = [
+        row.name
+        for row in (
+            await db_session.execute(
+                text("SELECT name FROM categories ORDER BY sort_order, id")
+            )
+        ).all()
+    ]
+    assert len(names) == 4
+    keys = [
+        row.name_key
+        for row in (
+            await db_session.execute(text("SELECT name_key FROM categories"))
+        ).all()
+    ]
+    folded = (
+        await db_session.execute(
+            text("SELECT lower(u::citext) FROM unnest(CAST(:vals AS text[])) AS u"),
+            {"vals": keys},
+        )
+    ).all()
+    assert len({row[0] for row in folded}) == 4
+
+
+async def test_fix_izmir_citext_without_integrity_error(
+    db_session: AsyncSession,
+) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('İzmir', 'izmir-a', 0), "
+            "('izmir', 'izmir-b', 1)"
+        )
+    )
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    same = await db_session.scalar(
+        text("SELECT lower(CAST(:a AS citext)) = lower(CAST(:b AS citext))"),
+        {"a": "İzmir", "b": "izmir"},
+    )
+    names = {
+        row.name
+        for row in (await db_session.execute(text("SELECT name FROM categories"))).all()
+    }
+    if same:
+        assert len(names) == 2
+        assert names != {"İzmir", "izmir"}
+    else:
+        assert names == {"İzmir", "izmir"}
+
+
+async def test_fix_second_run_does_not_touch_updated_at(
+    db_session: AsyncSession,
+) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('Piano', 'wrong', 0), "
+            "('Laud', 'laud', 1)"
+        )
+    )
+    first = await fix_category_name_keys(db_session)
+    assert first.ok()
+    before = {
+        row.id: row.updated_at
+        for row in (
+            await db_session.execute(text("SELECT id, updated_at FROM categories"))
+        ).all()
+    }
+    second = await fix_category_name_keys(db_session)
+    assert second.ok()
+    after = {
+        row.id: row.updated_at
+        for row in (
+            await db_session.execute(text("SELECT id, updated_at FROM categories"))
+        ).all()
+    }
+    assert after == before
+
+
+async def test_dup_name_cuts_on_grapheme_not_tags() -> None:
+    flag = _FLAG_ENGLAND
+    name = ("B" * 110) + flag
+    clipped = _dup_name(name, 1)
+    assert len(clipped) <= 120
+    assert "\U000e0067" not in clipped
+    assert clipped.endswith(" (dup 1)")
+    assert normalize_category_name(clipped) == clipped
+    assert clip_to_grapheme_limit(name, 111) == "B" * 110
+    scotland = ("B" * 110) + _FLAG_SCOTLAND
+    cut = _dup_name(scotland, 1)
+    assert _BLACK_FLAG not in cut or "\U000e007f" in cut
+    assert "\U000e0067" not in cut
+    assert normalize_category_name(cut) == cut
+
+
+async def test_fix_takes_advisory_lock(db_session: AsyncSession) -> None:
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    held = (
+        await db_session.execute(
+            text(
+                "SELECT classid, objid FROM pg_locks "
+                "WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted"
+            )
+        )
+    ).all()
+    assert (_CATEGORY_TREE_LOCK_KEY[0], _CATEGORY_TREE_LOCK_KEY[1]) in {
+        (row.classid, row.objid) for row in held
+    }
 
 
 def test_verify_script_exits_zero_and_fix(

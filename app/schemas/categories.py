@@ -231,6 +231,60 @@ def _is_visible(char: str) -> bool:
     return unicodedata.category(char)[0] not in {"C", "Z", "M"}
 
 
+_RI_START = 0x1F1E6
+_RI_END = 0x1F1FF
+_TAG_TERM = "\U000e007f"
+
+
+def _is_grapheme_extend(char: str) -> bool:
+    code = ord(char)
+    if unicodedata.category(char) in {"Mn", "Me", "Mc"}:
+        return True
+    if 0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF:
+        return True
+    if 0x1F3FB <= code <= 0x1F3FF:
+        return True
+    return char in {_ZWJ, _ZWNJ, _TAG_TERM} or char in _TAG_CF
+
+
+def _next_grapheme(value: str, start: int) -> int:
+    if start >= len(value):
+        return start
+    index = start + 1
+    if (
+        _RI_START <= ord(value[start]) <= _RI_END
+        and index < len(value)
+        and _RI_START <= ord(value[index]) <= _RI_END
+    ):
+        index += 1
+    while index < len(value) and _is_grapheme_extend(value[index]):
+        joined = value[index] == _ZWJ
+        index += 1
+        if (
+            joined
+            and index < len(value)
+            and _in_ranges(ord(value[index]), EXTENDED_PICTOGRAPHIC)
+        ):
+            index += 1
+    return index
+
+
+def clip_to_grapheme_limit(value: str, limit: int) -> str:
+    """Corta por límite de grafema; no parte tags 🏴…󠁿 ni ZWJ/tono/VS."""
+
+    if limit <= 0:
+        return ""
+    if len(value) <= limit:
+        return value
+    end = 0
+    while True:
+        nxt = _next_grapheme(value, end)
+        if nxt > limit or nxt == end:
+            break
+        end = nxt
+    return value[:end]
+
+
 def category_name_key(value: str) -> str:
     """Clave de unicidad: sin Cf de relleno; ZWJ/ZWNJ solo donde importan.
 

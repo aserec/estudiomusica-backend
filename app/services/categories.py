@@ -1,5 +1,6 @@
 """CRUD de categorías de curso. Deniega por defecto en el router."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import NoReturn
@@ -16,6 +17,7 @@ from app.schemas.categories import (
     CategoryResponse,
     CategoryUpdate,
     category_name_key,
+    clip_to_grapheme_limit,
 )
 
 # Un solo candado transaccional para todo el árbol (ticket #400).
@@ -295,11 +297,27 @@ async def audit_category_name_keys(session: AsyncSession) -> NameKeyAudit:
     return NameKeyAudit(mismatches=tuple(mismatches), collisions=collisions)
 
 
+async def _citext_fold(session: AsyncSession, values: Sequence[str]) -> list[str]:
+    """``lower(citext)`` de Postgres: el mismo criterio que el índice único."""
+
+    if not values:
+        return []
+    placeholders = ", ".join(f"(:v{index})" for index in range(len(values)))
+    result = await session.execute(
+        text(f"SELECT lower(v::citext) FROM (VALUES {placeholders}) AS t(v)"),
+        {f"v{index}": value for index, value in enumerate(values)},
+    )
+    return [row[0] for row in result]
+
+
 def _dup_name(name: str, number: int) -> str:
     suffix = f" (dup {number})"
-    if len(name) + len(suffix) <= 120:
+    budget = 120 - len(suffix)
+    if budget < 0:
+        return suffix[:120]
+    if len(name) <= budget:
         return name + suffix
-    return name[: 120 - len(suffix)] + suffix
+    return clip_to_grapheme_limit(name, budget) + suffix
 
 
 async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
@@ -308,36 +326,49 @@ async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
     Una sola transacción: el caller hace commit (el script usa ``begin()``).
     """
 
+    await _lock_category_tree(session)
     rows = list(await session.scalars(select(Category).order_by(Category.id)))
     live = [row for row in rows if row.deleted_at is None]
+    folded = await _citext_fold(session, [category_name_key(row.name) for row in live])
     groups: dict[tuple[UUID | None, str], list[Category]] = {}
-    for row in live:
-        expected = category_name_key(row.name)
-        groups.setdefault((row.parent_id, expected.lower()), []).append(row)
+    for row, key in zip(live, folded, strict=True):
+        groups.setdefault((row.parent_id, key), []).append(row)
     taken: dict[tuple[UUID | None, str], Category] = {}
-    for row in live:
-        taken[(row.parent_id, category_name_key(row.name).lower())] = row
-    for (_parent, _key), members in groups.items():
+    for (parent_id, key), members in groups.items():
+        members.sort(key=lambda item: (item.sort_order, item.id))
+        taken[(parent_id, key)] = members[0]
+    for members in groups.values():
         if len(members) < 2:
             continue
-        members.sort(key=lambda item: (item.sort_order, item.id))
         for number, row in enumerate(members[1:], start=1):
             suffix = number
             while True:
                 candidate = _dup_name(row.name, suffix)
-                new_key = category_name_key(candidate).lower()
+                new_key = (await _citext_fold(session, [category_name_key(candidate)]))[
+                    0
+                ]
                 clash = taken.get((row.parent_id, new_key))
                 if clash is None or clash.id == row.id:
-                    old_key = category_name_key(row.name).lower()
-                    taken.pop((row.parent_id, old_key), None)
+                    old_key = (
+                        await _citext_fold(session, [category_name_key(row.name)])
+                    )[0]
+                    slot = (row.parent_id, old_key)
+                    if taken.get(slot) is row:
+                        del taken[slot]
                     row.name = candidate
                     taken[(row.parent_id, new_key)] = row
                     break
                 suffix += 1
+    changing: list[tuple[Category, str]] = []
     for row in rows:
-        row.name_key = str(row.id)
-    await session.flush()
-    for row in rows:
-        row.name_key = category_name_key(row.name)
-    await session.flush()
+        expected = category_name_key(row.name)
+        if row.name_key != expected:
+            changing.append((row, expected))
+    if changing:
+        for row, _expected in changing:
+            row.name_key = str(row.id)
+        await session.flush()
+        for row, expected in changing:
+            row.name_key = expected
+        await session.flush()
     return await audit_category_name_keys(session)
