@@ -420,6 +420,56 @@ def test_session_streaming_dep_rejects_union_return_annotation() -> None:
         assert response.status_code >= 400
 
 
+def test_session_streaming_dep_rejects_missing_return_annotation() -> None:
+    """M2f: sin anotación y response_class por defecto no es streaming."""
+
+    from app.db import (
+        SessionStreamingDep,
+        reject_invalid_streaming_session_routes,
+        route_allows_streaming_session,
+    )
+    from app.main import create_app
+
+    application = create_app()
+
+    @application.post("/api/v1/_test/m2f", status_code=201)
+    async def m2f_plain(session: SessionStreamingDep):  # type: ignore[no-untyped-def]
+        del session
+        return {"label": "m2f"}
+
+    route = next(
+        item
+        for item in application.routes
+        if getattr(item, "path", None) == "/api/v1/_test/m2f"
+    )
+    assert not route_allows_streaming_session(route)
+    with pytest.raises(RuntimeError, match="StreamingResponse"):
+        reject_invalid_streaming_session_routes(application)
+
+
+def test_session_streaming_dep_rejects_response_class_without_annotation() -> None:
+    """response_class=StreamingResponse sin anotación no puede dar 201."""
+
+    from fastapi.responses import StreamingResponse
+
+    from app.db import SessionStreamingDep, reject_invalid_streaming_session_routes
+    from app.main import create_app
+
+    application = create_app()
+
+    @application.post(
+        "/api/v1/_test/m2f-sr",
+        status_code=201,
+        response_class=StreamingResponse,
+    )
+    async def m2f_sr(session: SessionStreamingDep):  # type: ignore[no-untyped-def]
+        del session
+        return {"label": "m2f"}
+
+    with pytest.raises(RuntimeError, match="StreamingResponse"):
+        reject_invalid_streaming_session_routes(application)
+
+
 async def _create_probe_table(engine: Any, probe_table: Table) -> None:
     async with engine.begin() as connection:
         await connection.run_sync(

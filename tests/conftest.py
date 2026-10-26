@@ -332,6 +332,10 @@ def _mount_probes(application: FastAPI) -> None:
 
         return StreamingResponse(generate(), media_type="text/plain")
 
+    from app.db import reject_invalid_streaming_session_routes
+
+    reject_invalid_streaming_session_routes(application)
+
 
 def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> Iterator[TestClient]:
     from app.config import get_settings

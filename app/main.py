@@ -141,6 +141,10 @@ def create_app() -> FastAPI:
     # Liveness en la raíz para sondas. El contrato de la API es GET /api/v1/health.
     application.include_router(health_router, include_in_schema=False)
 
+    from app.db import reject_invalid_streaming_session_routes
+
+    reject_invalid_streaming_session_routes(application)
+
     def custom_openapi() -> dict[str, Any]:
         if application.openapi_schema:
             return application.openapi_schema
