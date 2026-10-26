@@ -1,10 +1,12 @@
 import asyncio
 import errno
+import hashlib
 import logging
 import os
 import re
 import secrets
 import socket
+import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import suppress
 from pathlib import Path
@@ -480,6 +482,121 @@ def _sweep_admin_engine(admin: RedactedDsn) -> AsyncEngine:
     )
 
 
+def _role_advisory_lock_keys(name: str) -> tuple[int, int]:
+    """Dos int4 estables por rol; el mismo espacio que el lock de sesión."""
+
+    digest = hashlib.sha256(f"em-prod-role:{name}".encode()).digest()
+    key1 = int.from_bytes(digest[0:4], "big") & 0x7FFFFFFF
+    key2 = int.from_bytes(digest[4:8], "big") & 0x7FFFFFFF
+    return key1, key2
+
+
+class _SessionAdvisoryLock:
+    """Mantiene ``pg_try_advisory_lock`` en un hilo durante toda la sesión."""
+
+    def __init__(self, admin: RedactedDsn, name: str) -> None:
+        self._admin = admin
+        self._name = name
+        self._stop = threading.Event()
+        self._ready = threading.Event()
+        self._acquired = False
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run, name=f"em-role-lock-{name}", daemon=True
+        )
+
+    def start(self) -> bool:
+        self._thread.start()
+        if not self._ready.wait(timeout=15):
+            self.stop()
+            raise RuntimeError(f"timeout al marcar la vida del rol {self._name}")
+        if self._error is not None:
+            raise RuntimeError(
+                f"no se pudo marcar la vida del rol {self._name} "
+                f"({type(self._error).__name__})"
+            ) from None
+        return self._acquired
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=15)
+
+    def _run(self) -> None:
+        try:
+            asyncio.run(self._hold())
+        except BaseException as exc:
+            self._error = exc
+            self._ready.set()
+
+    async def _hold(self) -> None:
+        import asyncpg  # type: ignore[import-untyped]
+
+        raw, connect_args = asyncpg_url_and_connect_args(self._admin.secret())
+        parsed = make_url(raw)
+        kwargs: dict[str, Any] = {
+            "user": parsed.username,
+            "password": parsed.password,
+            "database": parsed.database,
+            "timeout": 5,
+        }
+        if parsed.host:
+            kwargs["host"] = parsed.host
+        if parsed.port:
+            kwargs["port"] = int(parsed.port)
+        ssl = connect_args.get("ssl")
+        if ssl is not None:
+            kwargs["ssl"] = ssl
+        connection = await asyncpg.connect(**kwargs)
+        try:
+            key1, key2 = _role_advisory_lock_keys(self._name)
+            got = await connection.fetchval(
+                "SELECT pg_try_advisory_lock($1, $2)", key1, key2
+            )
+            self._acquired = bool(got)
+            self._ready.set()
+            if not self._acquired:
+                return
+            await asyncio.to_thread(self._stop.wait)
+            await connection.fetchval("SELECT pg_advisory_unlock($1, $2)", key1, key2)
+        finally:
+            await connection.close()
+
+
+_ROLE_LIFE_LOCK: _SessionAdvisoryLock | None = None
+
+
+def _hold_production_role_life_lock(admin: RedactedDsn) -> None:
+    global _ROLE_LIFE_LOCK
+    if _ROLE_LIFE_LOCK is not None:
+        return
+    lock = _SessionAdvisoryLock(admin, PRODUCTION_TEST_USER)
+    if not lock.start():
+        lock.stop()
+        raise RuntimeError(
+            "no se pudo marcar la vida del rol de production-tests "
+            f"({PRODUCTION_TEST_USER})"
+        )
+    _ROLE_LIFE_LOCK = lock
+
+
+def _release_production_role_life_lock() -> None:
+    global _ROLE_LIFE_LOCK
+    lock = _ROLE_LIFE_LOCK
+    _ROLE_LIFE_LOCK = None
+    if lock is not None:
+        lock.stop()
+
+
+async def _role_life_lock_is_free(connection: Any, name: str) -> bool:
+    key1, key2 = _role_advisory_lock_keys(name)
+    got = await connection.scalar(
+        text("SELECT pg_try_advisory_xact_lock(:k1, :k2)"),
+        {"k1": key1, "k2": key2},
+    )
+    return bool(got)
+
+
 def _orphan_production_test_role(name: str) -> bool:
     """True si el rol es ``em_prod_tests_<pid>`` y ese pid ya no existe."""
 
@@ -596,10 +713,11 @@ async def _drop_production_test_role(admin: RedactedDsn) -> None:
             if PRODUCTION_TEST_USER not in names:
                 names.append(PRODUCTION_TEST_USER)
             for name in names:
-                if name != PRODUCTION_TEST_USER and not _orphan_production_test_role(
-                    name
-                ):
-                    continue
+                if name != PRODUCTION_TEST_USER:
+                    if not _orphan_production_test_role(name):
+                        continue
+                    if not await _role_life_lock_is_free(connection, name):
+                        continue
                 try:
                     await _drop_named_production_test_role(
                         connection, name, admin=admin
@@ -650,6 +768,8 @@ def drop_production_test_role(admin_url: str | RedactedDsn) -> None:
             "No se pudo borrar el rol de production-tests "
             f"({type(exc).__name__}). {admin}"
         ) from None
+    finally:
+        _release_production_role_life_lock()
 
 
 def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
@@ -711,13 +831,16 @@ def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
             await engine.dispose()
 
     try:
+        _hold_production_role_life_lock(admin)
         asyncio.run(create_role())
         _ping_postgres(prod_dsn)
     except ConnectionError:
+        _release_production_role_life_lock()
         raise
     except Exception as exc:
         with suppress(Exception):
             asyncio.run(_drop_production_test_role(admin))
+        _release_production_role_life_lock()
         if _is_connection_error(exc):
             raise ConnectionError(
                 "No se pudo crear el rol de production-tests "

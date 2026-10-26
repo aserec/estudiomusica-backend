@@ -22,6 +22,7 @@ from tests.conftest import (
     _orphan_production_test_role,
     _pg_ident,
     _pg_literal,
+    _SessionAdvisoryLock,
     drop_database_if_exists,
     ensure_database_exists,
 )
@@ -517,6 +518,42 @@ def test_orphan_objects_in_other_test_db_do_not_fail_production(
 
         asyncio.run(cleanup())
         drop_database_if_exists(other)
+
+
+@pytest.mark.db
+def test_orphan_with_held_life_lock_is_not_dropped(
+    require_postgres: RedactedDsn,
+    tmp_path: Path,
+) -> None:
+    """os.kill no ve otros hosts: solo se borra un rol cuyo lock está libre."""
+
+    orphan = f"em_prod_tests_{_unused_pid()}"
+    assert _orphan_production_test_role(orphan) is True
+    lock = _SessionAdvisoryLock(require_postgres, orphan)
+    assert lock.start() is True
+    role = _pg_ident(orphan)
+    try:
+
+        async def plant() -> None:
+            engine = _admin_engine(require_postgres)
+            try:
+                async with engine.connect() as connection:
+                    await connection.execute(
+                        text(
+                            f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                            f"PASSWORD {_pg_literal('orphan-lock-secret')}"
+                        )
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(plant())
+        result = _run_leftover_probe(tmp_path, require_postgres, _CHILD_ORPHAN_SETUP)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert asyncio.run(_role_exists(require_postgres, orphan)) == 1
+    finally:
+        lock.stop()
+        _cleanup_named_roles(require_postgres, [orphan])
 
 
 async def _table_exists_named(dsn: RedactedDsn, name: str) -> object:
