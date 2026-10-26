@@ -36,7 +36,7 @@ def _plant(count: int) -> list[str]:
 
     from tests.conftest import _admin_engine, _pg_ident, _pg_literal
 
-    names = [f"em_prod_tests_{3_100_000 + i}" for i in range(1, count + 1)]
+    names = [f"em_prod_tests_{3_100_000 + i}_race_{i}" for i in range(1, count + 1)]
     admin = _admin_dsn()
 
     async def plant() -> None:

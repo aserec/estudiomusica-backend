@@ -3,6 +3,7 @@
 import asyncio
 import errno
 import os
+import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +22,6 @@ from tests.conftest import (
     _drop_leftover_test_databases,
     _drop_leftover_test_tables,
     _drop_named_production_test_role,
-    _drop_production_test_role,
     _orphan_production_test_role,
     _pg_ident,
     _pg_literal,
@@ -261,6 +261,11 @@ def test_leftover_child_then_production_role(
     drop_database_if_exists(_leftover_db(require_postgres))
 
 
+def _orphan_role_name(pid: int | None = None) -> str:
+    suffix = pid if pid is not None else _unused_pid()
+    return f"em_prod_tests_{suffix}_t_dead_{secrets.token_hex(2)}"
+
+
 def _unused_pid() -> int:
     return _unused_pids(1)[0]
 
@@ -362,7 +367,7 @@ def test_setup_drops_orphan_production_test_role(
 
     assert "orphan_drop_owned_probe" not in _LEFTOVER_TEST_TABLES
     dead_pid = _unused_pid()
-    orphan = f"em_prod_tests_{dead_pid}"
+    orphan = _orphan_role_name(dead_pid)
     assert _orphan_production_test_role(orphan) is True
     assert _orphan_production_test_role(PRODUCTION_TEST_USER) is False
     role = _pg_ident(orphan)
@@ -419,7 +424,7 @@ def test_setup_drops_orphan_production_test_role(
 def test_concurrent_orphan_drops_do_not_fail(require_postgres: RedactedDsn) -> None:
     """Dos procesos pueden borrar huérfanos a la vez sin tumbar production."""
 
-    planted = [f"em_prod_tests_{pid}" for pid in _unused_pids(8)]
+    planted = [_orphan_role_name(pid) for pid in _unused_pids(8)]
     _plant_orphan_roles(require_postgres, planted)
     env = os.environ.copy()
     env.pop("PYTEST_ADDOPTS", None)
@@ -460,7 +465,7 @@ def test_orphan_objects_in_other_test_db_do_not_fail_production(
 ) -> None:
     """Un huérfano con objetos en otra *_test no tumba el barrido."""
 
-    orphan = f"em_prod_tests_{_unused_pid()}"
+    orphan = _orphan_role_name()
     other_name = "orphan_crossdb_probe_test"
     parsed = make_url(require_postgres.secret())
     other = RedactedDsn(
@@ -531,7 +536,7 @@ def test_orphan_with_held_life_lock_is_not_dropped(
 ) -> None:
     """os.kill no ve otros hosts: solo se borra un rol cuyo lock está libre."""
 
-    orphan = f"em_prod_tests_{_unused_pid()}"
+    orphan = _orphan_role_name()
     assert _orphan_production_test_role(orphan) is True
     lock = _SessionAdvisoryLock(require_postgres, orphan)
     assert lock.start() is True
@@ -560,6 +565,143 @@ def test_orphan_with_held_life_lock_is_not_dropped(
         _cleanup_named_roles(require_postgres, [orphan])
 
 
+_CHILD_SAME_PID_DROP = """
+import asyncio
+import os
+import sys
+
+import tests.conftest as conftest
+from app.db import RedactedDsn
+
+conftest.PRODUCTION_TEST_USER = os.environ["EM_SHARED_ROLE"]
+admin = RedactedDsn(os.environ["TEST_DATABASE_URL"])
+asyncio.run(conftest._drop_production_test_role(admin))
+sys.exit(0)
+"""
+
+_CHILD_SAME_PID_ENSURE = """
+import os
+import sys
+
+import tests.conftest as conftest
+from app.db import RedactedDsn
+
+conftest.PRODUCTION_TEST_USER = os.environ["EM_SHARED_ROLE"]
+admin = RedactedDsn(os.environ["TEST_DATABASE_URL"])
+try:
+    conftest.ensure_production_test_role(admin)
+except RuntimeError as exc:
+    if "no se pudo marcar la vida" in str(exc):
+        sys.exit(0)
+    raise
+sys.exit(2)
+"""
+
+
+def _run_child_script(
+    tmp_path: Path, require_postgres: RedactedDsn, source: str, shared: str
+) -> subprocess.CompletedProcess[str]:
+    script = tmp_path / "pidns_child.py"
+    script.write_text(source)
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env["TEST_DATABASE_URL"] = require_postgres.secret()
+    env["EM_SHARED_ROLE"] = shared
+    return subprocess.run(
+        [sys.executable, str(script)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+
+
+@pytest.mark.db
+def test_same_pid_peer_role_is_not_dropped_without_life_lock(
+    require_postgres: RedactedDsn,
+    tmp_path: Path,
+) -> None:
+    """Dos contenedores con el mismo pid no deben borrar el rol vivo ajeno."""
+
+    shared = "em_prod_tests_1_peer_locktest"
+    lock = _SessionAdvisoryLock(require_postgres, shared)
+    assert lock.start() is True
+    role = _pg_ident(shared)
+    try:
+
+        async def plant() -> None:
+            engine = _admin_engine(require_postgres)
+            try:
+                async with engine.connect() as connection:
+                    exists = await connection.scalar(
+                        text("SELECT 1 FROM pg_roles WHERE rolname = :name"),
+                        {"name": shared},
+                    )
+                    if exists is None:
+                        await connection.execute(
+                            text(
+                                f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                                f"PASSWORD {_pg_literal('pidns-peer-secret')}"
+                            )
+                        )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(plant())
+        result = _run_child_script(
+            tmp_path, require_postgres, _CHILD_SAME_PID_DROP, shared
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert asyncio.run(_role_exists(require_postgres, shared)) == 1
+    finally:
+        lock.stop()
+        _cleanup_named_roles(require_postgres, [shared])
+
+
+@pytest.mark.db
+def test_ensure_fails_without_sweeping_when_life_lock_is_busy(
+    require_postgres: RedactedDsn,
+    tmp_path: Path,
+) -> None:
+    """Si no se consigue el lock, ensure falla y no barre el rol del otro."""
+
+    shared = "em_prod_tests_1_peer_ensbusy"
+    lock = _SessionAdvisoryLock(require_postgres, shared)
+    assert lock.start() is True
+    role = _pg_ident(shared)
+    try:
+
+        async def plant() -> None:
+            engine = _admin_engine(require_postgres)
+            try:
+                async with engine.connect() as connection:
+                    exists = await connection.scalar(
+                        text("SELECT 1 FROM pg_roles WHERE rolname = :name"),
+                        {"name": shared},
+                    )
+                    if exists is None:
+                        await connection.execute(
+                            text(
+                                f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                                f"PASSWORD {_pg_literal('pidns-ensure-secret')}"
+                            )
+                        )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(plant())
+        result = _run_child_script(
+            tmp_path, require_postgres, _CHILD_SAME_PID_ENSURE, shared
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert asyncio.run(_role_exists(require_postgres, shared)) == 1
+    finally:
+        lock.stop()
+        _cleanup_named_roles(require_postgres, [shared])
+
+
 async def _table_exists_named(dsn: RedactedDsn, name: str) -> object:
     engine = _create_async_engine(dsn.secret())
     try:
@@ -580,52 +722,30 @@ def test_orphan_production_test_role_ignores_live_and_foreign_names() -> None:
     assert _orphan_production_test_role("em_prod_tests_03300003") is False
     assert _orphan_production_test_role("em_prod_tests_\u0661") is False
     assert _orphan_production_test_role("em_prod_tests_99999999999999999999") is False
+    assert _orphan_production_test_role(_orphan_role_name()) is True
     assert _orphan_production_test_role(f"em_prod_tests_{_unused_pid()}") is True
 
 
+def test_production_test_role_name_is_unique() -> None:
+    from tests.conftest import _production_test_role_name
+
+    first = _production_test_role_name()
+    second = _production_test_role_name()
+    assert first != second
+    assert first.startswith("em_prod_tests_")
+    assert str(os.getpid()) in first.split("_")
+    assert _orphan_production_test_role(first) is True
+
+
 def test_orphan_role_eperm_is_not_orphan(monkeypatch: pytest.MonkeyPatch) -> None:
-    """O2: PermissionError/EPERM (p. ej. pid 1) no es huérfano."""
+    """os.kill ya no decide la vida: un nombre sin pid no es candidato."""
 
     def boom(_pid: int, _sig: int) -> None:
         raise PermissionError(errno.EPERM, "Operation not permitted")
 
     monkeypatch.setattr(os, "kill", boom)
-    assert _orphan_production_test_role("em_prod_tests_1") is False
-
-
-@pytest.mark.db
-def test_drop_removes_own_role_without_pid_suffix(
-    require_postgres: RedactedDsn,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """P1: el rol propio se borra aunque no lleve sufijo de pid."""
-
-    monkeypatch.setattr("tests.conftest.PRODUCTION_TEST_USER", "em_prod_tests")
-    role = _pg_ident("em_prod_tests")
-
-    async def plant() -> None:
-        engine = _admin_engine(require_postgres)
-        try:
-            async with engine.connect() as connection:
-                exists = await connection.scalar(
-                    text("SELECT 1 FROM pg_roles WHERE rolname = 'em_prod_tests'")
-                )
-                if exists is None:
-                    await connection.execute(
-                        text(
-                            f"CREATE ROLE {role} LOGIN NOSUPERUSER "
-                            f"PASSWORD {_pg_literal('p1-role-secret')}"
-                        )
-                    )
-        finally:
-            await engine.dispose()
-
-    try:
-        asyncio.run(plant())
-        asyncio.run(_drop_production_test_role(require_postgres))
-        assert asyncio.run(_role_exists(require_postgres, "em_prod_tests")) is None
-    finally:
-        _cleanup_named_roles(require_postgres, ["em_prod_tests"])
+    assert _orphan_production_test_role("em_prod_tests") is False
+    assert _orphan_production_test_role("em_prod_tests_1") is True
 
 
 def test_orphan_production_test_role_captures_overflow(
@@ -635,7 +755,7 @@ def test_orphan_production_test_role_captures_overflow(
         raise OverflowError("to_int:int too big to convert")
 
     monkeypatch.setattr(os, "kill", boom)
-    assert _orphan_production_test_role("em_prod_tests_2147483648") is False
+    assert _orphan_production_test_role("em_prod_tests_99999999999") is False
 
 
 def test_own_schema_names_includes_public() -> None:

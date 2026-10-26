@@ -42,12 +42,35 @@ DOWN_DATABASE_URL = (
 )
 UNUSED_DATABASE_URL = "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused"
 PRODUCTION_AUTH_SECRET = "production-test-auth-secret-at-least-32ch"
-# Sufijo con pid: el pytest hijo de leftovers ejecuta migrated_test_database
-# y haría DROP ROLE. El padre y el hijo no comparten nombre, así no chocan.
-# Tras un crash, el setup borra los em_prod_tests_<pid> cuyo proceso no vive.
+# Nombre único por ejecución: pid + host + boot_id + aleatorio. Dos
+# contenedores con el mismo pid no comparten rol. El advisory lock es la
+# única prueba de vida; el pid queda como pista.
 _PRODUCTION_TEST_ROLE_PREFIX = "em_prod_tests_"
-_PRODUCTION_TEST_ROLE_RE = re.compile(r"em_prod_tests_[1-9][0-9]{0,9}")
-PRODUCTION_TEST_USER = f"{_PRODUCTION_TEST_ROLE_PREFIX}{os.getpid()}"
+_PRODUCTION_TEST_ROLE_RE = re.compile(
+    r"em_prod_tests_[1-9][0-9]{0,9}(?:_[A-Za-z0-9_]+)?"
+)
+
+
+def _sanitize_role_token(value: str, limit: int) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", value)
+    return (cleaned or "x")[:limit]
+
+
+def _production_test_role_name() -> str:
+    host = _sanitize_role_token(socket.gethostname(), 12)
+    boot = "b"
+    with suppress(OSError):
+        boot = _sanitize_role_token(
+            Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii"),
+            8,
+        )
+    return (
+        f"{_PRODUCTION_TEST_ROLE_PREFIX}{os.getpid()}_"
+        f"{host}_{boot}_{secrets.token_hex(4)}"
+    )
+
+
+PRODUCTION_TEST_USER = _production_test_role_name()
 _PRODUCTION_TEST_EMAIL_PREFIX = "prod-"
 # Serializa el barrido de huérfanos entre pytest concurrentes.
 _SWEEP_ADVISORY_LOCK_KEY1 = 0x454D50  # EMP
@@ -501,10 +524,19 @@ class _SessionAdvisoryLock:
         self._stop = threading.Event()
         self._ready = threading.Event()
         self._acquired = False
+        self._lost = False
         self._error: BaseException | None = None
         self._thread = threading.Thread(
             target=self._run, name=f"em-role-lock-{name}", daemon=True
         )
+
+    @property
+    def acquired(self) -> bool:
+        return self._acquired
+
+    @property
+    def lost(self) -> bool:
+        return self._lost
 
     def start(self) -> bool:
         self._thread.start()
@@ -598,25 +630,25 @@ async def _role_life_lock_is_free(connection: Any, name: str) -> bool:
     return bool(got)
 
 
-def _orphan_production_test_role(name: str) -> bool:
-    """True si el rol es ``em_prod_tests_<pid>`` y ese pid ya no existe."""
+def _holds_own_life_lock() -> bool:
+    lock = _ROLE_LIFE_LOCK
+    return (
+        lock is not None and bool(lock.acquired) and lock._name == PRODUCTION_TEST_USER
+    )
 
-    if _PRODUCTION_TEST_ROLE_RE.fullmatch(name) is None:
+
+async def _should_drop_orphan(connection: Any, name: str) -> bool:
+    if not _orphan_production_test_role(name):
         return False
-    suffix = name[len(_PRODUCTION_TEST_ROLE_PREFIX) :]
-    try:
-        pid = int(suffix)
-    except ValueError, OverflowError:
+    return await _role_life_lock_is_free(connection, name)
+
+
+def _orphan_production_test_role(name: str) -> bool:
+    """Candidato a huérfano por nombre. La vida la decide el advisory lock."""
+
+    if name == PRODUCTION_TEST_USER:
         return False
-    if pid == os.getpid():
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except OverflowError, ValueError, OSError:
-        return False
-    return False
+    return _PRODUCTION_TEST_ROLE_RE.fullmatch(name) is not None
 
 
 async def _other_owned_databases(connection: Any, name: str) -> list[str]:
@@ -717,11 +749,12 @@ async def _drop_production_test_role(admin: RedactedDsn) -> None:
             if PRODUCTION_TEST_USER not in names:
                 names.append(PRODUCTION_TEST_USER)
             for name in names:
-                if name != PRODUCTION_TEST_USER:
-                    if not _orphan_production_test_role(name):
+                is_own = name == PRODUCTION_TEST_USER
+                if is_own:
+                    if not _holds_own_life_lock():
                         continue
-                    if not await _role_life_lock_is_free(connection, name):
-                        continue
+                elif not await _should_drop_orphan(connection, name):
+                    continue
                 try:
                     await _drop_named_production_test_role(
                         connection, name, admin=admin
@@ -836,6 +869,9 @@ def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
 
     try:
         _hold_production_role_life_lock(admin)
+    except Exception:
+        raise
+    try:
         asyncio.run(create_role())
         _ping_postgres(prod_dsn)
     except ConnectionError:
@@ -879,7 +915,7 @@ def production_client(
     """Cliente production contra la base ``*_test``, sin credenciales por defecto.
 
     ``APP_ENV=production``, ``AUTH_SECRET`` fuerte y DSN de ``estudiomusica_test``
-    (o ``TEST_DATABASE_URL``) con el rol ``em_prod_tests_<pid>``. El DSN viaja
+    (o ``TEST_DATABASE_URL``) con el rol ``em_prod_tests_<pid>_<host>_…``. El DSN viaja
     como ``RedactedDsn`` para no filtrar la contraseña con ``--showlocals``.
     """
 
