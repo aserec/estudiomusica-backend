@@ -131,26 +131,36 @@ def _is_emoji_zwj_side(char: str, saw_vs16: bool) -> bool:
 def _keep_zwj(value: str, index: int) -> bool:
     if index > 0 and unicodedata.combining(value[index - 1]) == _VIRAMA_CCC:
         return True
-    left, left_vs = _skip_transparent(value, index, -1)
-    right, _ = _skip_transparent(value, index, 1)
-    right_vs = False
-    if not (0 <= left < len(value) and 0 <= right < len(value)):
-        return False
-    # UTS #51: el tono (1F3FB..1F3FF) solo cuenta tras Emoji_Modifier_Base;
-    # el VS16 de presentación va *detrás* del carácter.
-    if 0x1F3FB <= ord(value[left]) <= 0x1F3FF:
+    # UTS #51 ED-16/17: el elemento izquierdo termina justo antes del ZWJ y el
+    # derecho empieza justo después; solo VS, tono o tags pertenecen al elemento.
+    left = index - 1
+    left_vs = False
+    vs_start = left
+    while vs_start >= 0 and value[vs_start] in _VARIATION_SELECTORS:
+        vs_start -= 1
+    if vs_start != left:
+        left_vs = _last_vs16(value, vs_start + 1, index)
+        left = vs_start
+    elif left >= 0 and value[left] == "\U000e007f":
+        while left >= 0 and value[left] in _TAG_CF:
+            left -= 1
+        left_vs = True
+    elif left >= 0 and 0x1F3FB <= ord(value[left]) <= 0x1F3FF:
         if left < 1 or not _in_ranges(ord(value[left - 1]), EMOJI_MODIFIER_BASE):
             return False
         left -= 1
         left_vs = True
+    right = index + 1
+    if not (0 <= left < len(value) and right < len(value)):
+        return False
+    right_vs = False
     if right + 1 < len(value) and 0x1F3FB <= ord(value[right + 1]) <= 0x1F3FF:
-        if _in_ranges(ord(value[right]), EMOJI_MODIFIER_BASE):
-            right_vs = True
+        right_vs = _in_ranges(ord(value[right]), EMOJI_MODIFIER_BASE)
     else:
         trail = right + 1
         while trail < len(value) and value[trail] in _VARIATION_SELECTORS:
             trail += 1
-        right_vs = right_vs or _last_vs16(value, right + 1, trail)
+        right_vs = _last_vs16(value, right + 1, trail)
     return _is_emoji_zwj_side(value[left], left_vs) and _is_emoji_zwj_side(
         value[right], right_vs
     )

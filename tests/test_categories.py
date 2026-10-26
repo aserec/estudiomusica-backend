@@ -801,6 +801,24 @@ def test_z_tono_tambien_derecha() -> None:
     assert "\u200d" not in category_name_key(tone_right)
 
 
+_UTS51_GLUE_SPOOFS: tuple[str, ...] = (
+    "😀\u200d\ufe0f💻",
+    "©\u0308\ufe0f\u200d😀",
+    "©\u20e3\ufe0f\u200d😀",
+    "😀\u0308\u200d😀",
+    "😀\u200d\u0308😀",
+    "😀\u20e3\u200d😀",
+    "👩\U0001f3fd\u0308\u200d💻",
+)
+
+
+def test_uts51_zwj_requires_element_glued_to_joiner() -> None:
+    for spoof in _UTS51_GLUE_SPOOFS:
+        stripped = spoof.replace("\u200d", "")
+        assert category_name_key(spoof) == category_name_key(stripped), spoof
+        assert "\u200d" not in category_name_key(spoof), spoof
+
+
 def test_two_variation_selectors_after_right_pictograph() -> None:
     vs16_then_15 = "😀\u200d❤\ufe0f\ufe0e"
     vs15_then_16 = "😀\u200d❤\ufe0e\ufe0f"
@@ -1180,6 +1198,20 @@ async def test_contextj_spoof_collides_with_plain(
         assert clash.json() == {"error": "category_name_taken"}
         listed = await session_client.delete(f"{_ADMIN}/{created['id']}")
         assert listed.status_code == 204
+
+
+async def test_uts51_unglued_zwj_spoofs_give_409(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    for spoof in _UTS51_GLUE_SPOOFS:
+        stripped = spoof.replace("\u200d", "")
+        created = await _create(session_client, name=stripped)
+        clash = await session_client.post(_ADMIN, json={"name": spoof})
+        assert clash.status_code == 409, spoof
+        assert clash.json() == {"error": "category_name_taken"}
+        gone = await session_client.delete(f"{_ADMIN}/{created['id']}")
+        assert gone.status_code == 204
 
 
 async def test_root_and_child_may_share_name(
