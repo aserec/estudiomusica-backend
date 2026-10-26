@@ -542,6 +542,7 @@ _NAME_KEY_CASES: tuple[tuple[str, str], ...] = (
     (_DEVANAGARI_ZWJ, _DEVANAGARI_ZWJ),
     (_DEVANAGARI_ZWNJ, _DEVANAGARI_ZWNJ),
     ("क्\u00ad\u200dष", _DEVANAGARI_ZWJ),
+    ("א\u05b0\u200dב", "א\u05b0ב"),
     ("😀‍x", "😀x"),
     (_HEART_FIRE, _HEART_FIRE),
     (_HEART_FIRE_PLAIN, _HEART_FIRE_PLAIN),
