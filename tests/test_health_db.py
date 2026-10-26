@@ -1757,6 +1757,59 @@ def test_health_sslrootcert_good_ca_up_bad_ca_down(
             close()
 
 
+@pytest.mark.db
+@pytest.mark.timeout(60)
+def test_health_verify_ca_rejects_unrelated_ca(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+    tls_postgres: tuple[Any, Any, str],
+) -> None:
+    """X3b: ``ssl=verify-ca`` con CA ajena da 503 (no CERT_NONE)."""
+
+    from tests.conftest import _build_client
+
+    _ = require_postgres
+    _ = migrated_test_database
+    cafile, bad_ca, dsn = tls_postgres
+    good = _dsn_with_query(dsn, ssl="verify-ca", sslrootcert=str(cafile))
+    bad = _dsn_with_query(dsn, ssl="verify-ca", sslrootcert=str(bad_ca))
+    good_iter = _build_client(
+        monkeypatch,
+        APP_ENV="development",
+        EXPOSE_ERRORS="false",
+        ENABLE_EXAMPLE_ROUTES="true",
+        DB_HEALTH_CACHE_TTL="0",
+        DATABASE_URL=good,
+    )
+    good_client = next(good_iter)
+    try:
+        response = good_client.get("/api/v1/health/db")
+        assert response.status_code == 200
+        assert response.json() == {"db": "ok"}
+    finally:
+        close = getattr(good_iter, "close", None)
+        if callable(close):
+            close()
+    bad_iter = _build_client(
+        monkeypatch,
+        APP_ENV="development",
+        EXPOSE_ERRORS="false",
+        ENABLE_EXAMPLE_ROUTES="true",
+        DB_HEALTH_CACHE_TTL="0",
+        DATABASE_URL=bad,
+    )
+    bad_client = next(bad_iter)
+    try:
+        response = bad_client.get("/api/v1/health/db")
+        assert response.status_code == 503
+        assert response.json() == {"db": "down"}
+    finally:
+        close = getattr(bad_iter, "close", None)
+        if callable(close):
+            close()
+
+
 def test_prepare_asyncpg_kwargs_translates_sslrootcert(
     tmp_path: Any,
 ) -> None:
