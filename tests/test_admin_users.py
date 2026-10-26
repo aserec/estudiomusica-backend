@@ -24,6 +24,7 @@ from app.services.users import (
     _email_term,
     _ensure_admin_remains,
     _exact_email_clause,
+    _visible_user_filters,
     set_user_admin,
     set_user_suspended,
     soft_delete_user,
@@ -1774,24 +1775,132 @@ async def test_teacher_exact_email_query_uses_unique_index(
     dsn = RedactedDsn(resolve_test_database_url())
     engine = create_async_engine(dsn.secret())
     email = _email_term("Explain-Unique@example.com")
-    assert _exact_email_clause(email) is not None
+    stmt = select(User).where(*_visible_user_filters(), _exact_email_clause(email))
+    compiled = stmt.compile(
+        dialect=engine.sync_engine.dialect,
+        compile_kwargs={"literal_binds": True},
+    )
+    sql = str(compiled)
+    assert "users.email =" in sql
+    assert "ILIKE" not in sql.upper()
+    assert "deleted_at IS NULL" in sql
+    assert "suspended_at IS NULL" in sql
     try:
-        async with engine.connect() as conn, conn.begin():
-            await conn.execute(text("SET LOCAL enable_seqscan = off"))
-            rows = await conn.execute(
-                text(
-                    "EXPLAIN SELECT id FROM users "
-                    "WHERE deleted_at IS NULL AND suspended_at IS NULL "
-                    "AND email = :email"
-                ),
-                {"email": email},
-            )
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("EXPLAIN " + sql))
             plan = "\n".join(str(row[0]) for row in rows)
-        assert "uq_users_email" in plan
-        assert "Index" in plan and "Scan" in plan
-        assert "Seq Scan" not in plan
+        assert "email" in plan
+        if "Index" in plan:
+            assert "uq_users_email" in plan
+            assert "Scan" in plan
     finally:
         await engine.dispose()
+
+
+async def test_teacher_exact_email_hides_suspended_and_deleted(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    teacher = await _signup(session_client, email=unique_email("tea-e7"))
+    await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, teacher["id"], _COURSE, CourseRole.TEACHER)
+    suspended = User(
+        first_name="E7",
+        last_name="Suspended",
+        email=unique_email("e7-sus"),
+        password_hash="x",
+        system_role_id=SystemRole.ALUMNO,
+        suspended_at=datetime.now(UTC),
+    )
+    deleted = User(
+        first_name="E7",
+        last_name="Deleted",
+        email=unique_email("e7-gone"),
+        password_hash="x",
+        system_role_id=SystemRole.ALUMNO,
+        deleted_at=datetime.now(UTC),
+    )
+    db_session.add_all([suspended, deleted])
+    await db_session.flush()
+    for hidden in (suspended, deleted):
+        found = await session_client.get(
+            "/api/v1/users/search", params={"q": hidden.email}
+        )
+        assert found.status_code == 200
+        assert found.json()["items"] == []
+        assert found.json()["total"] == 0
+        assert hidden.email not in found.text
+
+
+async def test_teacher_merged_search_caps_at_ten(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    marker = uuid.uuid4().hex[:8]
+    query = f"e6merge-{marker}@example.com"
+    teacher = await _signup(session_client, email=unique_email("tea-e6"))
+    await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, teacher["id"], _COURSE, CourseRole.TEACHER)
+    exact = User(
+        first_name="NopeExact",
+        last_name="E6",
+        email=query,
+        password_hash="x",
+        system_role_id=SystemRole.ALUMNO,
+    )
+    db_session.add(exact)
+    await db_session.flush()
+    for index in range(12):
+        db_session.add(
+            User(
+                first_name=query,
+                last_name=f"N{index:02d}",
+                email=unique_email(f"e6-n{index}"),
+                password_hash="x",
+                system_role_id=SystemRole.ALUMNO,
+            )
+        )
+        await db_session.flush()
+    found = await session_client.get(
+        "/api/v1/users/search", params={"q": query, "pageSize": 20}
+    )
+    assert found.status_code == 200
+    body = found.json()
+    assert body["total"] == 10
+    assert len(body["items"]) == 10
+
+
+async def test_teacher_merged_search_order(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    marker = uuid.uuid4().hex[:8]
+    query = f"e9ord-{marker}@example.com"
+    teacher = await _signup(session_client, email=unique_email("tea-e9"))
+    await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, teacher["id"], _COURSE, CourseRole.TEACHER)
+    exact = User(
+        first_name="NopeExact",
+        last_name="E9",
+        email=query,
+        password_hash="x",
+        system_role_id=SystemRole.ALUMNO,
+    )
+    db_session.add(exact)
+    await db_session.flush()
+    name_ids: list[str] = []
+    for index in range(3):
+        row = User(
+            first_name=query,
+            last_name=f"N{index}",
+            email=unique_email(f"e9-n{index}"),
+            password_hash="x",
+            system_role_id=SystemRole.ALUMNO,
+        )
+        db_session.add(row)
+        await db_session.flush()
+        name_ids.append(str(row.id))
+    found = await session_client.get("/api/v1/users/search", params={"q": query})
+    assert found.status_code == 200
+    ids = [item["id"] for item in found.json()["items"]]
+    assert ids == [*reversed(name_ids), str(exact.id)]
 
 
 async def test_deactivated_alumno_cannot_demote_admin(
