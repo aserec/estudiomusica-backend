@@ -98,14 +98,13 @@ def ssl_context_from_rootcert(cafile: str, ssl_value: object = None) -> ssl.SSLC
     Misma construcción que asyncpg con ``PGSSLROOTCERT``: no usa
     ``create_default_context`` (Python 3.13+ activa ``VERIFY_X509_STRICT``
     y rechaza CAs sin ``keyUsage``; libpq las acepta). Sigue verificando
-    hostname y cadena.
+    hostname y cadena. Tampoco activa ``VERIFY_X509_PARTIAL_CHAIN``: un
+    ``sslrootcert`` que solo tenga una intermedia no basta (igual que
+    libpq/asyncpg).
     """
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.load_verify_locations(cafile=cafile)
-    strict = getattr(ssl, "VERIFY_X509_STRICT", 0)
-    if strict:
-        ctx.verify_flags &= ~strict
     mode = str(ssl_value).lower() if isinstance(ssl_value, str) else ""
     if mode == "verify-ca":
         ctx.check_hostname = False
@@ -191,7 +190,7 @@ def asyncpg_url_and_connect_args(raw: str) -> tuple[str, dict[str, Any]]:
         query = {key: value for key, value in query.items() if key not in drop}
         raw = parsed.set(query=query).render_as_string(hide_password=False)
     ssl_value = prepared.get("ssl")
-    if isinstance(ssl_value, (ssl.SSLContext, bool)):
+    if ssl_value is not None:
         connect_args["ssl"] = ssl_value
     return raw, connect_args
 
@@ -251,7 +250,8 @@ async def _get_session() -> AsyncIterator[AsyncSession]:
     Un ``StreamingResponse`` que consulte la sesión en el generador
     arrancaría otra transacción *después* de ese commit (idle in
     transaction → 500 de QueuePool). El listener ``after_begin`` lo
-    prohíbe. Para streaming usa ``SessionStreamingDep``.
+    prohíbe. Para streaming usa ``SessionStreamingDep``. Con
+    ``SessionDep`` el cliente ve 200 truncado (``RemoteProtocolError``).
     """
 
     factory = get_session_factory()
@@ -273,7 +273,8 @@ async def _get_session() -> AsyncIterator[AsyncSession]:
                 close()
             raise RuntimeError(
                 "la sesión no se puede usar después del yield; "
-                "un StreamingResponse necesita SessionStreamingDep"
+                "un StreamingResponse o BackgroundTasks necesita "
+                "SessionStreamingDep"
             )
 
         sync = getattr(session, "sync_session", None)
@@ -295,6 +296,9 @@ async def _get_streaming_session() -> AsyncIterator[AsyncSession]:
     enviar el cuerpo. Esta dependencia usa scope=request para que el
     generador pueda consultar y el commit/rollback corran al terminar
     el stream, sin dejar idle in transaction.
+
+    Un fallo de commit no cambia el status: el cuerpo ya salió
+    (200 truncado). No uses ``SessionStreamingDep`` en un POST JSON.
     """
 
     factory = get_session_factory()

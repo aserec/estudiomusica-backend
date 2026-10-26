@@ -1684,34 +1684,60 @@ def test_health_sslrootcert_good_ca_up_bad_ca_down(
 ) -> None:
     """B-2: ``?sslrootcert=`` con CA buena da 200 y con CA mala 503."""
 
-    from alembic import command
-    from sqlalchemy import text
+    from sqlalchemy import Table, text
 
-    from app.db import clear_engine
-    from tests.conftest import _build_client, _create_async_engine, alembic_config
+    from tests.conftest import _create_async_engine
+    from tests.test_db import SessionProbe
 
     cafile, bad_ca, dsn = tls_postgres
     good = _dsn_with_query(dsn, ssl="verify-full", sslrootcert=str(cafile))
     bad = _dsn_with_query(dsn, ssl="verify-full", sslrootcert=str(bad_ca))
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
 
-    async def _ensure_session_probes() -> None:
+    async def _session_probes(*, create: bool) -> None:
         engine = _create_async_engine(good, pool_pre_ping=True)
         try:
             async with engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        "CREATE TABLE IF NOT EXISTS session_probes ("
-                        "id uuid PRIMARY KEY,"
-                        "label varchar(64) NOT NULL,"
-                        "created_at timestamptz NOT NULL,"
-                        "updated_at timestamptz NOT NULL,"
-                        "deleted_at timestamptz)"
+                if create:
+                    await connection.execute(
+                        text(
+                            "CREATE OR REPLACE FUNCTION set_updated_at() "
+                            "RETURNS trigger LANGUAGE plpgsql AS $$ "
+                            "BEGIN NEW.updated_at = clock_timestamp(); "
+                            "RETURN NEW; END; $$;"
+                        )
                     )
-                )
+                    await connection.run_sync(
+                        lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
+                    )
+                    await connection.run_sync(
+                        lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
+                    )
+                else:
+                    await connection.run_sync(
+                        lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
+                    )
         finally:
             await engine.dispose()
 
-    asyncio.run(_ensure_session_probes())
+    asyncio.run(_session_probes(create=True))
+    try:
+        _run_sslrootcert_clients(monkeypatch, good, bad)
+    finally:
+        asyncio.run(_session_probes(create=False))
+
+
+def _run_sslrootcert_clients(
+    monkeypatch: pytest.MonkeyPatch,
+    good: str,
+    bad: str,
+) -> None:
+    from alembic import command
+
+    from app.db import clear_engine
+    from tests.conftest import _build_client, alembic_config
+
     good_iter = _build_client(
         monkeypatch,
         APP_ENV="development",
@@ -1737,6 +1763,58 @@ def test_health_sslrootcert_good_ca_up_bad_ca_down(
             close()
     command.current(alembic_config(RedactedDsn(good)))
     clear_engine()
+    bad_iter = _build_client(
+        monkeypatch,
+        APP_ENV="development",
+        EXPOSE_ERRORS="false",
+        ENABLE_EXAMPLE_ROUTES="true",
+        DB_HEALTH_CACHE_TTL="0",
+        DATABASE_URL=bad,
+    )
+    bad_client = next(bad_iter)
+    try:
+        response = bad_client.get("/api/v1/health/db")
+        assert response.status_code == 503
+        assert response.json() == {"db": "down"}
+    finally:
+        close = getattr(bad_iter, "close", None)
+        if callable(close):
+            close()
+
+
+@pytest.mark.db
+@pytest.mark.timeout(60)
+def test_health_verify_ca_rejects_unrelated_ca(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+    tls_postgres: tuple[Any, Any, str],
+) -> None:
+    """X3b: ``ssl=verify-ca`` con CA ajena da 503 (no CERT_NONE)."""
+
+    from tests.conftest import _build_client
+
+    del require_postgres, migrated_test_database
+    cafile, bad_ca, dsn = tls_postgres
+    good = _dsn_with_query(dsn, ssl="verify-ca", sslrootcert=str(cafile))
+    bad = _dsn_with_query(dsn, ssl="verify-ca", sslrootcert=str(bad_ca))
+    good_iter = _build_client(
+        monkeypatch,
+        APP_ENV="development",
+        EXPOSE_ERRORS="false",
+        ENABLE_EXAMPLE_ROUTES="true",
+        DB_HEALTH_CACHE_TTL="0",
+        DATABASE_URL=good,
+    )
+    good_client = next(good_iter)
+    try:
+        response = good_client.get("/api/v1/health/db")
+        assert response.status_code == 200
+        assert response.json() == {"db": "ok"}
+    finally:
+        close = getattr(good_iter, "close", None)
+        if callable(close):
+            close()
     bad_iter = _build_client(
         monkeypatch,
         APP_ENV="development",
@@ -1822,6 +1900,104 @@ def test_asyncpg_url_translates_sslmode(tmp_path: Any) -> None:
     )
     assert "sslmode=" not in plain.lower()
     assert plain_args.get("ssl") is False
+    mode_only, mode_args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?sslmode=verify-full"
+    )
+    assert "sslmode=" not in mode_only.lower()
+    assert mode_args.get("ssl") == "verify-full"
+
+
+@pytest.mark.db
+@pytest.mark.timeout(60)
+def test_sslmode_verify_full_without_rootcert_rejects_untrusted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    tls_postgres: tuple[Any, Any, str],
+) -> None:
+    """ALTA: ``?sslmode=verify-full`` sin CA no degrada a prefer (Alembic y engine)."""
+
+    from pathlib import Path
+
+    from alembic import command
+    from sqlalchemy import text
+
+    from app.db import asyncpg_url_and_connect_args
+    from app.migrations.config import make_alembic_config
+    from tests.conftest import _create_async_engine
+
+    _cafile, _bad_ca, dsn = tls_postgres
+    raw = _dsn_with_query(dsn, sslmode="verify-full", sslrootcert=None, ssl=None)
+    assert "sslmode=verify-full" in raw.lower()
+    assert "sslrootcert=" not in raw.lower()
+    url, args = asyncpg_url_and_connect_args(raw)
+    assert "sslmode=" not in url.lower()
+    assert args.get("ssl") == "verify-full"
+
+    home = Path(str(tmp_path)) / "empty-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("PGSSLROOTCERT", raising=False)
+    monkeypatch.delenv("PGSSLMODE", raising=False)
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+    with pytest.raises(Exception) as alembic_exc:
+        command.current(make_alembic_config(raw))
+    alembic_text = str(alembic_exc.value).lower()
+    assert any(
+        token in alembic_text
+        for token in ("ssl", "certificate", "certificat", "verify")
+    ), alembic_exc.value
+
+    engine = _create_async_engine(raw, pool_pre_ping=True)
+
+    async def _connect() -> None:
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text("SELECT 1"))
+        finally:
+            await engine.dispose()
+
+    with pytest.raises(Exception) as engine_exc:
+        asyncio.run(_connect())
+    engine_text = str(engine_exc.value).lower()
+    assert any(
+        token in engine_text for token in ("ssl", "certificate", "certificat", "verify")
+    ), engine_exc.value
+
+
+def test_prepare_translates_uppercase_sslmode_alone() -> None:
+    """S4a: ``SSLMODE`` se traduce a ``ssl`` sin mezclar hostname ni CA."""
+
+    from app.db import asyncpg_url_and_connect_args, prepare_asyncpg_connect_kwargs
+
+    mode_only = prepare_asyncpg_connect_kwargs(
+        {"host": "127.0.0.1", "SSLMODE": "require"}
+    )
+    assert "sslmode" not in {str(key).lower() for key in mode_only}
+    assert "SSLMODE" not in mode_only
+    assert mode_only.get("ssl") == "require"
+    url, args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?SSLMODE=require"
+    )
+    assert "sslmode=" not in url.lower()
+    assert args.get("ssl") == "require"
+
+
+def test_ssl_require_hostname_without_sslmode(tmp_path: Any) -> None:
+    """S7: ``ssl=require`` + CA comprueba hostname; no usa SSLMODE."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import ssl_context_from_rootcert
+
+    cafile = str(_write_unrelated_ca(Path(str(tmp_path)) / "s7-ca.pem"))
+    ctx = ssl_context_from_rootcert(cafile, "require")
+    assert ctx.check_hostname is True
+    assert ctx.verify_mode == ssl_mod.CERT_REQUIRED
+    mixed = ssl_context_from_rootcert(cafile, "Require")
+    assert mixed.check_hostname is True
 
 
 def test_sslrootcert_and_sslmode_are_case_insensitive(tmp_path: Any) -> None:
@@ -1859,9 +2035,10 @@ def test_sslrootcert_and_sslmode_are_case_insensitive(tmp_path: Any) -> None:
 
 
 def test_sslrootcert_and_pgsslrootcert_accept_ca_without_keyusage(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    """CA sin ``keyUsage``: ``?sslrootcert=`` y ``PGSSLROOTCERT`` iguales (libpq)."""
+    """CA sin ``keyUsage``: ``?sslrootcert=`` y ``PGSSLROOTCERT`` (asyncpg real)."""
 
     import ssl as ssl_mod
     from pathlib import Path
@@ -1879,14 +2056,17 @@ def test_sslrootcert_and_pgsslrootcert_accept_ca_without_keyusage(
     query_ctx = query_kwargs["ssl"]
     assert isinstance(query_ctx, ssl_mod.SSLContext)
     helper_ctx = ssl_context_from_rootcert(str(cafile), "verify-full")
-    pg_ctx = _pgsslrootcert_ssl_context(str(cafile))
     strict = getattr(ssl_mod, "VERIFY_X509_STRICT", 0)
-    for ctx in (query_ctx, helper_ctx, pg_ctx):
+    partial = getattr(ssl_mod, "VERIFY_X509_PARTIAL_CHAIN", 0)
+    for ctx in (query_ctx, helper_ctx):
         assert ctx.check_hostname is True
         assert ctx.verify_mode == ssl_mod.CERT_REQUIRED
         if strict:
             assert ctx.verify_flags & strict == 0
+        if partial:
+            assert ctx.verify_flags & partial == 0
         _tls_handshake(ctx, server_ctx, "localhost")
+    _asyncpg_connect_with_pgsslrootcert(monkeypatch, cafile, server_ctx)
 
     with pytest.raises(ssl_mod.SSLError):
         _tls_handshake(query_ctx, server_ctx, "wrong.example")
@@ -1894,6 +2074,43 @@ def test_sslrootcert_and_pgsslrootcert_accept_ca_without_keyusage(
     bad_ctx = ssl_context_from_rootcert(str(bad_ca), "verify-full")
     with pytest.raises(ssl_mod.SSLError):
         _tls_handshake(bad_ctx, server_ctx, "localhost")
+
+
+def test_ssl_context_from_rootcert_trusts_only_given_ca(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """X4/X5: una CA (no las del sistema), TLS ≥1.2 y sin SECLEVEL=0."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import ssl_context_from_rootcert
+
+    ours = Path(str(tmp_path)) / "ours"
+    other = Path(str(tmp_path)) / "other"
+    cafile, server_crt, server_key = _write_ca_without_keyusage_and_leaf(ours)
+    other_ca, other_crt, other_key = _write_ca_without_keyusage_and_leaf(other)
+    monkeypatch.setenv("SSL_CERT_FILE", str(other_ca))
+    monkeypatch.setenv("SSL_CERT_DIR", str(other))
+    ctx = ssl_context_from_rootcert(str(cafile), "verify-full")
+    assert len(ctx.get_ca_certs()) == 1
+    assert ctx.minimum_version >= ssl_mod.TLSVersion.TLSv1_2
+    weak = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_CLIENT)
+    weak.minimum_version = ssl_mod.TLSVersion.MINIMUM_SUPPORTED
+    weak.set_ciphers("DEFAULT@SECLEVEL=0")
+    assert ctx.minimum_version > weak.minimum_version
+    ours_ciphers = {item.get("name") for item in ctx.get_ciphers()}
+    weak_ciphers = {item.get("name") for item in weak.get_ciphers()}
+    assert not ours_ciphers.issuperset(weak_ciphers)
+
+    good_server = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_SERVER)
+    good_server.load_cert_chain(str(server_crt), str(server_key))
+    _tls_handshake(ctx, good_server, "localhost")
+    other_server = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_SERVER)
+    other_server.load_cert_chain(str(other_crt), str(other_key))
+    with pytest.raises(ssl_mod.SSLError):
+        _tls_handshake(ctx, other_server, "localhost")
 
 
 def test_ssl_require_with_rootcert_checks_hostname(tmp_path: Any) -> None:
@@ -2145,16 +2362,64 @@ def _write_ca_without_keyusage_and_leaf(directory: Any) -> tuple[Any, Any, Any]:
     return ca_pem, server_crt, server_key
 
 
-def _pgsslrootcert_ssl_context(cafile: str) -> Any:
-    """Construcción de asyncpg cuando hay ``PGSSLROOTCERT`` / verify-full."""
+def _asyncpg_connect_with_pgsslrootcert(
+    monkeypatch: pytest.MonkeyPatch,
+    cafile: Any,
+    server_ctx: Any,
+) -> None:
+    """Handshake TLS con asyncpg + ``PGSSLROOTCERT`` (no se copia el SSLContext)."""
 
     import ssl as ssl_mod
 
-    ctx = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_CLIENT)
-    ctx.load_verify_locations(cafile=cafile)
-    ctx.verify_mode = ssl_mod.CERT_REQUIRED
-    ctx.check_hostname = True
-    return ctx
+    import asyncpg
+
+    port_box: list[int] = []
+    ready = threading.Event()
+
+    def serve() -> None:
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        port_box.append(int(listener.getsockname()[1]))
+        listener.listen(1)
+        ready.set()
+        conn, _ = listener.accept()
+        try:
+            wrapped = server_ctx.wrap_socket(conn, server_side=True)
+            wrapped.close()
+        except OSError:
+            pass
+        finally:
+            conn.close()
+            listener.close()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    assert ready.wait(5)
+    monkeypatch.setenv("PGSSLROOTCERT", str(cafile))
+    monkeypatch.delenv("PGSSLCERT", raising=False)
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+
+    async def _connect() -> None:
+        try:
+            await asyncpg.connect(
+                host="127.0.0.1",
+                port=port_box[0],
+                user="u",
+                password="p",
+                database="db",
+                ssl="verify-full",
+                timeout=3,
+            )
+        except Exception as exc:
+            text = f"{type(exc).__name__}: {exc}".lower()
+            if isinstance(exc, ssl_mod.SSLError) or "certificate verify" in text:
+                raise
+
+    try:
+        asyncio.run(_connect())
+    finally:
+        thread.join(timeout=5)
 
 
 def _tls_handshake(client_ctx: Any, server_ctx: Any, hostname: str) -> None:

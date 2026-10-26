@@ -26,7 +26,11 @@ target_metadata = Base.metadata
 
 
 def get_database_url() -> str:
-    """DSN crudo. ``sslmode`` / ``sslrootcert`` se traducen como en la app."""
+    """DSN crudo. ``run_async_migrations`` lo pasa por
+    ``asyncpg_url_and_connect_args``: ``sslmode`` → ``ssl`` (también
+    ``verify-full`` / ``require`` sin ``sslrootcert``) y ``sslrootcert``
+    → ``SSLContext``. Sin eso, asyncpg caería en ``prefer``.
+    """
 
     configured = (config.get_main_option("sqlalchemy.url") or "").strip()
     if configured:
