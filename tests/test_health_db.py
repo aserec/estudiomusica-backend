@@ -1695,38 +1695,73 @@ def test_health_sslrootcert_good_ca_up_bad_ca_down(
     bad = _dsn_with_query(dsn, ssl="verify-full", sslrootcert=str(bad_ca))
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
+    existed = {"function": True, "table": True}
 
-    async def _session_probes(*, create: bool) -> None:
+    async def _inspect_and_create() -> None:
         engine = _create_async_engine(good, pool_pre_ping=True)
         try:
             async with engine.begin() as connection:
-                if create:
+                existed["function"] = (
+                    await connection.scalar(
+                        text(
+                            "SELECT 1 FROM pg_proc p "
+                            "JOIN pg_namespace n ON n.oid = p.pronamespace "
+                            "WHERE p.proname = 'set_updated_at' "
+                            "AND n.nspname = 'public'"
+                        )
+                    )
+                    is not None
+                )
+                existed["table"] = (
+                    await connection.scalar(
+                        text("SELECT to_regclass('public.session_probes')")
+                    )
+                    is not None
+                )
+                if not existed["function"]:
                     await connection.execute(
                         text(
-                            "CREATE OR REPLACE FUNCTION set_updated_at() "
+                            "CREATE FUNCTION set_updated_at() "
                             "RETURNS trigger LANGUAGE plpgsql AS $$ "
                             "BEGIN NEW.updated_at = clock_timestamp(); "
                             "RETURN NEW; END; $$;"
                         )
                     )
+                if not existed["table"]:
                     await connection.run_sync(
-                        lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
-                    )
-                    await connection.run_sync(
-                        lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
-                    )
-                else:
-                    await connection.run_sync(
-                        lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
+                        lambda sync_conn: probe_table.create(
+                            sync_conn, checkfirst=True
+                        )
                     )
         finally:
             await engine.dispose()
 
-    asyncio.run(_session_probes(create=True))
+    async def _cleanup_if_created() -> None:
+        engine = _create_async_engine(good, pool_pre_ping=True)
+        try:
+            async with engine.begin() as connection:
+                if existed["table"]:
+                    await connection.execute(
+                        text("DELETE FROM session_probes WHERE label = 'sslroot'")
+                    )
+                else:
+                    await connection.run_sync(
+                        lambda sync_conn: probe_table.drop(
+                            sync_conn, checkfirst=True
+                        )
+                    )
+                if not existed["function"]:
+                    await connection.execute(
+                        text("DROP FUNCTION IF EXISTS set_updated_at()")
+                    )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_inspect_and_create())
     try:
         _run_sslrootcert_clients(monkeypatch, good, bad)
     finally:
-        asyncio.run(_session_probes(create=False))
+        asyncio.run(_cleanup_if_created())
 
 
 def _run_sslrootcert_clients(
