@@ -190,6 +190,81 @@ async def test_signup_validation_errors(session_client: Any) -> None:
     assert both_user["lastName"] == "é" * 50
 
 
+async def test_signup_name_bounds_after_nfc_and_raw(session_client: Any) -> None:
+    nfd_e = "e\u0301"
+    assert len(unicodedata.normalize("NFC", nfd_e * 80)) == 80
+    assert len(unicodedata.normalize("NFC", nfd_e * 81)) == 81
+
+    first_ok = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(name="é" * 80, email=unique_email("c-first80")),
+    )
+    assert first_ok.status_code == 201, first_ok.text
+    assert first_ok.json()["user"]["firstName"] == "é" * 80
+    assert first_ok.json()["user"]["lastName"] == ""
+
+    first_nfd_ok = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(name=nfd_e * 80, email=unique_email("c-first80n")),
+    )
+    assert first_nfd_ok.status_code == 201, first_nfd_ok.text
+    assert first_nfd_ok.json()["user"]["firstName"] == "é" * 80
+
+    for raw in ("é" * 81, nfd_e * 81):
+        first_over = await session_client.post(
+            "/api/v1/auth/signup",
+            json=signup_body(name=raw, email=unique_email("c-first81")),
+        )
+        assert first_over.status_code == 400, first_over.text
+        assert first_over.status_code != 500
+        assert first_over.json()["error"] == "validation"
+        assert "name" in first_over.json()["fields"]
+
+    last_ok = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(name="X " + "é" * 80, email=unique_email("c-last80")),
+    )
+    assert last_ok.status_code == 201, last_ok.text
+    assert last_ok.json()["user"]["firstName"] == "X"
+    assert last_ok.json()["user"]["lastName"] == "é" * 80
+
+    last_nfd_ok = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(name="X " + nfd_e * 80, email=unique_email("c-last80n")),
+    )
+    assert last_nfd_ok.status_code == 201, last_nfd_ok.text
+    assert last_nfd_ok.json()["user"]["lastName"] == "é" * 80
+
+    for raw in ("X " + "é" * 81, "X " + nfd_e * 81):
+        last_over = await session_client.post(
+            "/api/v1/auth/signup",
+            json=signup_body(name=raw, email=unique_email("c-last81")),
+        )
+        assert last_over.status_code == 400, last_over.text
+        assert last_over.status_code != 500
+        assert last_over.json()["error"] == "validation"
+        assert last_over.json() != {"error": "internal_error"}
+        assert "name" in last_over.json()["fields"]
+
+    raw_ok = "A" + (" " * 1600)
+    raw_over = "A" + (" " * 1601)
+    assert len(raw_ok) == 1601
+    assert len(raw_over) == 1602
+    fitted = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(name=raw_ok, email=unique_email("c-raw1601")),
+    )
+    assert fitted.status_code == 201, fitted.text
+    assert fitted.json()["user"]["firstName"] == "A"
+    over = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(name=raw_over, email=unique_email("c-raw1602")),
+    )
+    assert over.status_code == 400, over.text
+    assert over.json()["error"] == "validation"
+    assert "name" in over.json()["fields"]
+
+
 def test_signup_request_normalizes_email() -> None:
     body = SignUpRequest.model_validate(
         {"name": "  Ada  ", "email": " Ada@Example.COM ", "password": PASSWORD}
