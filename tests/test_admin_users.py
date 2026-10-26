@@ -1620,6 +1620,48 @@ async def test_admin_and_search_query_reject_overlong_and_strict_bool(
     assert yes_sus.json()["error"] == "validation"
 
 
+async def test_identity_put_name_length_is_checked_after_nfc(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    admin = await _signup_role(
+        session_client, db_session, SystemRole.ADMIN, prefix="nfc-len-admin"
+    )
+    target = await _signup(session_client, email=unique_email("nfc-len-tgt"))
+    await session_client.post(
+        "/api/v1/auth/login",
+        json={"email": admin["email"], "password": PASSWORD},
+    )
+    qa = "\u0958"
+    assert unicodedata.normalize("NFC", qa) == "\u0915\u093c"
+    nfd_e = "e\u0301"
+    assert unicodedata.normalize("NFC", nfd_e) == "é"
+
+    for field in ("firstName", "lastName"):
+        for raw in (qa * 80, qa * 41):
+            response = await session_client.put(
+                f"/api/v1/admin/users/{target['id']}",
+                json={field: raw},
+            )
+            assert response.status_code == 400, response.text
+            body = response.json()
+            assert body["error"] == "validation"
+            assert field in body["fields"]
+
+    accepted = nfd_e * 41
+    for field in ("firstName", "lastName"):
+        response = await session_client.put(
+            f"/api/v1/admin/users/{target['id']}",
+            json={field: accepted},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()[field] == "é" * 41
+    db_session.expire_all()
+    stored = await db_session.get(User, target["id"])
+    assert stored is not None
+    assert stored.first_name == "é" * 41
+    assert stored.last_name == "é" * 41
+
+
 async def test_nul_bytes_in_user_text_fields_are_validation(
     session_client: Any, db_session: AsyncSession
 ) -> None:

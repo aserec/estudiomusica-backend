@@ -17,6 +17,25 @@ def reject_nul(value: str | None) -> str | None:
     return value
 
 
+# varchar(80) guarda NFC. El tope semántico es 80 *después* de NFC: U+0958
+# (y otras exclusiones de composición) se alarga (1→2), y NFD como
+# ``e\u0301`` se acorta. ``Field(max_length=80)`` sobre el crudo rechazaría
+# 41×``é`` (cabe) y dejaría pasar 80×U+0958 (160 NFC → 500 en Postgres).
+_PERSON_NAME_MAX = 80
+_PERSON_NAME_RAW_MAX = 800
+
+
+def _normalize_person_name(value: str, *, required_message: str | None) -> str:
+    reject_nul(value)
+    stripped = value.strip()
+    if required_message is not None and not stripped:
+        raise ValueError(required_message)
+    normalized = unicodedata.normalize("NFC", stripped)
+    if len(normalized) > _PERSON_NAME_MAX:
+        raise ValueError("too long")
+    return normalized
+
+
 class AdminUserStatus(StrEnum):
     """Filtro de listado. Enums en snake_case (convención #91)."""
 
@@ -37,8 +56,8 @@ class AdminUserView(PublicUser):
 class AdminUserIdentityUpdate(APIModel):
     """Edición de identidad. PUT parcial: al menos un campo."""
 
-    first_name: str | None = Field(default=None, max_length=80)
-    last_name: str | None = Field(default=None, max_length=80)
+    first_name: str | None = Field(default=None, max_length=_PERSON_NAME_RAW_MAX)
+    last_name: str | None = Field(default=None, max_length=_PERSON_NAME_RAW_MAX)
     email: EmailStr | None = None
 
     @field_validator("first_name")
@@ -46,19 +65,14 @@ class AdminUserIdentityUpdate(APIModel):
     def strip_first_name(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        reject_nul(value)
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("firstName required")
-        return unicodedata.normalize("NFC", stripped)
+        return _normalize_person_name(value, required_message="firstName required")
 
     @field_validator("last_name")
     @classmethod
     def strip_last_name(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        reject_nul(value)
-        return unicodedata.normalize("NFC", value.strip())
+        return _normalize_person_name(value, required_message=None)
 
     @field_validator("email", mode="before")
     @classmethod

@@ -155,6 +155,27 @@ async def test_signup_validation_errors(session_client: Any) -> None:
     assert blank_name.status_code == 400
     assert blank_name.json() == {"error": "validation", "fields": ["name"]}
 
+    qa = "\u0958"
+    for raw in (qa * 80, qa * 41):
+        overlong = await session_client.post(
+            "/api/v1/auth/signup",
+            json=signup_body(name=raw, email=unique_email("nfc-len")),
+        )
+        assert overlong.status_code == 400, overlong.text
+        body = overlong.json()
+        assert body["error"] == "validation"
+        assert "name" in body["fields"]
+
+    nfd_ok = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(name="e\u0301" * 41, email=unique_email("nfc-ok")),
+    )
+    assert nfd_ok.status_code == 201, nfd_ok.text
+    user = nfd_ok.json()["user"]
+    assert user["firstName"] == "é" * 41
+    assert user["lastName"] == ""
+    assert user["name"] == "é" * 41
+
 
 def test_signup_request_normalizes_email() -> None:
     body = SignUpRequest.model_validate(
