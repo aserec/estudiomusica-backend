@@ -1787,13 +1787,12 @@ async def test_teacher_exact_email_query_uses_unique_index(
     assert "deleted_at IS NULL" in sql
     assert "suspended_at IS NULL" in sql
     try:
-        async with engine.connect() as conn:
+        async with engine.connect() as conn, conn.begin():
+            await conn.execute(text("SET LOCAL enable_seqscan = off"))
             rows = await conn.execute(text("EXPLAIN " + sql))
             plan = "\n".join(str(row[0]) for row in rows)
-        assert "email" in plan
-        if "Index" in plan:
-            assert "uq_users_email" in plan
-            assert "Scan" in plan
+        assert "Index Scan using uq_users_email" in plan
+        assert "Seq Scan" not in plan
     finally:
         await engine.dispose()
 
