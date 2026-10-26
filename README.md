@@ -134,7 +134,7 @@ Errores (snake_case, convención #91):
 - la operación dejaría el sitio sin un admin vigente → `409 {"error":"last_admin"}` (incluye la carrera del último admin; `SELECT ... FOR UPDATE` de actor, destino y admins vigentes, ordenado por id, con `populate_existing` para refrescar el actor ya cargado en la sesión; un admin suspendido o borrado no cuenta y no se bloquea; un actor que ya no es admin vigente recibe `403` antes de `last_admin`)
 - `isAdmin`/`suspended` no aceptan `"yes"` (booleanos estrictos; validación 400)
 - byte NUL en `query`, `q`, `firstName`, `lastName` o `email` → `400 {"error":"validation"}` (no 422; convención #91; Postgres rechazaría el NUL con 500)
-- si el rol `alumno` está desactivado, quitar el admin → `409 {"error":"role_not_assignable"}` (limitación: `assign_system_role` no puede degradar)
+- si el rol `alumno` está desactivado, quitar el admin → `409 {"error":"role_not_assignable"}` (`assign_system_role` bloquea el rol `FOR SHARE` y rechaza el inactivo; no es 500)
 
 `GET /admin/users` pagina con `page`/`pageSize` (no `limit`/`cursor`: el ticket #395 los pedía; se mantiene el helper de #91, pendiente de decisión de Danel). Sin `status` lista vigentes, **incluidos suspendidos**; `status=all` añade borrados. `query` (máximo 200) filtra por nombre o email; los comodines LIKE se escapan.
 

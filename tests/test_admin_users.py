@@ -1727,8 +1727,27 @@ async def test_teacher_exact_email_query_uses_unique_index(
 
 
 async def test_deactivated_alumno_cannot_demote_admin(
-    session_client: Any, db_session: AsyncSession
+    session_client: Any,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Quitar admin pasa por assign_system_role: 409 role_not_assignable, no 500."""
+
+    assigned: list[str] = []
+
+    async def _spy(
+        session: AsyncSession,
+        *,
+        actor: User,
+        target: User,
+        role_id: str,
+    ) -> User:
+        assigned.append(role_id)
+        return await assign_system_role(
+            session, actor=actor, target=target, role_id=role_id
+        )
+
+    monkeypatch.setattr("app.services.users.assign_system_role", _spy)
     admin = await _signup_role(
         session_client, db_session, SystemRole.ADMIN, prefix="rol-admin"
     )
@@ -1746,11 +1765,14 @@ async def test_deactivated_alumno_cannot_demote_admin(
         f"/api/v1/admin/users/{target['id']}/admin",
         json={"isAdmin": False},
     )
+    assert response.status_code != 500
     assert response.status_code == 409
     assert response.json() == {"error": "role_not_assignable"}
+    assert assigned == [SystemRole.ALUMNO]
     still = await db_session.get(User, target["id"])
     assert still is not None
     assert still.system_role_id == SystemRole.ADMIN
+    assert still.is_admin is True
 
 
 async def test_deleted_email_stays_blocked(
