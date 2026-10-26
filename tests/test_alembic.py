@@ -361,10 +361,10 @@ def test_alembic_revision_chain_is_linear() -> None:
     bases = script.get_bases()
     assert len(heads) == 1
     assert len(bases) == 1
-    current: str | tuple[str, ...] | None = heads[0]
+    current: str | list[str] | tuple[str, ...] | None = heads[0]
     seen: list[str] = []
     while current is not None:
-        if isinstance(current, tuple):
+        if isinstance(current, list | tuple):
             raise AssertionError(f"revisión ramificada: {current}")
         assert current not in seen
         seen.append(current)
