@@ -580,7 +580,13 @@ class _SessionAdvisoryLock:
             self._ready.set()
             if not self._acquired:
                 return
-            await asyncio.to_thread(self._stop.wait)
+            while not self._stop.is_set():
+                try:
+                    await connection.scalar(text("SELECT 1"))
+                except Exception:
+                    self._lost = True
+                    return
+                await asyncio.sleep(0.5)
             await connection.scalar(
                 text("SELECT pg_advisory_unlock(:k1, :k2)"),
                 {"k1": key1, "k2": key2},
@@ -817,11 +823,16 @@ async def _cleanup_production_test_rows(admin: RedactedDsn) -> None:
 
 def drop_production_test_role(admin_url: str | RedactedDsn) -> None:
     admin = _as_redacted_dsn(admin_url)
+    lost = _ROLE_LIFE_LOCK is not None and _ROLE_LIFE_LOCK.lost
     try:
         asyncio.run(_drop_production_test_role(admin))
         asyncio.run(_cleanup_production_test_rows(admin))
     except Exception as exc:
         if _is_connection_error(exc):
+            if lost:
+                raise RuntimeError(
+                    "se perdió el lock de vida del rol de production-tests"
+                ) from None
             return
         raise RuntimeError(
             "No se pudo borrar el rol de production-tests "
@@ -829,6 +840,8 @@ def drop_production_test_role(admin_url: str | RedactedDsn) -> None:
         ) from None
     finally:
         _release_production_role_life_lock()
+    if lost:
+        raise RuntimeError("se perdió el lock de vida del rol de production-tests")
 
 
 def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
@@ -1536,3 +1549,17 @@ async def session_client(
         yield client
     application.dependency_overrides.pop(_get_session, None)
     get_settings.cache_clear()
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    lock = _ROLE_LIFE_LOCK
+    if lock is None or not lock.lost:
+        return
+    if exitstatus == 0:
+        session.exitstatus = 1
+    terminal = session.config.pluginmanager.get_plugin("terminalreporter")
+    if terminal is not None:
+        terminal.write_line(
+            "se perdió el lock de vida del rol de production-tests",
+            red=True,
+        )

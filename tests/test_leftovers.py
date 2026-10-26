@@ -25,8 +25,10 @@ from tests.conftest import (
     _orphan_production_test_role,
     _pg_ident,
     _pg_literal,
+    _role_advisory_lock_keys,
     _SessionAdvisoryLock,
     drop_database_if_exists,
+    drop_production_test_role,
     ensure_database_exists,
 )
 
@@ -940,6 +942,56 @@ def test_orphan_production_test_role_captures_overflow(
 
     monkeypatch.setattr(os, "kill", boom)
     assert _orphan_production_test_role("em_prod_tests_99999999999") is False
+
+
+@pytest.mark.db
+def test_killed_lock_connection_fails_teardown(
+    require_postgres: RedactedDsn,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Si se mata la conexión del lock, el teardown debe fallar (rc≠0)."""
+
+    import time
+
+    name = "em_prod_tests_1_kill_lock"
+    lock = _SessionAdvisoryLock(require_postgres, name)
+    assert lock.start() is True
+    monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", lock)
+    key1, key2 = _role_advisory_lock_keys(name)
+
+    async def terminate_holder() -> None:
+        engine = _admin_engine(require_postgres)
+        try:
+            async with engine.connect() as connection:
+                rows = (
+                    await connection.execute(
+                        text(
+                            "SELECT pid FROM pg_locks "
+                            "WHERE locktype = 'advisory' "
+                            "AND classid = :k1 AND objid = :k2 "
+                            "AND pid <> pg_backend_pid()"
+                        ),
+                        {"k1": key1, "k2": key2},
+                    )
+                ).all()
+                for (pid,) in rows:
+                    await connection.execute(
+                        text("SELECT pg_terminate_backend(:pid)"),
+                        {"pid": pid},
+                    )
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(terminate_holder())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not lock.lost:
+            time.sleep(0.1)
+        assert lock.lost is True
+        with pytest.raises(RuntimeError, match="se perdió el lock de vida"):
+            drop_production_test_role(require_postgres)
+    finally:
+        lock.stop()
 
 
 @pytest.mark.db
