@@ -19,6 +19,7 @@ from app.schemas.categories import (
 )
 from app.services.categories import (
     _CATEGORY_TREE_LOCK_KEY,
+    _assert_parent_is_root,
     _integrity_name,
     _raise_from_integrity,
     create_category,
@@ -693,12 +694,29 @@ def test_tree_lock_is_transactional_not_session(
 ) -> None:
     """El candado es xact: tras COMMIT no queda en pg_locks.
 
-    Mata lock-no-xact-sesion.
+    Mata lock-no-xact-sesion. El orden en create mata lock-create-tras-chequeo.
     """
+
+    import inspect
 
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.db import RedactedDsn
+
+    created = inspect.getsource(create_category)
+    assert created.index("_lock_category_tree") < created.index(
+        "_assert_parent_is_root"
+    )
+    assert created.index("_lock_category_tree") < created.index("_name_taken")
+    deleted = inspect.getsource(delete_category)
+    assert "_lock_category_tree" in deleted
+    assert deleted.index("_lock_category_tree") < deleted.index("_lock_category(")
+    parent_src = inspect.getsource(_assert_parent_is_root)
+    assert "with_for_update" in parent_src
+    updated = inspect.getsource(update_category)
+    assert updated.index("_name_taken") < updated.index("row.name = next_name")
+    assert "_raise_from_integrity" in updated
+    assert "_raise_from_integrity" in created
 
     dsn = require_postgres
     assert isinstance(dsn, RedactedDsn)
