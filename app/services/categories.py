@@ -1,5 +1,6 @@
 """CRUD de categorías de curso. Deniega por defecto en el router."""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import NoReturn
 from uuid import UUID
@@ -216,7 +217,7 @@ async def update_category(
         raise CategoryNameTaken()
     if "name" in fields:
         row.name = next_name
-        row.name_key = category_name_key(next_name)
+    row.name_key = category_name_key(next_name)
     if changing_parent:
         row.parent_id = next_parent
     if "description" in fields:
@@ -241,3 +242,54 @@ async def delete_category(session: AsyncSession, category_id: UUID) -> None:
         raise CategoryNotEmpty()
     row.deleted_at = datetime.now(UTC)
     await session.flush()
+
+
+@dataclass(frozen=True)
+class NameKeyMismatch:
+    id: UUID
+    name: str
+    stored: str
+    expected: str
+
+
+@dataclass(frozen=True)
+class NameKeyCollision:
+    key: str
+    parent_id: UUID | None
+    ids: tuple[UUID, ...]
+
+
+@dataclass(frozen=True)
+class NameKeyAudit:
+    mismatches: tuple[NameKeyMismatch, ...]
+    collisions: tuple[NameKeyCollision, ...]
+
+    def ok(self) -> bool:
+        return not self.mismatches and not self.collisions
+
+
+async def audit_category_name_keys(session: AsyncSession) -> NameKeyAudit:
+    """Recalcula name_key de todas las filas; avisa diferencias y colisiones."""
+
+    rows = list(await session.scalars(select(Category)))
+    mismatches: list[NameKeyMismatch] = []
+    groups: dict[tuple[UUID | None, str], list[UUID]] = {}
+    for row in rows:
+        expected = category_name_key(row.name)
+        if row.name_key != expected:
+            mismatches.append(
+                NameKeyMismatch(
+                    id=row.id,
+                    name=row.name,
+                    stored=row.name_key,
+                    expected=expected,
+                )
+            )
+        if row.deleted_at is None:
+            groups.setdefault((row.parent_id, expected.casefold()), []).append(row.id)
+    collisions = tuple(
+        NameKeyCollision(key=key, parent_id=parent_id, ids=tuple(ids))
+        for (parent_id, key), ids in groups.items()
+        if len(ids) > 1
+    )
+    return NameKeyAudit(mismatches=tuple(mismatches), collisions=collisions)
