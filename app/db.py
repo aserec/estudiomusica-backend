@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import (
 
 from app.config import get_settings
 
+HEALTH_APPLICATION_NAME = "estudiomusica-health"
+
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
@@ -70,6 +72,12 @@ def get_engine() -> AsyncEngine:
     return _engine
 
 
+async def _dispose_health_probe() -> None:
+    from app.services.health import dispose_health_probe
+
+    await dispose_health_probe()
+
+
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
     global _session_factory
     if _session_factory is None:
@@ -102,6 +110,9 @@ def clear_engine() -> None:
     _session_factory = None
     if engine is not None:
         engine.sync_engine.dispose()
+    from app.services.health import clear_health_probe
+
+    clear_health_probe()
 
 
 async def dispose_engine() -> None:
@@ -112,3 +123,4 @@ async def dispose_engine() -> None:
         await _engine.dispose()
     _engine = None
     _session_factory = None
+    await _dispose_health_probe()

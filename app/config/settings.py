@@ -247,16 +247,32 @@ class Settings(BaseSettings):
         return self.app_env != "development"
 
 
-def _redact_error_input(value: object) -> object:
+_DSN_FIELD_NAMES = frozenset({"database_url", "DATABASE_URL"})
+
+
+def _loc_is_dsn(loc: object) -> bool:
+    if isinstance(loc, (tuple, list)):
+        return any(part in _DSN_FIELD_NAMES for part in loc)
+    return loc in _DSN_FIELD_NAMES
+
+
+def _redact_error_input(value: object, *, dsn_field: bool = False) -> object:
+    """Si el campo es el DSN, se sustituye entero (sin parsear)."""
+
+    if dsn_field:
+        if isinstance(value, dict):
+            return {
+                key: _redact_error_input(item, dsn_field=key in _DSN_FIELD_NAMES)
+                for key, item in value.items()
+            }
+        return "<dsn-redactado>"
     if isinstance(value, SecretStr):
         return "**********"
-    if isinstance(value, str) and "://" in value:
-        try:
-            return make_url(value).render_as_string(hide_password=True)
-        except Exception:
-            return "<dsn-redactado>"
     if isinstance(value, dict):
-        return {key: _redact_error_input(item) for key, item in value.items()}
+        return {
+            key: _redact_error_input(item, dsn_field=key in _DSN_FIELD_NAMES)
+            for key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [_redact_error_input(item) for item in value]
     return value
@@ -267,14 +283,15 @@ def _validation_error_without_secrets(exc: ValidationError) -> ValidationError:
 
     line_errors: list[Any] = []
     for error in exc.errors(include_url=False):
+        dsn_field = _loc_is_dsn(error.get("loc"))
         item: dict[str, Any] = {
             "type": error.get("type", "value_error"),
             "loc": error.get("loc", ()),
-            "input": _redact_error_input(error.get("input")),
+            "input": _redact_error_input(error.get("input"), dsn_field=dsn_field),
         }
         ctx = error.get("ctx")
         if ctx is not None:
-            item["ctx"] = _redact_error_input(ctx)
+            item["ctx"] = _redact_error_input(ctx, dsn_field=dsn_field)
         line_errors.append(item)
     try:
         return ValidationError.from_exception_data(
