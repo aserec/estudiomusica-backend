@@ -56,7 +56,9 @@ _NFC_LENGTH_NOTE = "Longitud máxima tras NFC."
 _ZWJ = "\u200d"
 _ZWNJ = "\u200c"
 _VIRAMA_CCC = 9
+_VS15 = "\ufe0e"
 _VS16 = "\ufe0f"
+_VARIATION_SELECTORS = frozenset({_VS15, _VS16})
 
 
 def _in_ranges(code: int, ranges: tuple[tuple[int, int], ...]) -> bool:
@@ -86,13 +88,27 @@ def _joining_type(char: str) -> str:
     return "U"
 
 
+def _last_vs16(value: str, start: int, end: int, step: int) -> bool:
+    """El último selector de variación (VS15/VS16) manda: VS15 anula VS16."""
+
+    last: str | None = None
+    cursor = start
+    while 0 <= cursor < len(value) and (end - cursor) * step > 0:
+        char = value[cursor]
+        if char in _VARIATION_SELECTORS:
+            last = char
+        cursor += step
+    return last == _VS16
+
+
 def _skip_transparent(value: str, index: int, step: int) -> tuple[int, bool]:
     cursor = index + step
-    saw_vs16 = False
     while 0 <= cursor < len(value) and _joining_type(value[cursor]) == "T":
-        if value[cursor] == _VS16:
-            saw_vs16 = True
         cursor += step
+    if step < 0:
+        saw_vs16 = _last_vs16(value, cursor + 1, index, 1)
+    else:
+        saw_vs16 = _last_vs16(value, index + 1, cursor, 1)
     return cursor, saw_vs16
 
 
@@ -123,7 +139,10 @@ def _keep_zwj(value: str, index: int) -> bool:
         if _in_ranges(ord(value[right]), EMOJI_MODIFIER_BASE):
             right_vs = True
     else:
-        right_vs = right_vs or value[right + 1 : right + 2] == _VS16
+        trail = right + 1
+        while trail < len(value) and value[trail] in _VARIATION_SELECTORS:
+            trail += 1
+        right_vs = right_vs or _last_vs16(value, right + 1, trail, 1)
     return _is_emoji_zwj_side(value[left], left_vs) and _is_emoji_zwj_side(
         value[right], right_vs
     )

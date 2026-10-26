@@ -576,6 +576,7 @@ _NAME_KEY_CASES: tuple[tuple[str, str], ...] = (
     (_BEH_FATHA_ZWNJ, _BEH_FATHA_ZWNJ),
     ("ب\u064e\u064e\u200cب", "ب\u064e\u064e\u200cب"),
     ("\u2764\ufe0f\ufe0f\u200d\U0001f525", "\u2764\ufe0f\ufe0f\u200d\U0001f525"),
+    ("\u2764\ufe0f\ufe0e\u200d\U0001f525", "\u2764\ufe0f\ufe0e\U0001f525"),
     ("\u2764\ufe0e\u200d\U0001f525", "\u2764\ufe0e\U0001f525"),
     (_NKO_ZWNJ, _NKO_ZWNJ),
     (_MONGOL_ZWNJ, _MONGOL_ZWNJ),
