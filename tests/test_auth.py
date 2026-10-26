@@ -266,6 +266,31 @@ def test_split_display_name_separates_on_tab_and_ideographic_space() -> None:
     assert split_display_name("Ada\u3000Lovelace") == ("Ada", "Lovelace")
 
 
+@pytest.mark.parametrize("sep", ["\t", "\u3000", " \u3000 "])
+async def test_signup_splits_name_on_unicode_whitespace(
+    session_client: Any, sep: str
+) -> None:
+    response = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(name=f"Ada{sep}de la Cruz", email=unique_email("split")),
+    )
+    assert response.status_code == 201, response.text
+    user = response.json()["user"]
+    assert (user["firstName"], user["lastName"]) == ("Ada", "de la Cruz")
+
+
+@pytest.mark.parametrize("name", ["\t", "\u3000", " \t\u3000 "])
+async def test_signup_whitespace_only_name_is_400(
+    session_client: Any, name: str
+) -> None:
+    response = await session_client.post(
+        "/api/v1/auth/signup",
+        json=signup_body(name=name, email=unique_email("blank")),
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["fields"] == ["name"]
+
+
 def test_signup_request_normalizes_email() -> None:
     body = SignUpRequest.model_validate(
         {"name": "  Ada  ", "email": " Ada@Example.COM ", "password": PASSWORD}
