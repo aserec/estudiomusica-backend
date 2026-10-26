@@ -1757,6 +1757,31 @@ async def test_create_exhausts_transient_and_session_stays_clean(
     assert isinstance(rows, list)
 
 
+async def test_get_40001_is_503_not_500(
+    session_client: Any,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy.exc import DBAPIError
+
+    import app.routers.categories as categories_router
+
+    await _admin(session_client, db_session)
+
+    class _PgError(Exception):
+        sqlstate = "40001"
+
+    async def boom(_session: AsyncSession) -> list[Category]:
+        raise DBAPIError("SELECT 1", {}, _PgError())
+
+    monkeypatch.setattr(categories_router, "list_categories", boom)
+    response = await session_client.get(_LIST)
+    assert response.status_code == 503
+    assert response.status_code != 500
+    assert response.json() == {"error": "transient_db_conflict"}
+    assert response.headers.get("retry-after") == "1"
+
+
 async def test_f_sin_chequeo_clash(db_session: AsyncSession) -> None:
     await db_session.execute(
         text(
@@ -3652,3 +3677,120 @@ def seed_one(database_url: str, name: str, tracked: list[uuid.UUID]) -> uuid.UUI
             await engine.dispose()
 
     return asyncio.run(run())
+
+
+def test_serializable_concurrent_child_posts_never_500(
+    require_postgres: Any,
+    production_test_database_url: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """40 rondas de 6 POST bajo el mismo padre en serializable: 0×500."""
+
+    from httpx2 import ASGITransport, AsyncClient
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.config import get_settings
+    from app.db import RedactedDsn, dispose_engine
+    from app.main import create_app, get_app
+    from tests.conftest import PRODUCTION_TEST_USER, production_settings_env
+    from tests.test_auth import signup_body
+
+    admin_dsn = require_postgres
+    prod_dsn = production_test_database_url
+    assert isinstance(admin_dsn, RedactedDsn)
+    assert isinstance(prod_dsn, RedactedDsn)
+
+    async def _alter_role_isolation(level: str | None) -> None:
+        engine = create_async_engine(admin_dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                if level is None:
+                    await connection.execute(
+                        text(
+                            f"ALTER ROLE {PRODUCTION_TEST_USER} "
+                            "RESET default_transaction_isolation"
+                        )
+                    )
+                else:
+                    await connection.execute(
+                        text(
+                            f"ALTER ROLE {PRODUCTION_TEST_USER} "
+                            "SET default_transaction_isolation TO "
+                            f"'{level}'"
+                        )
+                    )
+        finally:
+            await engine.dispose()
+
+    async def _promote(email: str) -> None:
+        engine = create_async_engine(prod_dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "UPDATE users SET system_role_id = 'admin', is_admin = true "
+                        "WHERE email = :email"
+                    ),
+                    {"email": email},
+                )
+        finally:
+            await engine.dispose()
+
+    async def run() -> None:
+        await _alter_role_isolation("serializable")
+        try:
+            for key, value in production_settings_env(prod_dsn).items():
+                monkeypatch.setenv(key, value)
+            monkeypatch.setattr("app.config.settings.allow_test_database", lambda: True)
+            get_settings.cache_clear()
+            get_app.cache_clear()
+            await dispose_engine()
+            application = create_app()
+            transport = ASGITransport(app=application)
+            client_cm = AsyncClient(transport=transport, base_url="http://test")
+            async with client_cm as client:
+                email = unique_email("ser-cat")
+                signed = await client.post(
+                    "/api/v1/auth/signup",
+                    json=signup_body(email=email),
+                )
+                assert signed.status_code == 201, signed.text
+                await _promote(email)
+                statuses: list[int] = []
+                for _round in range(40):
+                    parent = await client.post(
+                        _ADMIN, json={"name": f"SP-{uuid.uuid4().hex[:8]}"}
+                    )
+                    assert parent.status_code != 500, parent.text
+                    statuses.append(parent.status_code)
+                    if parent.status_code != 201:
+                        continue
+                    parent_id = parent.json()["id"]
+                    children = await asyncio.gather(
+                        *[
+                            client.post(
+                                _ADMIN,
+                                json={
+                                    "name": f"SC-{uuid.uuid4().hex[:8]}",
+                                    "parentId": parent_id,
+                                },
+                            )
+                            for _ in range(6)
+                        ]
+                    )
+                    for child in children:
+                        assert child.status_code != 500, child.text
+                        statuses.append(child.status_code)
+                assert 500 not in statuses
+                listed = await client.get(_LIST)
+                assert listed.status_code != 500, listed.text
+        finally:
+            await dispose_engine()
+            get_settings.cache_clear()
+            get_app.cache_clear()
+            await _alter_role_isolation(None)
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_alter_role_isolation(None))

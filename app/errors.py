@@ -7,10 +7,11 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import Settings
-from app.exceptions import DomainError
+from app.exceptions import DomainError, conflict_from_sqlstate, pg_sqlstate
 from app.schemas.errors import ErrorResponse
 
 STATUS_ERROR_CODES: dict[int, str] = {
@@ -247,6 +248,17 @@ def register_exception_handlers(application: FastAPI, settings: Settings) -> Non
                 message=_maybe_message(exc.message, settings.expose_errors),
             ),
             headers=headers,
+        )
+
+    @application.exception_handler(DBAPIError)
+    async def dbapi_error_handler(_request: Request, exc: DBAPIError) -> JSONResponse:
+        mapped = conflict_from_sqlstate(pg_sqlstate(exc))
+        if mapped is None:
+            raise exc
+        return JSONResponse(
+            status_code=mapped.status_code,
+            content=error_body(mapped.error),
+            headers={"Retry-After": "1"},
         )
 
     @application.exception_handler(RequestValidationError)

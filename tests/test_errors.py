@@ -152,6 +152,14 @@ def test_pg_deadlock_and_serialization_are_503_not_500(
     assert serial.status_code == 503
     assert serial.json() == {"error": "transient_db_conflict"}
     assert serial.headers.get("retry-after") == "1"
+    raw_deadlock = probe_client.get("/api/v1/_test/pg-raw-deadlock")
+    assert raw_deadlock.status_code == 503
+    assert raw_deadlock.json() == {"error": "transient_db_conflict"}
+    assert raw_deadlock.headers.get("retry-after") == "1"
+    raw_serial = probe_client.get("/api/v1/_test/pg-raw-serialization")
+    assert raw_serial.status_code == 503
+    assert raw_serial.json() == {"error": "transient_db_conflict"}
+    assert raw_serial.headers.get("retry-after") == "1"
 
 
 def test_transient_retry_succeeds_and_exhaust_is_503(probe_client: TestClient) -> None:

@@ -133,16 +133,19 @@ async def _lock_categories_ordered(
 
 
 async def _next_sort_order(session: AsyncSession, parent_id: UUID | None) -> int:
-    query = select(func.coalesce(func.max(Category.sort_order), -1) + 1).where(
-        Category.deleted_at.is_(None)
-    )
-    if parent_id is None:
-        query = query.where(Category.parent_id.is_(None))
-    else:
-        query = query.where(Category.parent_id == parent_id)
-    with session.no_autoflush:
-        value = await session.scalar(query)
-    return int(value or 0)
+    try:
+        query = select(func.coalesce(func.max(Category.sort_order), -1) + 1).where(
+            Category.deleted_at.is_(None)
+        )
+        if parent_id is None:
+            query = query.where(Category.parent_id.is_(None))
+        else:
+            query = query.where(Category.parent_id == parent_id)
+        with session.no_autoflush:
+            value = await session.scalar(query)
+        return int(value or 0)
+    except DBAPIError as exc:
+        _raise_from_db(exc)
 
 
 async def _name_taken(
@@ -162,23 +165,29 @@ async def _name_taken(
         query = query.where(Category.parent_id == parent_id)
     if exclude_id is not None:
         query = query.where(Category.id != exclude_id)
-    with session.no_autoflush:
-        return await session.scalar(query.limit(1)) is not None
+    try:
+        with session.no_autoflush:
+            return await session.scalar(query.limit(1)) is not None
+    except DBAPIError as exc:
+        _raise_from_db(exc)
 
 
 async def _has_active_children(session: AsyncSession, category_id: UUID) -> bool:
-    with session.no_autoflush:
-        return (
-            await session.scalar(
-                select(Category.id)
-                .where(
-                    Category.parent_id == category_id,
-                    Category.deleted_at.is_(None),
+    try:
+        with session.no_autoflush:
+            return (
+                await session.scalar(
+                    select(Category.id)
+                    .where(
+                        Category.parent_id == category_id,
+                        Category.deleted_at.is_(None),
+                    )
+                    .limit(1)
                 )
-                .limit(1)
+                is not None
             )
-            is not None
-        )
+    except DBAPIError as exc:
+        _raise_from_db(exc)
 
 
 async def _assert_parent_is_root(
@@ -210,40 +219,43 @@ def _parent_is_root(
 
 
 async def list_categories(session: AsyncSession) -> list[Category]:
-    result = await session.scalars(
-        select(Category)
-        .where(Category.deleted_at.is_(None))
-        .order_by(Category.sort_order, Category.name, Category.id)
-    )
-    return list(result)
+    try:
+        result = await session.scalars(
+            select(Category)
+            .where(Category.deleted_at.is_(None))
+            .order_by(Category.sort_order, Category.name, Category.id)
+        )
+        return list(result)
+    except DBAPIError as exc:
+        _raise_from_db(exc)
 
 
 async def create_category(session: AsyncSession, body: CategoryCreate) -> Category:
     async def once() -> Category:
-        if body.parent_id is not None:
-            await _assert_parent_is_root(session, body.parent_id)
-        if await _name_taken(session, body.name, body.parent_id):
-            raise CategoryNameTaken()
-        sort_order = (
-            body.sort_order
-            if body.sort_order is not None
-            else await _next_sort_order(session, body.parent_id)
-        )
-        row = Category(
-            name=body.name,
-            name_key=category_name_key(body.name),
-            parent_id=body.parent_id,
-            description=body.description,
-            sort_order=sort_order,
-        )
         try:
+            if body.parent_id is not None:
+                await _assert_parent_is_root(session, body.parent_id)
+            if await _name_taken(session, body.name, body.parent_id):
+                raise CategoryNameTaken()
+            sort_order = (
+                body.sort_order
+                if body.sort_order is not None
+                else await _next_sort_order(session, body.parent_id)
+            )
+            row = Category(
+                name=body.name,
+                name_key=category_name_key(body.name),
+                parent_id=body.parent_id,
+                description=body.description,
+                sort_order=sort_order,
+            )
             async with session.begin_nested():
                 session.add(row)
                 await session.flush()
+            await session.refresh(row)
+            return row
         except DBAPIError as exc:
             _raise_from_db(exc)
-        await session.refresh(row)
-        return row
 
     return await _run_with_transient_retry(session, once)
 
@@ -263,56 +275,58 @@ async def update_category(
     changing_parent = "parent_id" in fields
 
     async def once() -> Category:
-        parent: Category | None = None
-        if changing_parent and body.parent_id is not None:
-            locked = await _lock_categories_ordered(
-                session, category_id, body.parent_id
-            )
-            row = locked.get(category_id)
-            parent = locked.get(body.parent_id)
-        else:
-            row = await _lock_category(session, category_id)
-        if row is None:
-            raise NotFound()
-        next_name = row.name if next_name_update is None else next_name_update
-        next_parent = row.parent_id
-        if changing_parent:
-            if body.parent_id is not None:
-                if await _has_active_children(session, category_id):
-                    raise Validation(fields=["parentId"])
-                _parent_is_root(parent, category_id)
-            next_parent = body.parent_id
-        if await _name_taken(session, next_name, next_parent, exclude_id=category_id):
-            raise CategoryNameTaken()
-        if "name" in fields:
-            row.name = next_name
-        row.name_key = category_name_key(next_name)
-        if changing_parent:
-            row.parent_id = next_parent
-        if "description" in fields:
-            row.description = body.description
-        if next_sort is not None:
-            row.sort_order = next_sort
         try:
+            parent: Category | None = None
+            if changing_parent and body.parent_id is not None:
+                locked = await _lock_categories_ordered(
+                    session, category_id, body.parent_id
+                )
+                row = locked.get(category_id)
+                parent = locked.get(body.parent_id)
+            else:
+                row = await _lock_category(session, category_id)
+            if row is None:
+                raise NotFound()
+            next_name = row.name if next_name_update is None else next_name_update
+            next_parent = row.parent_id
+            if changing_parent:
+                if body.parent_id is not None:
+                    if await _has_active_children(session, category_id):
+                        raise Validation(fields=["parentId"])
+                    _parent_is_root(parent, category_id)
+                next_parent = body.parent_id
+            if await _name_taken(
+                session, next_name, next_parent, exclude_id=category_id
+            ):
+                raise CategoryNameTaken()
+            if "name" in fields:
+                row.name = next_name
+            row.name_key = category_name_key(next_name)
+            if changing_parent:
+                row.parent_id = next_parent
+            if "description" in fields:
+                row.description = body.description
+            if next_sort is not None:
+                row.sort_order = next_sort
             async with session.begin_nested():
                 await session.flush()
+            await session.refresh(row)
+            return row
         except DBAPIError as exc:
             _raise_from_db(exc)
-        await session.refresh(row)
-        return row
 
     return await _run_with_transient_retry(session, once)
 
 
 async def delete_category(session: AsyncSession, category_id: UUID) -> None:
     async def once() -> None:
-        row = await _lock_category(session, category_id)
-        if row is None:
-            raise NotFound()
-        if await _has_active_children(session, category_id):
-            raise CategoryNotEmpty()
-        row.deleted_at = datetime.now(UTC)
         try:
+            row = await _lock_category(session, category_id)
+            if row is None:
+                raise NotFound()
+            if await _has_active_children(session, category_id):
+                raise CategoryNotEmpty()
+            row.deleted_at = datetime.now(UTC)
             await session.flush()
         except DBAPIError as exc:
             _raise_from_db(exc)
