@@ -138,6 +138,7 @@ def _keep_zwj(value: str, index: int) -> bool:
     # derecho empieza justo después; solo VS, tono o tags pertenecen al elemento.
     left = index - 1
     left_vs = False
+    tagged = False
     vs_start = left
     while vs_start >= 0 and value[vs_start] in _VARIATION_SELECTORS:
         vs_start -= 1
@@ -148,6 +149,7 @@ def _keep_zwj(value: str, index: int) -> bool:
         while left >= 0 and value[left] in _TAG_CF:
             left -= 1
         left_vs = True
+        tagged = True
     elif left >= 0 and 0x1F3FB <= ord(value[left]) <= 0x1F3FF:
         if left < 1 or not _in_ranges(ord(value[left - 1]), EMOJI_MODIFIER_BASE):
             return False
@@ -164,9 +166,11 @@ def _keep_zwj(value: str, index: int) -> bool:
         while trail < len(value) and value[trail] in _VARIATION_SELECTORS:
             trail += 1
         right_vs = _last_vs16(value, right + 1, trail)
-    return _is_emoji_zwj_side(value[left], left_vs) and _is_emoji_zwj_side(
-        value[right], right_vs
-    )
+    if tagged:
+        left_ok = left_vs and _in_ranges(ord(value[left]), EXTENDED_PICTOGRAPHIC)
+    else:
+        left_ok = _is_emoji_zwj_side(value[left], left_vs)
+    return left_ok and _is_emoji_zwj_side(value[right], right_vs)
 
 
 def _keep_zwnj(value: str, index: int) -> bool:

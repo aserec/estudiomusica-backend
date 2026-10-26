@@ -600,6 +600,7 @@ _NAME_KEY_CASES: tuple[tuple[str, str], ...] = (
     ("©\u200d\U0001f3fd", "©\U0001f3fd"),
     ("😀\u200d❤\ufe0f\ufe0e", "😀❤\ufe0f\ufe0e"),
     ("😀\u200d❤\ufe0e\ufe0f", "😀\u200d❤\ufe0e\ufe0f"),
+    (_FLAG_ENGLAND + "\u200d😀", _FLAG_ENGLAND + "\u200d😀"),
 )
 
 _LEGITIMATE_CF_NAMES: tuple[tuple[str, str], ...] = (
@@ -747,6 +748,15 @@ def test_name_key_table_matches_and_plain_joiner_variant(
             assert category_name_key(raw) == category_name_key(plain)
         else:
             assert category_name_key(raw) != category_name_key(plain)
+
+
+def test_subdivision_flag_zwj_element_is_kept() -> None:
+    """K(N(🏴gbeng + ZWJ + 😀)): la bandera de subdivisión es un elemento UTS #51."""
+
+    raw = normalize_category_name(_FLAG_ENGLAND + "\u200d😀")
+    assert raw == _FLAG_ENGLAND + "\u200d😀"
+    assert category_name_key(raw) == raw
+    assert "\u200d" in category_name_key(raw)
 
 
 def test_zwnj_izq_acepta_U() -> None:
