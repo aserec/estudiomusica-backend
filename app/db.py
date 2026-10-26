@@ -93,9 +93,19 @@ def _query_scalar(query: Mapping[Any, Any], *keys: str) -> str | None:
 
 
 def ssl_context_from_rootcert(cafile: str, ssl_value: object = None) -> ssl.SSLContext:
-    """``sslrootcert`` → ``SSLContext`` con ``cafile`` (asyncpg no tiene ese kwarg)."""
+    """``sslrootcert`` → ``SSLContext`` con ``cafile`` (asyncpg no tiene ese kwarg).
 
-    ctx = ssl.create_default_context(cafile=cafile)
+    Misma construcción que asyncpg con ``PGSSLROOTCERT``: no usa
+    ``create_default_context`` (Python 3.13+ activa ``VERIFY_X509_STRICT``
+    y rechaza CAs sin ``keyUsage``; libpq las acepta). Sigue verificando
+    hostname y cadena.
+    """
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.load_verify_locations(cafile=cafile)
+    strict = getattr(ssl, "VERIFY_X509_STRICT", 0)
+    if strict:
+        ctx.verify_flags &= ~strict
     mode = str(ssl_value).lower() if isinstance(ssl_value, str) else ""
     if mode == "verify-ca":
         ctx.check_hostname = False

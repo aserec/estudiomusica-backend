@@ -1859,6 +1859,44 @@ def test_sslrootcert_and_sslmode_are_case_insensitive(tmp_path: Any) -> None:
     assert disable_args.get("ssl") is False
 
 
+def test_sslrootcert_and_pgsslrootcert_accept_ca_without_keyusage(
+    tmp_path: Any,
+) -> None:
+    """CA sin ``keyUsage``: ``?sslrootcert=`` y ``PGSSLROOTCERT`` iguales (libpq)."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import prepare_asyncpg_connect_kwargs, ssl_context_from_rootcert
+
+    ca_dir = Path(str(tmp_path)) / "no-ku"
+    cafile, server_crt, server_key = _write_ca_without_keyusage_and_leaf(ca_dir)
+    server_ctx = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_SERVER)
+    server_ctx.load_cert_chain(str(server_crt), str(server_key))
+
+    query_kwargs = prepare_asyncpg_connect_kwargs(
+        {"ssl": "verify-full", "sslrootcert": str(cafile)}
+    )
+    query_ctx = query_kwargs["ssl"]
+    assert isinstance(query_ctx, ssl_mod.SSLContext)
+    helper_ctx = ssl_context_from_rootcert(str(cafile), "verify-full")
+    pg_ctx = _pgsslrootcert_ssl_context(str(cafile))
+    strict = getattr(ssl_mod, "VERIFY_X509_STRICT", 0)
+    for ctx in (query_ctx, helper_ctx, pg_ctx):
+        assert ctx.check_hostname is True
+        assert ctx.verify_mode == ssl_mod.CERT_REQUIRED
+        if strict:
+            assert ctx.verify_flags & strict == 0
+        _tls_handshake(ctx, server_ctx, "localhost")
+
+    with pytest.raises(ssl_mod.SSLError):
+        _tls_handshake(query_ctx, server_ctx, "wrong.example")
+    bad_ca = _write_unrelated_ca(Path(str(tmp_path)) / "other-ca.pem")
+    bad_ctx = ssl_context_from_rootcert(str(bad_ca), "verify-full")
+    with pytest.raises(ssl_mod.SSLError):
+        _tls_handshake(bad_ctx, server_ctx, "localhost")
+
+
 def test_ssl_require_with_rootcert_checks_hostname(tmp_path: Any) -> None:
     """T1/T11: ``ssl=require`` + CA verifica hostname (más estricto que libpq)."""
 
@@ -1993,6 +2031,156 @@ def _write_unrelated_ca(path: Any) -> Any:
         capture_output=True,
     )
     return path
+
+
+def _write_ca_without_keyusage_and_leaf(directory: Any) -> tuple[Any, Any, Any]:
+    """CA sin ``keyUsage`` + hoja firmada (SAN localhost)."""
+
+    import subprocess
+    from pathlib import Path
+
+    root = Path(str(directory))
+    root.mkdir(parents=True, exist_ok=True)
+    ca_cnf = root / "ca.cnf"
+    ca_cnf.write_text(
+        "[req]\n"
+        "distinguished_name = dn\n"
+        "x509_extensions = v3_ca\n"
+        "prompt = no\n"
+        "[dn]\n"
+        "CN = no-ku-ca\n"
+        "[v3_ca]\n"
+        "basicConstraints = critical,CA:TRUE\n"
+        "subjectKeyIdentifier = hash\n",
+        encoding="utf-8",
+    )
+    ca_key = root / "ca.key"
+    ca_pem = root / "ca.pem"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-keyout",
+            str(ca_key),
+            "-out",
+            str(ca_pem),
+            "-days",
+            "1",
+            "-nodes",
+            "-config",
+            str(ca_cnf),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    text = subprocess.run(
+        ["openssl", "x509", "-in", str(ca_pem), "-noout", "-text"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "Key Usage" not in text
+    assert "CA:TRUE" in text.replace(" ", "")
+
+    leaf_cnf = root / "leaf.cnf"
+    leaf_cnf.write_text(
+        "[req]\n"
+        "distinguished_name = dn\n"
+        "req_extensions = v3_req\n"
+        "prompt = no\n"
+        "[dn]\n"
+        "CN = localhost\n"
+        "[v3_req]\n"
+        "basicConstraints = CA:FALSE\n"
+        "subjectAltName = DNS:localhost,IP:127.0.0.1\n",
+        encoding="utf-8",
+    )
+    server_key = root / "server.key"
+    server_csr = root / "server.csr"
+    server_crt = root / "server.crt"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(server_key),
+            "-out",
+            str(server_csr),
+            "-config",
+            str(leaf_cnf),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "x509",
+            "-req",
+            "-in",
+            str(server_csr),
+            "-CA",
+            str(ca_pem),
+            "-CAkey",
+            str(ca_key),
+            "-CAcreateserial",
+            "-out",
+            str(server_crt),
+            "-days",
+            "1",
+            "-extfile",
+            str(leaf_cnf),
+            "-extensions",
+            "v3_req",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return ca_pem, server_crt, server_key
+
+
+def _pgsslrootcert_ssl_context(cafile: str) -> Any:
+    """Construcción de asyncpg cuando hay ``PGSSLROOTCERT`` / verify-full."""
+
+    import ssl as ssl_mod
+
+    ctx = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_CLIENT)
+    ctx.load_verify_locations(cafile=cafile)
+    ctx.verify_mode = ssl_mod.CERT_REQUIRED
+    ctx.check_hostname = True
+    return ctx
+
+
+def _tls_handshake(client_ctx: Any, server_ctx: Any, hostname: str) -> None:
+    errors: list[BaseException] = []
+    left, right = socket.socketpair()
+
+    def serve() -> None:
+        try:
+            wrapped = server_ctx.wrap_socket(right, server_side=True)
+            wrapped.close()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            right.close()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        wrapped = client_ctx.wrap_socket(left, server_hostname=hostname)
+        wrapped.close()
+    finally:
+        left.close()
+        thread.join(timeout=5)
+    if errors:
+        raise errors[0]
 
 
 def _start_ephemeral_tls_postgres(
