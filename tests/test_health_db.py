@@ -486,6 +486,17 @@ async def test_health_db_frozen_connect_returns_503_quickly(
     require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
+    from app.config import get_settings
+    from app.db import clear_engine, dispose_engine
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    monkeypatch.setenv("DB_HEALTH_CACHE_TTL", "0")
+    get_settings.cache_clear()
+    clear_engine()
+    warm = await health_service.check_database()
+    assert warm.db == "ok"
+    await dispose_engine()
+    get_settings.cache_clear()
     elapsed, result, _terminates, checkedout = await _run_frozen_health(
         monkeypatch, require_postgres, freeze_on="connect"
     )
