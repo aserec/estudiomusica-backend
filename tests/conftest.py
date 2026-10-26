@@ -468,8 +468,7 @@ async def _cleanup_production_test_rows(admin: RedactedDsn) -> None:
             if courses is not None:
                 await connection.execute(
                     text(
-                        "DELETE FROM courses WHERE name LIKE :prod "
-                        "OR name LIKE :copia"
+                        "DELETE FROM courses WHERE name LIKE :prod OR name LIKE :copia"
                     ),
                     {"prod": "Prod %", "copia": "Copia prod%"},
                 )

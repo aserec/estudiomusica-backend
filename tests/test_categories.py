@@ -450,9 +450,7 @@ async def test_move_with_courses_is_category_not_empty(
     await _admin(session_client, db_session)
     parent = await _create(session_client, name="Raíz origen")
     other = await _create(session_client, name="Raíz destino")
-    leaf = await _create(
-        session_client, name="Hoja con cursos", parent_id=parent["id"]
-    )
+    leaf = await _create(session_client, name="Hoja con cursos", parent_id=parent["id"])
     course = await _occupy_with_course(db_session, leaf["id"])
 
     blocked = await session_client.put(
