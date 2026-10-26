@@ -1635,6 +1635,64 @@ def test_c_clip_tono_vs_marcas_mc_zwj_ri_zwnj() -> None:
     assert clip_to_grapheme_limit(("B" * 110) + "ی\u200c", 111) == "B" * 110
 
 
+def test_k_gb9c_sin_linker() -> None:
+    """कंष: Extend (anusvara) no es Linker; se parte antes de ष."""
+
+    assert _next_grapheme("क्ष", 0) == 3
+    assert _next_grapheme("कंष", 0) == 2
+
+
+def test_k_gb9c_derecha_cualquiera() -> None:
+    assert _next_grapheme("क्A", 0) == 2
+    assert _next_grapheme("क्A", 2) == 3
+
+
+def test_k_gb9c_izq_cualquiera() -> None:
+    vowel_virama = "अ्ष"
+    assert _next_grapheme(vowel_virama, 0) == 2
+    assert _next_grapheme(vowel_virama, 2) == 3
+
+
+def test_k_gb11_sin_extend() -> None:
+    with_extend = "😀\ufe0f\u200d🔥"
+    assert _next_grapheme(with_extend, 0) == len(with_extend)
+
+
+def test_k_gb11_izq_cualquiera() -> None:
+    raw = "A\u200d😀"
+    assert _next_grapheme(raw, 0) == 2
+    assert _next_grapheme(raw, 2) == 3
+
+
+def test_k_gb11_derecha_cualquiera() -> None:
+    raw = "😀\u200dA"
+    assert _next_grapheme(raw, 0) == 2
+    assert _next_grapheme(raw, 2) == 3
+
+
+def test_k_gb12_sin_paridad() -> None:
+    three = _SPAIN + "🇽"
+    assert _next_grapheme(three, 0) == 2
+    assert _next_grapheme(three, 2) == 3
+
+
+def test_k_gb8_off() -> None:
+    lvt_t = "각" + "\u11a8"
+    assert _next_grapheme(lvt_t, 0) == 2
+    assert _next_grapheme("\u11a8\u11a8", 0) == 2
+
+
+def test_k_gcb_ep_es_emoji_presentation() -> None:
+    raw = "©\u200d©"
+    assert _next_grapheme(raw, 0) == 3
+
+
+def test_k_dup_sin_rstrip_cortado() -> None:
+    clipped = _dup_name(("a" * 111) + " xyz", 1)
+    assert "  (dup" not in clipped
+    assert clipped == ("a" * 111) + " (dup 1)"
+
+
 async def test_f_sin_chequeo_clash(db_session: AsyncSession) -> None:
     await db_session.execute(
         text(
