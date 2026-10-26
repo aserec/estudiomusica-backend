@@ -1823,6 +1823,71 @@ def test_asyncpg_url_translates_sslmode(tmp_path: Any) -> None:
     )
     assert "sslmode=" not in plain.lower()
     assert plain_args.get("ssl") is False
+    mode_only, mode_args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?sslmode=verify-full"
+    )
+    assert "sslmode=" not in mode_only.lower()
+    assert mode_args.get("ssl") == "verify-full"
+
+
+@pytest.mark.db
+@pytest.mark.timeout(60)
+def test_sslmode_verify_full_without_rootcert_rejects_untrusted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    tls_postgres: tuple[Any, Any, str],
+) -> None:
+    """ALTA: ``?sslmode=verify-full`` sin CA no degrada a prefer (Alembic y engine)."""
+
+    from pathlib import Path
+
+    from alembic import command
+    from sqlalchemy import text
+
+    from app.db import asyncpg_url_and_connect_args
+    from app.migrations.config import make_alembic_config
+    from tests.conftest import _create_async_engine
+
+    _cafile, _bad_ca, dsn = tls_postgres
+    raw = _dsn_with_query(dsn, sslmode="verify-full", sslrootcert=None, ssl=None)
+    assert "sslmode=verify-full" in raw.lower()
+    assert "sslrootcert=" not in raw.lower()
+    url, args = asyncpg_url_and_connect_args(raw)
+    assert "sslmode=" not in url.lower()
+    assert args.get("ssl") == "verify-full"
+
+    home = Path(str(tmp_path)) / "empty-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("PGSSLROOTCERT", raising=False)
+    monkeypatch.delenv("PGSSLMODE", raising=False)
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+    with pytest.raises(Exception) as alembic_exc:
+        command.current(make_alembic_config(raw))
+    alembic_text = str(alembic_exc.value).lower()
+    assert any(
+        token in alembic_text
+        for token in ("ssl", "certificate", "certificat", "verify")
+    ), alembic_exc.value
+
+    engine = _create_async_engine(raw, pool_pre_ping=True)
+
+    async def _connect() -> None:
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text("SELECT 1"))
+        finally:
+            await engine.dispose()
+
+    with pytest.raises(Exception) as engine_exc:
+        asyncio.run(_connect())
+    engine_text = str(engine_exc.value).lower()
+    assert any(
+        token in engine_text
+        for token in ("ssl", "certificate", "certificat", "verify")
+    ), engine_exc.value
 
 
 def test_sslrootcert_and_sslmode_are_case_insensitive(tmp_path: Any) -> None:

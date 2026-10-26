@@ -191,7 +191,7 @@ def asyncpg_url_and_connect_args(raw: str) -> tuple[str, dict[str, Any]]:
         query = {key: value for key, value in query.items() if key not in drop}
         raw = parsed.set(query=query).render_as_string(hide_password=False)
     ssl_value = prepared.get("ssl")
-    if isinstance(ssl_value, (ssl.SSLContext, bool)):
+    if ssl_value is not None:
         connect_args["ssl"] = ssl_value
     return raw, connect_args
 
