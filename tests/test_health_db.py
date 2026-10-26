@@ -2079,6 +2079,23 @@ def test_normalize_rejects_uppercase_and_encoded_conflicts() -> None:
         assert str(caught.value) == _SSL_CONFLICT_MSG
 
 
+def test_normalize_accepts_unencoded_brackets_in_password() -> None:
+    """``[`` / ``]`` en la contraseña siguen siendo un DSN válido."""
+
+    from sqlalchemy.engine.url import make_url
+
+    from app.config.settings import Settings
+    from app.db import normalize_asyncpg_ssl_url
+    from app.migrations.config import make_alembic_config
+
+    url = "postgresql+asyncpg://u:p[ass]@127.0.0.1:5432/db_test?sslmode=require"
+    normalized = normalize_asyncpg_ssl_url(url)
+    assert make_url(normalized).query.get("ssl") == "require"
+    settings = Settings(app_env="development", database_url=url)
+    assert make_url(settings.resolved_database_url()).query.get("ssl") == "require"
+    assert make_alembic_config(url).get_main_option("sqlalchemy.url")
+
+
 @pytest.mark.db
 @pytest.mark.timeout(120)
 def test_conflicting_ssl_query_rejected_on_live_tls(
