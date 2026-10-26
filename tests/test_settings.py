@@ -498,8 +498,7 @@ def test_production_rejects_duplicate_dbname_query(
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv(
         "DATABASE_URL",
-        "postgresql+asyncpg://app:s3cret@db.example:5432/app"
-        "?dbname=ok&dbname=x_test",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?dbname=ok&dbname=x_test",
     )
     get_settings.cache_clear()
     with pytest.raises(ValidationError, match="database/dbname"):

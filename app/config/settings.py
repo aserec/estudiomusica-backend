@@ -330,8 +330,7 @@ def _redact_error_input(value: object, *, dsn_field: bool = False) -> object:
     if dsn_field:
         if isinstance(value, dict):
             return {
-                key: _redact_named_error_input(key, item)
-                for key, item in value.items()
+                key: _redact_named_error_input(key, item) for key, item in value.items()
             }
         return "<dsn-redactado>"
     if isinstance(value, SecretStr):
