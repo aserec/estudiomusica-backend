@@ -28,6 +28,7 @@ from app.schemas.categories import (
 )
 from app.services.categories import (
     _CATEGORY_TREE_LOCK_KEY,
+    _citext_fold,
     _dup_name,
     _integrity_name,
     _name_taken,
@@ -1668,6 +1669,15 @@ async def test_f_ignora_parent(db_session: AsyncSession) -> None:
         ).all()
     ]
     assert names == ["Padre", "Piano", "Piano"]
+
+
+async def test_citext_fold_more_than_32767_values(db_session: AsyncSession) -> None:
+    values = [f"n{index}" for index in range(33000)]
+    folded = await _citext_fold(db_session, values)
+    assert len(folded) == 33000
+    assert folded[0] == "n0"
+    assert folded[32999] == "n32999"
+    assert folded == [value.lower() for value in values]
 
 
 async def test_fix_takes_advisory_lock(db_session: AsyncSession) -> None:

@@ -305,10 +305,12 @@ async def _citext_fold(session: AsyncSession, values: Sequence[str]) -> list[str
 
     if not values:
         return []
-    placeholders = ", ".join(f"(:v{index})" for index in range(len(values)))
     result = await session.execute(
-        text(f"SELECT lower(v::citext) FROM (VALUES {placeholders}) AS t(v)"),
-        {f"v{index}": value for index, value in enumerate(values)},
+        text(
+            "SELECT lower(u::citext) FROM unnest(CAST(:vals AS text[])) "
+            "WITH ORDINALITY AS t(u, ord) ORDER BY ord"
+        ),
+        {"vals": list(values)},
     )
     return [row[0] for row in result]
 
@@ -337,6 +339,7 @@ async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
     groups: dict[tuple[UUID | None, str], list[Category]] = {}
     for row, key in zip(live, folded, strict=True):
         groups.setdefault((row.parent_id, key), []).append(row)
+    row_fold = {row.id: key for row, key in zip(live, folded, strict=True)}
     taken: dict[tuple[UUID | None, str], Category] = {}
     for (parent_id, key), members in groups.items():
         members.sort(key=lambda item: (item.sort_order, item.id))
@@ -344,23 +347,33 @@ async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
     for members in groups.values():
         if len(members) < 2:
             continue
+        planned: list[str] = []
+        for number, row in enumerate(members[1:], start=1):
+            planned.extend(
+                _dup_name(row.name, suffix) for suffix in range(number, number + 8)
+            )
+        folded_plan = await _citext_fold(
+            session, [category_name_key(name) for name in planned]
+        )
+        fold_of = dict(zip(planned, folded_plan, strict=True))
         for number, row in enumerate(members[1:], start=1):
             suffix = number
             while True:
                 candidate = _dup_name(row.name, suffix)
-                new_key = (await _citext_fold(session, [category_name_key(candidate)]))[
-                    0
-                ]
+                if candidate not in fold_of:
+                    fold_of[candidate] = (
+                        await _citext_fold(session, [category_name_key(candidate)])
+                    )[0]
+                new_key = fold_of[candidate]
                 clash = taken.get((row.parent_id, new_key))
                 if clash is None or clash.id == row.id:
-                    old_key = (
-                        await _citext_fold(session, [category_name_key(row.name)])
-                    )[0]
+                    old_key = row_fold[row.id]
                     slot = (row.parent_id, old_key)
                     if taken.get(slot) is row:
                         del taken[slot]
                     row.name = candidate
                     taken[(row.parent_id, new_key)] = row
+                    row_fold[row.id] = new_key
                     break
                 suffix += 1
     changing: list[tuple[Category, str]] = []
