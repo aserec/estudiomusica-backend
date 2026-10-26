@@ -48,6 +48,7 @@ class FreezeAfterLoginProxy:
         self.target_port = int(target_port)
         self.freeze_on: FreezeOn = freeze_on
         self.port = 0
+        self.accepted_connections = 0
         self._server: asyncio.AbstractServer | None = None
         self._writers: list[asyncio.StreamWriter] = []
 
@@ -102,6 +103,7 @@ class FreezeAfterLoginProxy:
         client_reader: asyncio.StreamReader,
         client_writer: asyncio.StreamWriter,
     ) -> None:
+        self.accepted_connections += 1
         if self.freeze_on == "connect":
             self._writers.append(client_writer)
             try:

@@ -366,8 +366,8 @@ async def _run_frozen_health(
     freeze_on: str,
     health_timeout: float = 0.6,
     command_timeout: float = 8.0,
-) -> tuple[float, DatabaseHealthResponse, int, int]:
-    """Devuelve (elapsed, result, terminate_calls, main_checkedout)."""
+) -> tuple[float, DatabaseHealthResponse, int, int, int]:
+    """Devuelve (elapsed, result, terminate_calls, main_checkedout, accepted)."""
 
     from sqlalchemy.engine.url import make_url
 
@@ -415,7 +415,13 @@ async def _run_frozen_health(
         assert elapsed < budget, (
             f"elapsed={elapsed:.3f}s budget={budget:.3f}s freeze_on={freeze_on}"
         )
-        return elapsed, result, terminates["n"], int(checkedout)
+        return (
+            elapsed,
+            result,
+            terminates["n"],
+            int(checkedout),
+            proxy.accepted_connections,
+        )
     finally:
         await dispose_engine()
         get_settings.cache_clear()
@@ -434,7 +440,7 @@ async def test_health_db_frozen_select_1_returns_503_quickly(
 
     from tests.conftest import _build_client
 
-    elapsed, result, terminates, checkedout = await _run_frozen_health(
+    elapsed, result, terminates, checkedout, _accepted = await _run_frozen_health(
         monkeypatch, require_postgres, freeze_on="select_1"
     )
     assert result.db == "down"
@@ -497,12 +503,14 @@ async def test_health_db_frozen_connect_returns_503_quickly(
     assert warm.db == "ok"
     await dispose_engine()
     get_settings.cache_clear()
-    elapsed, result, _terminates, checkedout = await _run_frozen_health(
+    elapsed, result, _terminates, checkedout, accepted = await _run_frozen_health(
         monkeypatch, require_postgres, freeze_on="connect"
     )
+    timeout = 0.6
     assert result.db == "down"
     assert checkedout == 0
-    assert elapsed < 1.4
+    assert accepted >= 1
+    assert 0.9 * timeout <= elapsed < timeout + 0.25
 
 
 @pytest.mark.db
@@ -512,7 +520,7 @@ async def test_health_db_frozen_rollback_returns_503_quickly(
     require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
-    elapsed, result, terminates, checkedout = await _run_frozen_health(
+    elapsed, result, terminates, checkedout, _accepted = await _run_frozen_health(
         monkeypatch, require_postgres, freeze_on="rollback"
     )
     assert result.db == "down"
@@ -958,7 +966,7 @@ async def test_health_plain_proxy_forces_ssl_disable(
     assert query.get("ssl") == "disable"
     assert "sslmode" not in query
 
-    elapsed, result, terminates, checkedout = await _run_frozen_health(
+    elapsed, result, terminates, checkedout, _accepted = await _run_frozen_health(
         monkeypatch, tls_dsn, freeze_on="select_1"
     )
     assert result.db == "down"
