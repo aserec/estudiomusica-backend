@@ -1,6 +1,7 @@
 """L1/L2: las limpiezas de leftovers de conftest son comportamentales."""
 
 import asyncio
+import errno
 import os
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from sqlalchemy.engine.url import make_url
 
 from app.db import RedactedDsn
 from tests.conftest import (
+    _LEFTOVER_TEST_TABLES,
     PRODUCTION_TEST_USER,
     ROOT,
     _admin_engine,
@@ -19,6 +21,7 @@ from tests.conftest import (
     _drop_leftover_test_databases,
     _drop_leftover_test_tables,
     _drop_named_production_test_role,
+    _drop_production_test_role,
     _orphan_production_test_role,
     _pg_ident,
     _pg_literal,
@@ -578,6 +581,51 @@ def test_orphan_production_test_role_ignores_live_and_foreign_names() -> None:
     assert _orphan_production_test_role("em_prod_tests_\u0661") is False
     assert _orphan_production_test_role("em_prod_tests_99999999999999999999") is False
     assert _orphan_production_test_role(f"em_prod_tests_{_unused_pid()}") is True
+
+
+def test_orphan_role_eperm_is_not_orphan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """O2: PermissionError/EPERM (p. ej. pid 1) no es huérfano."""
+
+    def boom(_pid: int, _sig: int) -> None:
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "kill", boom)
+    assert _orphan_production_test_role("em_prod_tests_1") is False
+
+
+@pytest.mark.db
+def test_drop_removes_own_role_without_pid_suffix(
+    require_postgres: RedactedDsn,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1: el rol propio se borra aunque no lleve sufijo de pid."""
+
+    monkeypatch.setattr("tests.conftest.PRODUCTION_TEST_USER", "em_prod_tests")
+    role = _pg_ident("em_prod_tests")
+
+    async def plant() -> None:
+        engine = _admin_engine(require_postgres)
+        try:
+            async with engine.connect() as connection:
+                exists = await connection.scalar(
+                    text("SELECT 1 FROM pg_roles WHERE rolname = 'em_prod_tests'")
+                )
+                if exists is None:
+                    await connection.execute(
+                        text(
+                            f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                            f"PASSWORD {_pg_literal('p1-role-secret')}"
+                        )
+                    )
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(plant())
+        asyncio.run(_drop_production_test_role(require_postgres))
+        assert asyncio.run(_role_exists(require_postgres, "em_prod_tests")) is None
+    finally:
+        _cleanup_named_roles(require_postgres, ["em_prod_tests"])
 
 
 def test_orphan_production_test_role_captures_overflow(

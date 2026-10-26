@@ -174,9 +174,8 @@ class Settings(BaseSettings):
             else:
                 found.append(str(value))
         if len(found) > 1:
-            raise ValueError(
-                "DATABASE_URL no puede repetir database/dbname en la query"
-            )
+            shown = "/".join(keys)
+            raise ValueError(f"DATABASE_URL no puede repetir {shown} en la query")
         return found[0] if found else None
 
     @model_validator(mode="after")
@@ -206,8 +205,8 @@ class Settings(BaseSettings):
             parsed = make_url(self.resolved_database_url())
         except Exception:
             raise ValueError("DATABASE_URL no es un DSN válido") from None
-        query_password = self._query_value(parsed, "password")
-        query_user = self._query_value(parsed, "user")
+        query_password = self._unique_query_value(parsed, "password")
+        query_user = self._unique_query_value(parsed, "user")
         query_database = self._unique_query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
         password = query_password if query_password is not None else parsed.password
         username = query_user if query_user is not None else parsed.username

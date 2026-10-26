@@ -1642,6 +1642,10 @@ def _reuse_tls_test_env() -> tuple[str, str] | None:
 
     env_url = os.environ.get("TLS_TEST_DATABASE_URL")
     env_ca = os.environ.get("TLS_TEST_CAFILE")
+    if env_url and not env_ca:
+        _skip_or_fail_tls("TLS_TEST_DATABASE_URL está definido sin TLS_TEST_CAFILE")
+    if env_ca and not env_url:
+        _skip_or_fail_tls("TLS_TEST_CAFILE está definido sin TLS_TEST_DATABASE_URL")
     if not env_url or not env_ca:
         return None
     if Path(env_ca).is_file():

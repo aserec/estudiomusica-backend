@@ -235,6 +235,31 @@ def test_tls_cafile_missing_skips_when_optional(
         _reuse_tls_test_env()
 
 
+def test_tls_url_without_cafile_fails_when_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_health_db import _reuse_tls_test_env
+
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
+    monkeypatch.setenv("TLS_TEST_DATABASE_URL", "postgresql+asyncpg://u:p@h/db_test")
+    monkeypatch.delenv("TLS_TEST_CAFILE", raising=False)
+    with pytest.raises(BaseException, match="sin TLS_TEST_CAFILE") as caught:
+        _reuse_tls_test_env()
+    assert type(caught.value) is pytest.fail.Exception
+
+
+def test_tls_url_without_cafile_skips_when_optional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_health_db import _reuse_tls_test_env
+
+    monkeypatch.delenv("REQUIRE_TLS_TESTS", raising=False)
+    monkeypatch.setenv("TLS_TEST_DATABASE_URL", "postgresql+asyncpg://u:p@h/db_test")
+    monkeypatch.delenv("TLS_TEST_CAFILE", raising=False)
+    with pytest.raises(pytest.skip.Exception, match="sin TLS_TEST_CAFILE"):
+        _reuse_tls_test_env()
+
+
 def test_tls_cafile_reuses_existing_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

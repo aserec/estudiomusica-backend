@@ -493,6 +493,38 @@ def test_production_rejects_duplicate_database_query(
     get_settings.cache_clear()
 
 
+def test_production_rejects_duplicate_user_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?user=x&user=estudiomusica",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="user") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_production_rejects_duplicate_password_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?password=one&password=two",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="password") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    assert "one" not in str(caught.value)
+    assert "two" not in str(caught.value)
+    get_settings.cache_clear()
+
+
 def test_production_rejects_duplicate_dbname_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
