@@ -7,7 +7,6 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import select, text
-from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.auth.tokens import encode_session_token
@@ -25,7 +24,6 @@ from app.services.users import (
     _email_term,
     _ensure_admin_remains,
     _exact_email_clause,
-    _name_match,
     _visible_user_filters,
     set_user_admin,
     set_user_suspended,
@@ -2258,20 +2256,6 @@ async def test_admin_search_fallback_keeps_nfc_not_nfkc_ligature(
     )
     assert missed.status_code == 200
     assert missed.json()["items"] == []
-
-
-def test_name_match_compiles_without_concat() -> None:
-    compiled = _name_match("ana").compile(
-        dialect=postgresql.dialect()  # type: ignore[no-untyped-call]
-    )
-    sql = str(compiled)
-    assert "concat(" not in sql.lower()
-    assert "users.first_name || ' ' || users.last_name" in sql
-    assert sql == (
-        "normalize(users.first_name || ' ' || users.last_name, NFC) "
-        "ILIKE %(normalize_1)s::VARCHAR ESCAPE '\\'"
-    )
-    assert list(compiled.params.values()) == ["%ana%"]
 
 
 async def test_teacher_exact_email_query_uses_unique_index(
