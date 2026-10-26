@@ -130,12 +130,16 @@ Errores (snake_case, convención #91):
 - alumno, profesor o profesor adjunto en `/admin/users` → `403 {"error":"forbidden"}`
 - usuario suspendido con sesión → `403 {"error":"account_suspended"}`
 - email ya usado → `409 {"error":"email_taken"}`
-- quitarse el admin o borrarse a uno mismo → `409 {"error":"cannot_modify_self"}`
-- la operación dejaría el sitio sin un admin vigente → `409 {"error":"last_admin"}` (incluye la carrera del último admin; se bloquea con `SELECT ... FOR UPDATE` ordenado por id)
+- quitarse el admin, suspenderse o borrarse a uno mismo → `409 {"error":"cannot_modify_self"}` (aunque haya otros admins)
+- la operación dejaría el sitio sin un admin vigente → `409 {"error":"last_admin"}` (incluye la carrera del último admin; `SELECT ... FOR UPDATE` de actor, destino y admins vigentes, ordenado por id; un admin suspendido o borrado no cuenta)
+- `isAdmin`/`suspended` no aceptan `"yes"` (booleanos estrictos; validación 400)
+- si el rol `alumno` está desactivado, quitar el admin → `409 {"error":"role_not_assignable"}` (limitación: `assign_system_role` no puede degradar)
 
-`GET /admin/users` pagina con `page`/`pageSize` (no `limit`/`cursor`: el ticket #395 los pedía; se mantiene el helper de #91, pendiente de decisión de Danel). Sin `status` lista vigentes, **incluidos suspendidos**; `status=all` añade borrados. `query` filtra por nombre o email.
+`GET /admin/users` pagina con `page`/`pageSize` (no `limit`/`cursor`: el ticket #395 los pedía; se mantiene el helper de #91, pendiente de decisión de Danel). Sin `status` lista vigentes, **incluidos suspendidos**; `status=all` añade borrados. `query` (máximo 200) filtra por nombre o email; los comodines LIKE se escapan.
 
-`PUT` de identidad (no PATCH): la convención #91 usa PUT para actualizar. `isAdmin: true` asigna el rol `admin`; `false` vuelve a `alumno` vía `assign_system_role`. `GET /users/search` lo puede usar un admin o un profesor con membresía `teacher` en algún curso; no devuelve suspendidos ni borrados. `q` vacío no vuelca el directorio.
+`PUT` de identidad (no PATCH): la convención #91 usa PUT para actualizar. `isAdmin: true` asigna el rol `admin`; `false` vuelve a `alumno` vía `assign_system_role`. DELETE revoca todas las `auth_sessions` del usuario; suspender no las revoca (al reactivar, el token viejo vuelve a valer; lo decide Danel). El email de un usuario borrado queda bloqueado (pendiente de decisión; no se reutiliza).
+
+`GET /users/search` (`q` documentado en OpenAPI, máximo 200): admin (`site:manage-admins`) busca por nombre y email. Un no-admin con `site:manage-courses` o membresía `teacher` vigente (no borrada) necesita al menos 3 caracteres distintos de `%`/`_`, recibe como máximo 10 resultados, solo coincide por nombre y la respuesta no incluye el email salvo que `q` sea el email completo (sin distinguir mayúsculas). `q` vacío no vuelca el directorio. Cuando existan #401/#403 se podrá limitar a matricular en un curso concreto.
 
 ## Postgres, migraciones y tests con BD
 

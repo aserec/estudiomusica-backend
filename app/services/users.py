@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -16,7 +16,7 @@ from app.exceptions import (
     NotFound,
     Validation,
 )
-from app.models import CourseMembership, User
+from app.models import AuthSession, CourseMembership, User
 from app.models.user import SystemRole
 from app.permissions.matrix import has_site_permission
 from app.permissions.types import CourseRole, Permission
@@ -31,6 +31,9 @@ from app.services.auth import to_public_user
 from app.services.roles import assign_system_role
 
 _SEARCH_Q_MAX = 200
+_TEACHER_Q_MIN_EFFECTIVE = 3
+_TEACHER_SEARCH_CAP = 10
+_LIKE_WILDCARDS = frozenset("%_")
 
 
 def to_admin_user_view(user: User) -> AdminUserView:
@@ -49,11 +52,11 @@ def to_admin_user_view(user: User) -> AdminUserView:
     )
 
 
-def to_search_hit(user: User) -> UserSearchHit:
+def to_search_hit(user: User, *, include_email: bool) -> UserSearchHit:
     return UserSearchHit(
         id=user.id,
         name=user.display_name,
-        email=user.email,
+        email=user.email if include_email else None,
         first_name=user.first_name,
         last_name=user.last_name,
     )
@@ -63,14 +66,25 @@ def _escape_like(raw: str) -> str:
     return raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _text_match(term: str) -> ColumnElement[bool]:
+def _effective_search_len(term: str) -> int:
+    return sum(1 for char in term if char not in _LIKE_WILDCARDS)
+
+
+def _name_match(term: str) -> ColumnElement[bool]:
     pattern = f"%{_escape_like(term)}%"
     display_name = func.concat(User.first_name, " ", User.last_name)
     return or_(
-        User.email.ilike(pattern, escape="\\"),
         User.first_name.ilike(pattern, escape="\\"),
         User.last_name.ilike(pattern, escape="\\"),
         display_name.ilike(pattern, escape="\\"),
+    )
+
+
+def _text_match(term: str) -> ColumnElement[bool]:
+    pattern = f"%{_escape_like(term)}%"
+    return or_(
+        User.email.ilike(pattern, escape="\\"),
+        _name_match(term),
     )
 
 
@@ -102,6 +116,12 @@ def _is_active_admin(user: User) -> bool:
     )
 
 
+def _actor_is_site_admin(user: User) -> bool:
+    return _is_active_admin(user) and has_site_permission(
+        user.system_role, Permission.SITE_MANAGE_ADMINS
+    )
+
+
 def _ensure_admin_remains(locked: list[User], *, actor: User, target: User) -> None:
     others = [
         user for user in locked if user.id != target.id and _is_active_admin(user)
@@ -113,33 +133,72 @@ def _ensure_admin_remains(locked: list[User], *, actor: User, target: User) -> N
     raise LastAdmin()
 
 
-async def _lock_target(session: AsyncSession, user_id: UUID) -> User:
-    user = await session.scalar(
-        select(User).where(User.id == user_id).with_for_update()
-    )
-    if user is None or user.deleted_at is not None:
-        raise NotFound()
-    return user
+def _require_active_admin_actor(actor: User) -> None:
+    if not _actor_is_site_admin(actor):
+        raise AccessDenied()
 
 
-async def _lock_target_and_active_admins(
-    session: AsyncSession, user_id: UUID
-) -> tuple[User, list[User]]:
-    """Un solo SELECT ... FOR UPDATE ordenado por id (sin deadlock)."""
-
+async def _lock_actor_and_target(
+    session: AsyncSession, *, actor_id: UUID, target_id: UUID
+) -> tuple[User, User]:
     rows = list(
         await session.scalars(
             select(User)
-            .where(or_(User.id == user_id, _active_admin_clause()))
+            .where(or_(User.id == actor_id, User.id == target_id))
             .order_by(User.id)
             .with_for_update()
         )
     )
-    target = next((user for user in rows if user.id == user_id), None)
+    by_id = {user.id: user for user in rows}
+    actor = by_id.get(actor_id)
+    target = by_id.get(target_id)
+    if actor is None:
+        raise AccessDenied()
+    if target is None or target.deleted_at is not None:
+        raise NotFound()
+    return actor, target
+
+
+async def _lock_actor_target_and_active_admins(
+    session: AsyncSession, *, actor_id: UUID, target_id: UUID
+) -> tuple[User, User, list[User]]:
+    """SELECT … FOR UPDATE de actor, destino y admins vigentes, ordenado por id."""
+
+    rows = list(
+        await session.scalars(
+            select(User)
+            .where(
+                or_(
+                    User.id == actor_id,
+                    User.id == target_id,
+                    _active_admin_clause(),
+                )
+            )
+            .order_by(User.id)
+            .with_for_update()
+        )
+    )
+    by_id = {user.id: user for user in rows}
+    actor = by_id.get(actor_id)
+    target = by_id.get(target_id)
+    if actor is None:
+        raise AccessDenied()
     if target is None or target.deleted_at is not None:
         raise NotFound()
     admins = [user for user in rows if _is_active_admin(user)]
-    return target, admins
+    return actor, target, admins
+
+
+async def _revoke_user_sessions(session: AsyncSession, user_id: UUID) -> None:
+    await session.execute(
+        update(AuthSession)
+        .where(
+            AuthSession.user_id == user_id,
+            AuthSession.revoked_at.is_(None),
+            AuthSession.deleted_at.is_(None),
+        )
+        .values(revoked_at=datetime.now(UTC))
+    )
 
 
 async def list_admin_users(
@@ -151,6 +210,8 @@ async def list_admin_users(
 ) -> Paginated[AdminUserView]:
     filters = list(_status_filters(status))
     term = query.strip() if query else ""
+    if len(term) > _SEARCH_Q_MAX:
+        raise Validation(fields=["query"])
     if term:
         filters.append(_text_match(term))
 
@@ -184,7 +245,10 @@ async def update_user_identity(
 ) -> User:
     if not has_site_permission(actor.system_role, Permission.SITE_MANAGE_ADMINS):
         raise AccessDenied()
-    target = await _lock_target(session, user_id)
+    actor_row, target = await _lock_actor_and_target(
+        session, actor_id=actor.id, target_id=user_id
+    )
+    _require_active_admin_actor(actor_row)
     if body.first_name is not None:
         target.first_name = body.first_name
     if body.last_name is not None:
@@ -214,25 +278,30 @@ async def set_user_admin(
 ) -> User:
     if not has_site_permission(actor.system_role, Permission.SITE_MANAGE_ADMINS):
         raise AccessDenied()
-    if not is_admin and actor.id == user_id:
-        await _lock_target(session, user_id)
-        raise CannotModifySelf()
     if is_admin:
-        target = await _lock_target(session, user_id)
+        actor_row, target = await _lock_actor_and_target(
+            session, actor_id=actor.id, target_id=user_id
+        )
+        _require_active_admin_actor(actor_row)
         if target.is_admin and target.system_role_id == SystemRole.ADMIN:
             return target
         return await assign_system_role(
-            session, actor=actor, target=target, role_id=SystemRole.ADMIN
+            session, actor=actor_row, target=target, role_id=SystemRole.ADMIN
         )
 
-    target, locked = await _lock_target_and_active_admins(session, user_id)
+    actor_row, target, locked = await _lock_actor_target_and_active_admins(
+        session, actor_id=actor.id, target_id=user_id
+    )
+    if actor_row.id == target.id:
+        raise CannotModifySelf()
     already_admin = target.is_admin or target.system_role_id == SystemRole.ADMIN
+    if already_admin and _is_active_admin(target):
+        _ensure_admin_remains(locked, actor=actor_row, target=target)
+    _require_active_admin_actor(actor_row)
     if not already_admin:
         return target
-    if _is_active_admin(target):
-        _ensure_admin_remains(locked, actor=actor, target=target)
     return await assign_system_role(
-        session, actor=actor, target=target, role_id=SystemRole.ALUMNO
+        session, actor=actor_row, target=target, role_id=SystemRole.ALUMNO
     )
 
 
@@ -245,17 +314,25 @@ async def set_user_suspended(
 ) -> User:
     if not has_site_permission(actor.system_role, Permission.SITE_MANAGE_ADMINS):
         raise AccessDenied()
-    if suspended:
-        target, locked = await _lock_target_and_active_admins(session, user_id)
-        if target.suspended_at is None and _is_active_admin(target):
-            _ensure_admin_remains(locked, actor=actor, target=target)
-        if target.suspended_at is None:
-            target.suspended_at = datetime.now(UTC)
+    if not suspended:
+        actor_row, target = await _lock_actor_and_target(
+            session, actor_id=actor.id, target_id=user_id
+        )
+        _require_active_admin_actor(actor_row)
+        target.suspended_at = None
         await session.flush()
         return target
 
-    target = await _lock_target(session, user_id)
-    target.suspended_at = None
+    actor_row, target, locked = await _lock_actor_target_and_active_admins(
+        session, actor_id=actor.id, target_id=user_id
+    )
+    if actor_row.id == target.id:
+        raise CannotModifySelf()
+    if target.suspended_at is None and _is_active_admin(target):
+        _ensure_admin_remains(locked, actor=actor_row, target=target)
+    _require_active_admin_actor(actor_row)
+    if target.suspended_at is None:
+        target.suspended_at = datetime.now(UTC)
     await session.flush()
     return target
 
@@ -265,13 +342,16 @@ async def soft_delete_user(
 ) -> None:
     if not has_site_permission(actor.system_role, Permission.SITE_MANAGE_ADMINS):
         raise AccessDenied()
-    if actor.id == user_id:
-        await _lock_target(session, user_id)
+    actor_row, target, locked = await _lock_actor_target_and_active_admins(
+        session, actor_id=actor.id, target_id=user_id
+    )
+    if actor_row.id == target.id:
         raise CannotModifySelf()
-    target, locked = await _lock_target_and_active_admins(session, user_id)
     if _is_active_admin(target):
-        _ensure_admin_remains(locked, actor=actor, target=target)
+        _ensure_admin_remains(locked, actor=actor_row, target=target)
+    _require_active_admin_actor(actor_row)
     target.deleted_at = datetime.now(UTC)
+    await _revoke_user_sessions(session, target.id)
     await session.flush()
 
 
@@ -292,6 +372,10 @@ async def actor_can_search_users(session: AsyncSession, actor: User) -> bool:
     return teach is not None
 
 
+def _actor_has_full_search(actor: User) -> bool:
+    return has_site_permission(actor.system_role, Permission.SITE_MANAGE_ADMINS)
+
+
 async def search_users(
     session: AsyncSession,
     *,
@@ -304,6 +388,7 @@ async def search_users(
     term = q.strip()
     if len(term) > _SEARCH_Q_MAX:
         raise Validation(fields=["q"])
+    full_search = _actor_has_full_search(actor)
     if not term:
         return Paginated(
             items=[],
@@ -311,26 +396,58 @@ async def search_users(
             page_size=pagination.page_size,
             total=0,
         )
+    if not full_search and _effective_search_len(term) < _TEACHER_Q_MIN_EFFECTIVE:
+        raise Validation(fields=["q"])
 
     filters: list[ColumnElement[bool]] = [
         User.deleted_at.is_(None),
         User.suspended_at.is_(None),
-        _text_match(term),
     ]
+    if full_search:
+        filters.append(_text_match(term))
+    else:
+        filters.append(
+            or_(_name_match(term), func.lower(User.email) == term.casefold())
+        )
+
     total = int(
         await session.scalar(select(func.count()).select_from(User).where(*filters))
         or 0
     )
-    offset = (pagination.page - 1) * pagination.page_size
-    rows = await session.scalars(
-        select(User)
-        .where(*filters)
-        .order_by(User.created_at.desc(), User.id.desc())
-        .offset(offset)
-        .limit(pagination.page_size)
+    limit = pagination.page_size
+    if not full_search:
+        total = min(total, _TEACHER_SEARCH_CAP)
+        offset = (pagination.page - 1) * pagination.page_size
+        if offset >= _TEACHER_SEARCH_CAP:
+            return Paginated(
+                items=[],
+                page=pagination.page,
+                page_size=pagination.page_size,
+                total=total,
+            )
+        limit = min(pagination.page_size, _TEACHER_SEARCH_CAP - offset)
+    else:
+        offset = (pagination.page - 1) * pagination.page_size
+
+    rows = list(
+        await session.scalars(
+            select(User)
+            .where(*filters)
+            .order_by(User.created_at.desc(), User.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
     )
+    exact_email = term.casefold()
+    items = [
+        to_search_hit(
+            user,
+            include_email=full_search or user.email.casefold() == exact_email,
+        )
+        for user in rows
+    ]
     return Paginated(
-        items=[to_search_hit(user) for user in rows],
+        items=items,
         page=pagination.page,
         page_size=pagination.page_size,
         total=total,

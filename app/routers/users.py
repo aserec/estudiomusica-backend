@@ -23,13 +23,19 @@ ERROR_RESPONSES = {
 @router.get(
     "/search",
     response_model=Paginated[UserSearchHit],
+    response_model_exclude_none=True,
     summary="Buscar usuarios para matricular",
     description=(
         "Admin (``site:manage-admins`` o ``site:manage-courses``) o "
-        "profesor de un curso (membresía ``teacher``). No devuelve "
-        "suspendidos, borrados ni el hash de contraseña. ``q`` vacío "
-        "responde lista vacía (no vuelca el directorio). Paginación "
-        "``page``/``pageSize``."
+        "profesor con membresía ``teacher`` vigente (no borrada). No "
+        "devuelve suspendidos, borrados ni el hash de contraseña. "
+        "``q`` (máximo 200): vacío no lista a nadie. Un admin busca por "
+        "nombre y email. Quien no es admin necesita al menos 3 caracteres "
+        "que no sean ``%``/``_``, recibe como máximo 10 resultados, solo "
+        "coincide por nombre y la respuesta omite el email salvo que ``q`` "
+        "sea el email completo (sin distinguir mayúsculas). Cuando existan "
+        "#401/#403 se podrá limitar a matricular en un curso concreto. "
+        "Paginación ``page``/``pageSize``."
     ),
     responses={
         400: ERROR_RESPONSES[400],
@@ -43,7 +49,18 @@ async def get_users_search(
     pagination: Annotated[PaginationQuery, Depends(pagination_query)],
     q: Annotated[
         str,
-        Query(description="Nombre o email. Vacío no lista a nadie.", examples=["ada"]),
+        Query(
+            max_length=200,
+            description=(
+                "Nombre o email. Vacío no lista a nadie. Máximo 200. "
+                "Admin: coincidencia parcial por nombre y email. "
+                "No admin: mínimo 3 caracteres distintos de % y _, "
+                "máximo 10 resultados, parcial solo por nombre; el email "
+                "solo se incluye si q es el email completo "
+                "(sin distinguir mayúsculas)."
+            ),
+            examples=["ada"],
+        ),
     ] = "",
 ) -> Paginated[UserSearchHit]:
     return await search_users(session, actor=actor, q=q, pagination=pagination)

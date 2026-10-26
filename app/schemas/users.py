@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import EmailStr, Field, field_validator, model_validator
+from pydantic import EmailStr, Field, StrictBool, field_validator, model_validator
 
 from app.schemas.auth import PublicUser, normalize_email
 from app.schemas.base import APIModel
@@ -62,11 +62,11 @@ class AdminUserIdentityUpdate(APIModel):
 
 
 class AdminFlagUpdate(APIModel):
-    is_admin: bool
+    is_admin: StrictBool
 
 
 class SuspensionUpdate(APIModel):
-    suspended: bool
+    suspended: StrictBool
 
 
 class UserSearchHit(APIModel):
@@ -74,6 +74,6 @@ class UserSearchHit(APIModel):
 
     id: uuid.UUID
     name: str
-    email: EmailStr
+    email: EmailStr | None = None
     first_name: str
     last_name: str

@@ -48,6 +48,7 @@ _ADMIN = require_site_permission(Permission.SITE_MANAGE_ADMINS)
         "(incluidos suspendidos) con ``page``/``pageSize``. "
         "``query`` filtra por nombre o email. ``status``: all, active, "
         "suspended, deleted. Sin status se omiten los borrados. "
+        "``query`` admite como máximo 200 caracteres. "
         "No se usa limit/cursor (pendiente de decisión)."
     ),
     responses={
@@ -62,7 +63,11 @@ async def get_admin_users(
     pagination: Annotated[PaginationQuery, Depends(pagination_query)],
     query: Annotated[
         str | None,
-        Query(description="Texto libre sobre nombre o email.", examples=["ada"]),
+        Query(
+            max_length=200,
+            description="Texto libre sobre nombre o email. Máximo 200 caracteres.",
+            examples=["ada"],
+        ),
     ] = None,
     status_filter: Annotated[
         AdminUserStatus | None,
@@ -113,8 +118,11 @@ async def put_admin_user_identity(
     description=(
         "Requiere ``site:manage-admins``. ``isAdmin: true`` asigna el rol "
         "``admin``; ``false`` vuelve a ``alumno`` (vía ``assign_system_role``). "
-        "Quitarse el admin a uno mismo → ``cannot_modify_self``. "
-        "No puede quedar el sitio sin un admin vigente."
+        "Quitarse el admin a uno mismo → ``cannot_modify_self`` "
+        "(aunque haya otros admins). Un admin suspendido no cuenta como "
+        "vigente. No puede quedar el sitio sin un admin vigente "
+        "(``last_admin``). Si el rol ``alumno`` está desactivado, quitar "
+        "el admin responde ``role_not_assignable``."
     ),
     responses={
         400: ERROR_RESPONSES[400],
@@ -141,9 +149,11 @@ async def put_admin_user_flag(
     response_model=AdminUserView,
     summary="Suspender o rehabilitar un usuario",
     description=(
-        "Requiere ``site:manage-admins``. Un usuario suspendido con sesión "
-        "recibe ``account_suspended`` en las rutas protegidas. Suspender al "
-        "último admin vigente → ``last_admin``."
+        "Requiere ``site:manage-admins``. Suspenderse a uno mismo → "
+        "``cannot_modify_self``. Un usuario suspendido con sesión recibe "
+        "``account_suspended``. No se revocan ``auth_sessions`` (al "
+        "reactivar, el token viejo vuelve a valer; pendiente de Danel). "
+        "Suspender al último admin vigente → ``last_admin``."
     ),
     responses={
         400: ERROR_RESPONSES[400],
@@ -170,9 +180,10 @@ async def put_admin_user_suspension(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Borrar lógicamente un usuario",
     description=(
-        "Requiere ``site:manage-admins``. Escribe ``deleted_at``. "
-        "Borrarse a uno mismo → ``cannot_modify_self``. "
-        "Borrar al último admin vigente → ``last_admin``."
+        "Requiere ``site:manage-admins``. Escribe ``deleted_at`` y revoca "
+        "todas las ``auth_sessions`` vigentes. Borrarse a uno mismo → "
+        "``cannot_modify_self``. Borrar al último admin vigente → "
+        "``last_admin``. El email del borrado queda bloqueado."
     ),
     responses={
         401: ERROR_RESPONSES[401],
