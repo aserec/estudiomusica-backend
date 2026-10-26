@@ -145,6 +145,14 @@ uv run pytest
 
 `uv run pytest` sin Postgres en marcha **salta** los tests de BD solo si el error es de conexión (refused, host desconocido, timeout). Un fallo de autenticación o una migración rota **falla**. En CI: `REQUIRE_POSTGRES=1 uv run pytest` (también `true`/`yes`/`on`, como Pydantic) convierte el skip en fallo; un valor desconocido aborta. Los mensajes y `--showlocals` no incluyen la contraseña. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
 
+Los tests de `?sslrootcert=` (`tls_postgres`) levantan un Postgres TLS efímero con Docker. Si `docker` no está en el `PATH`, se saltan, salvo `REQUIRE_TLS_TESTS=1` (entonces fallan). Para reutilizar un servidor TLS ya levantado:
+
+```bash
+export TLS_TEST_DATABASE_URL=postgresql+asyncpg://tlsprobe:tlsprobe-secret@127.0.0.1:55433/tlsprobe_test
+export TLS_TEST_CAFILE=/ruta/al/ca.pem
+uv run pytest
+```
+
 ## Tests, lint y types
 
 Desde la raíz del repositorio:

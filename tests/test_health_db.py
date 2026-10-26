@@ -1563,8 +1563,13 @@ def tls_postgres(
     tmp_path_factory: pytest.TempPathFactory,
     require_postgres: RedactedDsn,
 ) -> Iterator[tuple[Any, Any, str]]:
-    """Postgres TLS efímero para ``?sslrootcert=``. Se destruye al terminar."""
+    """Postgres TLS efímero para ``?sslrootcert=``. Se destruye al terminar.
 
+    Si hay ``TLS_TEST_DATABASE_URL`` y ``TLS_TEST_CAFILE``, se reutilizan.
+    Sin Docker y sin esas variables, se salta (salvo ``REQUIRE_TLS_TESTS=1``).
+    """
+
+    import shutil
     from pathlib import Path
 
     _ = require_postgres
@@ -1574,6 +1579,19 @@ def tls_postgres(
     if env_url and env_ca and Path(env_ca).is_file():
         yield Path(env_ca), _write_unrelated_ca(tmp / "bad-ca.pem"), env_url
         return
+    require = os.environ.get("REQUIRE_TLS_TESTS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if shutil.which("docker") is None:
+        if require:
+            raise AssertionError("REQUIRE_TLS_TESTS=1 y docker no está en PATH")
+        pytest.skip(
+            "tests TLS: docker no está en PATH (o define TLS_TEST_DATABASE_URL "
+            "y TLS_TEST_CAFILE)"
+        )
     cafile, bad_ca, dsn, cleanup = _start_ephemeral_tls_postgres(tmp)
     try:
         yield cafile, bad_ca, dsn
@@ -1685,8 +1703,11 @@ def test_ssl_disable_with_sslrootcert_skips_context(tmp_path: Any) -> None:
     import ssl as ssl_mod
     from pathlib import Path
 
-    from app.db import asyncpg_ssl_connect_arg, asyncpg_url_and_connect_args
-    from app.db import prepare_asyncpg_connect_kwargs
+    from app.db import (
+        asyncpg_ssl_connect_arg,
+        asyncpg_url_and_connect_args,
+        prepare_asyncpg_connect_kwargs,
+    )
 
     cafile = _write_unrelated_ca(Path(str(tmp_path)) / "unit-ca.pem")
     assert asyncpg_ssl_connect_arg("disable", str(cafile)) is False
