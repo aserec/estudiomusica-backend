@@ -1,3 +1,5 @@
+import ast
+import configparser
 import os
 import subprocess
 import sys
@@ -86,12 +88,57 @@ def test_resolve_alembic_database_url_derives_from_test(
     assert url.endswith("/app_alembic_test")
 
 
+def _revision_graph() -> dict[str, str | None]:
+    """revision → down_revision parseado de los ficheros (no de Alembic)."""
+
+    versions = ROOT / "app" / "migrations" / "versions"
+    graph: dict[str, str | None] = {}
+    for path in versions.glob("*.py"):
+        if path.name == "__init__.py":
+            continue
+        tree = ast.parse(path.read_text())
+        rev: str | None = None
+        down: str | None = None
+        for node in tree.body:
+            if not isinstance(node, ast.AnnAssign) or not isinstance(
+                node.target, ast.Name
+            ):
+                continue
+            if (
+                node.target.id == "revision"
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                rev = node.value.value
+            if node.target.id == "down_revision" and isinstance(
+                node.value, ast.Constant
+            ):
+                down = node.value.value if isinstance(node.value.value, str) else None
+        if rev is not None:
+            graph[rev] = down
+    return graph
+
+
+def _expected_heads() -> list[str]:
+    graph = _revision_graph()
+    downs = {down for down in graph.values() if down}
+    return sorted(revision for revision in graph if revision not in downs)
+
+
 def _packaged_heads() -> list[str]:
     from alembic.script import ScriptDirectory
 
     from app.migrations.config import make_alembic_config
 
-    return list(ScriptDirectory.from_config(make_alembic_config()).get_heads())
+    return sorted(ScriptDirectory.from_config(make_alembic_config()).get_heads())
+
+
+def alembic_cli() -> Path:
+    """Ejecutable Alembic del intérprete actual (``sys.prefix``, no resolve)."""
+
+    name = "alembic.exe" if os.name == "nt" else "alembic"
+    bindir = "Scripts" if os.name == "nt" else "bin"
+    return Path(sys.prefix) / bindir / name
 
 
 def test_make_alembic_config_works_without_repo_ini(
@@ -110,7 +157,7 @@ def test_make_alembic_config_works_without_repo_ini(
     config = make_alembic_config(url)
     assert config.get_main_option("script_location") == "app:migrations"
     assert config.get_main_option("sqlalchemy.url") == url
-    assert ScriptDirectory.from_config(config).get_heads() == _packaged_heads()
+    assert sorted(ScriptDirectory.from_config(config).get_heads()) == _expected_heads()
 
 
 def test_packaged_alembic_ini_is_importable() -> None:
@@ -136,7 +183,7 @@ def test_make_alembic_config_loads_packaged_ini() -> None:
     assert loaded == packaged_alembic_ini().resolve()
     assert loaded.parent.name == "app"
     assert "prepend_sys_path = ." not in loaded.read_text()
-    assert ScriptDirectory.from_config(config).get_heads() == _packaged_heads()
+    assert sorted(ScriptDirectory.from_config(config).get_heads()) == _expected_heads()
 
 
 def test_alembic_config_from_clean_subprocess(tmp_path: Path) -> None:
@@ -164,7 +211,7 @@ def test_alembic_config_from_clean_subprocess(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     assert lines[0] == "''"
-    assert lines[1].split(",") == _packaged_heads()
+    assert sorted(lines[1].split(",")) == _expected_heads()
 
 
 def test_alembic_cli_packaged_ini_ignores_cwd_app(tmp_path: Path) -> None:
@@ -177,10 +224,11 @@ def test_alembic_cli_packaged_ini_ignores_cwd_app(tmp_path: Path) -> None:
     (fake_app / "__init__.py").write_text(
         "raise RuntimeError('cwd app shadowed the installed package')\n"
     )
-    alembic = Path(sys.executable).resolve().parent / "alembic"
-    if not alembic.is_file():
-        alembic = ROOT / ".venv" / "bin" / "alembic"
+    alembic = alembic_cli()
     assert alembic.is_file()
+    assert alembic.parent == Path(sys.prefix) / (
+        "Scripts" if os.name == "nt" else "bin"
+    )
     result = subprocess.run(
         [str(alembic), "-c", str(packaged_alembic_ini()), "heads"],
         cwd=tmp_path,
@@ -193,7 +241,91 @@ def test_alembic_cli_packaged_ini_ignores_cwd_app(tmp_path: Path) -> None:
     output = f"{result.stdout}\n{result.stderr}"
     assert result.returncode == 0, output
     assert "cwd app shadowed" not in output
-    for head in _packaged_heads():
+    for head in _expected_heads():
+        assert head in output
+
+
+def test_root_alembic_ini_matches_packaged_keys() -> None:
+    """INI1-3: la raíz no puede divergir de script_location / prepend / logger."""
+
+    from app.migrations.config import packaged_alembic_ini
+
+    root = configparser.ConfigParser()
+    root.read(ROOT / "alembic.ini")
+    packaged = configparser.ConfigParser()
+    packaged.read(packaged_alembic_ini())
+    assert root.get("alembic", "script_location") == packaged.get(
+        "alembic", "script_location"
+    )
+    assert root.get("alembic", "script_location") == "app:migrations"
+    assert (root.get("alembic", "prepend_sys_path", fallback="") or "") == ""
+    assert (packaged.get("alembic", "prepend_sys_path", fallback="") or "") == ""
+    assert root.get("logger_alembic", "level") == packaged.get(
+        "logger_alembic", "level"
+    )
+
+
+def test_alembic_cli_with_uv_project_environment(tmp_path: Path) -> None:
+    """``sys.prefix`` resuelve alembic dentro de UV_PROJECT_ENVIRONMENT."""
+
+    from app.migrations.config import packaged_alembic_ini
+
+    alt = tmp_path / "uv-env"
+    created = subprocess.run(
+        ["uv", "venv", str(alt)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert created.returncode == 0, created.stderr
+    py = alt / "bin" / "python"
+    installed = subprocess.run(
+        ["uv", "pip", "install", "--python", str(py), "-e", str(ROOT)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    probe = subprocess.run(
+        [
+            str(py),
+            "-c",
+            "import sys\n"
+            "from pathlib import Path\n"
+            "print(sys.prefix)\n"
+            "print(Path(sys.prefix) / 'bin' / 'alembic')\n",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stderr
+    prefix, alembic_path = [
+        line.strip() for line in probe.stdout.splitlines() if line.strip()
+    ]
+    assert Path(prefix) == alt.resolve() or Path(prefix) == alt
+    assert Path(alembic_path).is_file()
+    fake = tmp_path / "cwd"
+    fake.mkdir()
+    (fake / "app").mkdir()
+    (fake / "app" / "__init__.py").write_text(
+        "raise RuntimeError('cwd app shadowed the installed package')\n"
+    )
+    result = subprocess.run(
+        [alembic_path, "-c", str(packaged_alembic_ini()), "heads"],
+        cwd=fake,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, output
+    assert "cwd app shadowed" not in output
+    for head in _expected_heads():
         assert head in output
 
 

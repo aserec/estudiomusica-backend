@@ -935,6 +935,7 @@ _LEFTOVER_TEST_DATABASES = (
     "autogen_sa_probe_test",
     "autogen_hook_probe_test",
     "schema_autogen_probe_test",
+    "autogen_empty_probe_test",
 )
 
 
@@ -948,6 +949,7 @@ def _drop_leftover_test_tables(dsn: RedactedDsn) -> None:
                         text(f'DROP TABLE IF EXISTS "{name}" CASCADE')
                     )
                 await connection.execute(text("DROP SCHEMA IF EXISTS catalogo CASCADE"))
+                await connection.execute(text("DROP SCHEMA IF EXISTS ajeno CASCADE"))
         finally:
             await engine.dispose()
 

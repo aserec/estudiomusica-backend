@@ -67,7 +67,7 @@ La sonda de Postgres es `GET /api/v1/health/db` (también hay alias en `GET /hea
 curl -i http://127.0.0.1:8000/api/v1/health/db
 ```
 
-Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde o la sonda supera `DB_HEALTH_TIMEOUT` (2 s por defecto), HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, code, fields}` de las rutas de negocio. El tiempo total de la petición no supera `DB_HEALTH_TIMEOUT` más 0,4 s (`HEALTH_TIMEOUT_MARGIN_SECONDS`): un close/reset congelado se abandona (terminate + invalidate) sin bloquear la respuesta. En el caso sano la conexión vuelve al pool. `GET /health/db` en la raíz es el alias de sonda; no aparece en OpenAPI.
+Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde o la sonda supera `DB_HEALTH_TIMEOUT` (2 s por defecto), HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, code, fields}` de las rutas de negocio. La sonda abre su propia conexión asyncpg (sin el pool de la app ni `pre_ping`; el `SELECT 1` es el ping) y guarda la referencia antes de la query. El tiempo total no supera `DB_HEALTH_TIMEOUT` más 0,4 s (`HEALTH_TIMEOUT_MARGIN_SECONDS`): un connect/SELECT/close congelado se abandona con `Connection.terminate`. Si hay una sonda abandonada pendiente se responde 503 sin abrir otra. `GET /health/db` en la raíz es el alias de sonda; no aparece en OpenAPI.
 
 Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
@@ -103,7 +103,7 @@ DELETE /api/v1/admin/system-roles/{id}   409 si isSystem o está en uso
 GET    /api/v1/courses/{courseId}/me/permissions
 ```
 
-`GET /admin/system-roles` exige `site:manage-admins` (solo admin). Un no-admin recibe `403 {error: forbidden}`. Sin sesión o token inválido: `401 {error: unauthorized}`. Desactivar un rol impide asignarlo a usuarios nuevos; quienes ya lo tienen lo conservan. Desactivar `admin` o DELETE de un rol sembrado responde `409 {error: system_role_protected}`.
+`GET /admin/system-roles` exige `site:manage-admins` (solo admin). Un no-admin recibe `403 {error: forbidden}`. Sin sesión o token inválido: `401 {error: unauthorized}`. Desactivar un rol con usuarios es válido: quienes ya lo tienen lo conservan (aunque quede inactivo). Asignar un rol inactivo responde `409 {error: role_not_assignable}`. `assign_system_role` bloquea el destino `FOR SHARE` (y relee `active`); el PATCH bloquea `FOR UPDATE`, para no clavar a alguien en un rol que se está desactivando. Desactivar `admin` o DELETE de un rol sembrado responde `409 {error: system_role_protected}`.
 
 Dependencias reutilizables: `require_site_permission(...)` y `require_course_permission(...)` (leen `course_id` del path). La asignación de matrícula queda fuera de este ticket (#403). El TODO(#306) de visibilidad multimedia/SM3 del profesor adjunto es el flag `ASSISTANT_MEDIA_AND_SM3_VISIBLE` (por defecto `false`); no se ha inventado un permiso nuevo.
 

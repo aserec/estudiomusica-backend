@@ -2,8 +2,10 @@
 
 La fuente de verdad es ``app/alembic.ini`` (viaja en el wheel).
 El ``alembic.ini`` de la raíz es un fichero regular (no un enlace)
-con las mismas claves para que ``uv run alembic`` funcione en el repo
-y el sdist no lleve symlinks.
+con las mismas claves operativas (``script_location``,
+``prepend_sys_path``, loggers) para que ``uv run alembic`` funcione
+en el repo y el sdist no lleve symlinks. No es un delegado: es una
+copia; la fuente empaquetada es ``app/alembic.ini``.
 """
 
 from importlib.resources import files
