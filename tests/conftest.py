@@ -39,7 +39,10 @@ DOWN_DATABASE_URL = (
 )
 UNUSED_DATABASE_URL = "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused"
 PRODUCTION_AUTH_SECRET = "production-test-auth-secret-at-least-32ch"
-PRODUCTION_TEST_USER = "em_prod_tests"
+# Sufijo con pid: el pytest hijo de leftovers ejecuta migrated_test_database
+# y haría DROP ROLE. #94 (46ec42b) cambia el fixture a scope=function; aquí
+# el padre y el hijo no comparten nombre, así no chocan.
+PRODUCTION_TEST_USER = f"em_prod_tests_{os.getpid()}"
 _PRODUCTION_TEST_EMAIL_PREFIX = "prod-"
 _SAFE_PG_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DATABASE_OVERRIDE_QUERY_KEYS = frozenset({"database", "dbname", "service", "options"})

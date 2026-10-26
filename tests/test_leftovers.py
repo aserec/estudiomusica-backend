@@ -12,6 +12,7 @@ from sqlalchemy.engine.url import make_url
 
 from app.db import RedactedDsn
 from tests.conftest import (
+    PRODUCTION_TEST_USER,
     ROOT,
     _create_async_engine,
     _drop_leftover_test_databases,
@@ -216,6 +217,34 @@ def test_migrated_fixture_setup_and_teardown_drop_leftovers(
     _plant_session_leftovers(require_postgres)
     result = _run_leftover_probe(tmp_path, require_postgres, _CHILD_SETUP_AND_PLANT)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert asyncio.run(_table_exists(require_postgres)) is None
+    assert (
+        asyncio.run(_database_exists(require_postgres, "autogen_sa_probe_test")) is None
+    )
+    drop_database_if_exists(_leftover_db(require_postgres))
+
+
+@pytest.mark.db
+def test_leftover_child_then_production_role(
+    require_postgres: RedactedDsn,
+    tmp_path: Path,
+    production_test_database_url: RedactedDsn,
+) -> None:
+    """El hijo de leftovers no tumba el rol de production del padre."""
+
+    _plant_session_leftovers(require_postgres)
+    result = _run_leftover_probe(tmp_path, require_postgres, _CHILD_SETUP_AND_PLANT)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    async def prod_alive() -> object:
+        engine = _create_async_engine(production_test_database_url.secret())
+        try:
+            async with engine.connect() as connection:
+                return await connection.scalar(text("SELECT current_user"))
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(prod_alive()) == PRODUCTION_TEST_USER
     assert asyncio.run(_table_exists(require_postgres)) is None
     assert (
         asyncio.run(_database_exists(require_postgres, "autogen_sa_probe_test")) is None
