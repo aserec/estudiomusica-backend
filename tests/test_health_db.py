@@ -1974,6 +1974,40 @@ def test_sslmode_verify_full_without_rootcert_rejects_untrusted(
     ), engine_exc.value
 
 
+def test_prepare_translates_uppercase_sslmode_alone() -> None:
+    """S4a: ``SSLMODE`` se traduce a ``ssl`` sin mezclar hostname ni CA."""
+
+    from app.db import asyncpg_url_and_connect_args, prepare_asyncpg_connect_kwargs
+
+    mode_only = prepare_asyncpg_connect_kwargs(
+        {"host": "127.0.0.1", "SSLMODE": "require"}
+    )
+    assert "sslmode" not in {str(key).lower() for key in mode_only}
+    assert "SSLMODE" not in mode_only
+    assert mode_only.get("ssl") == "require"
+    url, args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?SSLMODE=require"
+    )
+    assert "sslmode=" not in url.lower()
+    assert args.get("ssl") == "require"
+
+
+def test_ssl_require_hostname_without_sslmode(tmp_path: Any) -> None:
+    """S7: ``ssl=require`` + CA comprueba hostname; no usa SSLMODE."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import ssl_context_from_rootcert
+
+    cafile = str(_write_unrelated_ca(Path(str(tmp_path)) / "s7-ca.pem"))
+    ctx = ssl_context_from_rootcert(cafile, "require")
+    assert ctx.check_hostname is True
+    assert ctx.verify_mode == ssl_mod.CERT_REQUIRED
+    mixed = ssl_context_from_rootcert(cafile, "Require")
+    assert mixed.check_hostname is True
+
+
 def test_sslrootcert_and_sslmode_are_case_insensitive(tmp_path: Any) -> None:
     """S2a/S4a: ``SSLROOTCERT`` / ``SSLMODE`` se traducen igual."""
 
