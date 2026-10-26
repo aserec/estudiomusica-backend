@@ -45,6 +45,10 @@ PRODUCTION_AUTH_SECRET = "production-test-auth-secret-at-least-32ch"
 _PRODUCTION_TEST_ROLE_PREFIX = "em_prod_tests_"
 PRODUCTION_TEST_USER = f"{_PRODUCTION_TEST_ROLE_PREFIX}{os.getpid()}"
 _PRODUCTION_TEST_EMAIL_PREFIX = "prod-"
+# Serializa el barrido de huérfanos entre pytest concurrentes.
+_SWEEP_ADVISORY_LOCK_KEY1 = 0x454D50  # EMP
+_SWEEP_ADVISORY_LOCK_KEY2 = 0x535750  # SWP
+_SWEEP_COMMAND_TIMEOUT = 60.0
 _SAFE_PG_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DATABASE_OVERRIDE_QUERY_KEYS = frozenset({"database", "dbname", "service", "options"})
 _PING_CONNECT_TIMEOUT = 2.0
@@ -462,6 +466,18 @@ def _admin_engine(admin: RedactedDsn) -> AsyncEngine:
     )
 
 
+def _sweep_admin_engine(admin: RedactedDsn) -> AsyncEngine:
+    """Motor transaccional: ``pg_advisory_xact_lock`` vive hasta el COMMIT."""
+
+    return _create_async_engine(
+        admin.secret(),
+        connect_args={
+            "timeout": _PING_CONNECT_TIMEOUT,
+            "command_timeout": _SWEEP_COMMAND_TIMEOUT,
+        },
+    )
+
+
 def _orphan_production_test_role(name: str) -> bool:
     """True si el rol es ``em_prod_tests_<pid>`` y ese pid ya no existe."""
 
@@ -502,9 +518,16 @@ async def _drop_named_production_test_role(connection: Any, name: str) -> None:
 
 
 async def _drop_production_test_role(admin: RedactedDsn) -> None:
-    engine = _admin_engine(admin)
+    engine = _sweep_admin_engine(admin)
     try:
-        async with engine.connect() as connection:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("SELECT pg_advisory_xact_lock(:k1, :k2)"),
+                {
+                    "k1": _SWEEP_ADVISORY_LOCK_KEY1,
+                    "k2": _SWEEP_ADVISORY_LOCK_KEY2,
+                },
+            )
             rows = (
                 await connection.execute(
                     text(
@@ -513,9 +536,19 @@ async def _drop_production_test_role(admin: RedactedDsn) -> None:
                     )
                 )
             ).all()
-            for (name,) in rows:
-                if name == PRODUCTION_TEST_USER or _orphan_production_test_role(name):
+            names = [name for (name,) in rows]
+            if PRODUCTION_TEST_USER not in names:
+                names.append(PRODUCTION_TEST_USER)
+            for name in names:
+                if name != PRODUCTION_TEST_USER and not _orphan_production_test_role(
+                    name
+                ):
+                    continue
+                try:
                     await _drop_named_production_test_role(connection, name)
+                except Exception:
+                    if name == PRODUCTION_TEST_USER:
+                        raise
     finally:
         await engine.dispose()
 

@@ -258,14 +258,77 @@ def test_leftover_child_then_production_role(
 
 
 def _unused_pid() -> int:
-    for candidate in range(2_000_000, 2_000_400):
+    return _unused_pids(1)[0]
+
+
+def _unused_pids(count: int) -> list[int]:
+    found: list[int] = []
+    for candidate in range(2_000_000, 2_100_000):
         try:
             os.kill(candidate, 0)
         except ProcessLookupError:
-            return candidate
+            found.append(candidate)
+            if len(found) >= count:
+                return found
         except OSError:
             continue
-    raise RuntimeError("no se encontró un pid libre para el rol huérfano")
+    raise RuntimeError("no se encontraron pids libres para roles huérfanos")
+
+
+def _plant_orphan_roles(admin: RedactedDsn, names: list[str]) -> None:
+    async def plant() -> None:
+        engine = _admin_engine(admin)
+        try:
+            async with engine.connect() as connection:
+                for name in names:
+                    role = _pg_ident(name)
+                    await connection.execute(
+                        text(
+                            f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                            f"PASSWORD {_pg_literal('orphan-race-secret')}"
+                        )
+                    )
+                    await connection.execute(
+                        text(f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO {role}")
+                    )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(plant())
+
+
+def _production_role_names(admin: RedactedDsn) -> list[str]:
+    async def listed() -> list[str]:
+        engine = _admin_engine(admin)
+        try:
+            async with engine.connect() as connection:
+                rows = (
+                    await connection.execute(
+                        text(
+                            "SELECT rolname FROM pg_roles "
+                            "WHERE rolname LIKE 'em_prod_tests_%' "
+                            "ORDER BY 1"
+                        )
+                    )
+                ).all()
+        finally:
+            await engine.dispose()
+        return [name for (name,) in rows]
+
+    return asyncio.run(listed())
+
+
+def _cleanup_named_roles(admin: RedactedDsn, names: list[str]) -> None:
+    async def cleanup() -> None:
+        engine = _admin_engine(admin)
+        try:
+            async with engine.connect() as connection:
+                for name in names:
+                    await _drop_named_production_test_role(connection, name)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(cleanup())
 
 
 async def _role_exists(dsn: RedactedDsn, name: str) -> object:
@@ -344,6 +407,45 @@ def test_setup_drops_orphan_production_test_role(
                 await engine.dispose()
 
         asyncio.run(cleanup_orphan())
+
+
+@pytest.mark.db
+@pytest.mark.timeout(90)
+def test_concurrent_orphan_drops_do_not_fail(require_postgres: RedactedDsn) -> None:
+    """Dos procesos pueden borrar huérfanos a la vez sin tumbar production."""
+
+    planted = [f"em_prod_tests_{pid}" for pid in _unused_pids(8)]
+    _plant_orphan_roles(require_postgres, planted)
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env["TEST_DATABASE_URL"] = require_postgres.secret()
+    try:
+        workers = [
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "race_drop.py"),
+                    "--drop-only",
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for _ in range(2)
+        ]
+        outputs: list[str] = []
+        codes: list[int] = []
+        for worker in workers:
+            out, _ = worker.communicate(timeout=60)
+            outputs.append(out)
+            codes.append(int(worker.returncode or 0))
+        assert codes == [0, 0], "".join(outputs)
+        leftovers = set(_production_role_names(require_postgres)) & set(planted)
+        assert leftovers == set()
+    finally:
+        _cleanup_named_roles(require_postgres, planted)
 
 
 async def _table_exists_named(dsn: RedactedDsn, name: str) -> object:
