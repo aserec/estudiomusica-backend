@@ -489,7 +489,10 @@ async def test_health_db_alternating_freeze_does_not_accumulate_backends(
     main = get_engine()
     health_service.set_health_database_url(frozen_url)
     original_connect = asyncpg.connect
-    peak = {"health": 0, "user": 0}
+    baseline_health, baseline_user = await _count_app_backends(
+        require_postgres, connect=original_connect
+    )
+    peak = {"health": baseline_health, "user": baseline_user}
     leftover_after_cycle = {"health": 0, "user": 0}
 
     async def _connect_and_count(*args: object, **kwargs: object) -> object:
@@ -521,18 +524,20 @@ async def test_health_db_alternating_freeze_does_not_accumulate_backends(
                 leftover_after_cycle["user"] = max(
                     leftover_after_cycle["user"], leftover_u
                 )
-            # leftover_after_cycle es el recuento *después* de cada ciclo
-            # (la sonda ya cerró o hizo terminate). El pico real es
-            # peak, medido con la conexión de la sonda aún abierta.
+            # leftover_after_cycle es residual *después* de cerrar
+            # (el «backends máximos 0» anterior). El pico real se mide
+            # con la conexión de la sonda aún abierta.
             print(
-                f"alternating peak_during health={peak['health']} "
+                f"alternating baseline health={baseline_health} "
+                f"app_user={baseline_user} peak_during health={peak['health']} "
                 f"app_user={peak['user']} leftover_after_cycle "
                 f"health={leftover_after_cycle['health']} "
                 f"app_user={leftover_after_cycle['user']}",
                 flush=True,
             )
             assert peak["health"] >= 1
-            assert leftover_after_cycle["health"] <= 2
+            assert leftover_after_cycle["health"] == 0
+            assert leftover_after_cycle["user"] <= baseline_user
             assert main.sync_engine.pool.checkedout() == 0  # type: ignore[attr-defined]
             await dispose_engine()
             end_health, end_user = await _count_app_backends(
@@ -544,7 +549,7 @@ async def test_health_db_alternating_freeze_does_not_accumulate_backends(
                 flush=True,
             )
             assert end_health == 0
-            assert end_user == 0
+            assert end_user <= baseline_user
             unclosed = [
                 item
                 for item in caught
