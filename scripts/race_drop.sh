@@ -5,8 +5,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+if [[ -z "${PYTHON:-}" ]]; then
+  if [[ -x "${ROOT}/.venv/bin/python" ]]; then
+    PYTHON="${ROOT}/.venv/bin/python"
+  else
+    PYTHON=python3
+  fi
+fi
 NS="${NS:-1 1 1 5 5 40}"
 for N in $NS; do
   echo -n "N=$N: "
-  python scripts/race_drop.py "$N"
+  "$PYTHON" scripts/race_drop.py "$N"
 done
