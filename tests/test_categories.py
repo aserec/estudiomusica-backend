@@ -759,6 +759,13 @@ def test_transparente_por_categoria_M() -> None:
     assert category_name_key(raw) == f"ب{_DEVANAGARI_AA}ب"
 
 
+def test_copyright_tone_and_zwj_share_key() -> None:
+    plain = "©\U0001f3fd💻"
+    joined = "©\U0001f3fd\u200d💻"
+    assert category_name_key(plain) == category_name_key(joined)
+    assert "\u200d" not in category_name_key(joined)
+
+
 def test_zwj_sin_filtro_EP() -> None:
     raw = "a\ufe0f\u200d\u2764\ufe0f"
     assert category_name_key(raw) == "a\ufe0f\u2764\ufe0f"

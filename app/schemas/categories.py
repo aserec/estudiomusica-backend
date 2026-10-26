@@ -9,6 +9,7 @@ from pydantic.config import JsonDict
 from app.schemas.base import APIModel
 from app.schemas.unicode_props import (
     ASSIGNED,
+    EMOJI_MODIFIER_BASE,
     EMOJI_PRESENTATION,
     EXTENDED_PICTOGRAPHIC,
     JOINING_D,
@@ -109,14 +110,20 @@ def _keep_zwj(value: str, index: int) -> bool:
     right, right_vs = _skip_transparent(value, index, 1)
     if not (0 <= left < len(value) and 0 <= right < len(value)):
         return False
-    # UTS #51: el modificador de tono (1F3FB..1F3FF) no es EP y va
-    # pegado al emoji; el VS16 de presentación va *detrás* del carácter.
+    # UTS #51: el tono (1F3FB..1F3FF) solo cuenta tras Emoji_Modifier_Base;
+    # el VS16 de presentación va *detrás* del carácter.
     if 0x1F3FB <= ord(value[left]) <= 0x1F3FF:
+        if left < 1 or not _in_ranges(ord(value[left - 1]), EMOJI_MODIFIER_BASE):
+            return False
         left -= 1
         left_vs = True
-    right_vs = right_vs or value[right + 1 : right + 2] == _VS16
     if not 0 <= left < len(value):
         return False
+    if right + 1 < len(value) and 0x1F3FB <= ord(value[right + 1]) <= 0x1F3FF:
+        if _in_ranges(ord(value[right]), EMOJI_MODIFIER_BASE):
+            right_vs = True
+    else:
+        right_vs = right_vs or value[right + 1 : right + 2] == _VS16
     return _is_emoji_zwj_side(value[left], left_vs) and _is_emoji_zwj_side(
         value[right], right_vs
     )

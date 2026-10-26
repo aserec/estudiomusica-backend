@@ -4,6 +4,7 @@ from pathlib import Path
 from app.schemas.categories import category_name_key
 from app.schemas.unicode_props import (
     ASSIGNED,
+    EMOJI_MODIFIER_BASE,
     EMOJI_PRESENTATION,
     EXTENDED_PICTOGRAPHIC,
     JOINING_D,
@@ -27,7 +28,11 @@ def test_generated_unicode_tables_match_vendored_ucd() -> None:
     assert tables["JOINING_T"] == JOINING_T
     assert tables["EXTENDED_PICTOGRAPHIC"] == EXTENDED_PICTOGRAPHIC
     assert tables["EMOJI_PRESENTATION"] == EMOJI_PRESENTATION
+    assert tables["EMOJI_MODIFIER_BASE"] == EMOJI_MODIFIER_BASE
     assert tables["REGIONAL_INDICATOR"] == REGIONAL_INDICATOR
+    assert not any(start <= 0x00A9 <= end for start, end in EMOJI_MODIFIER_BASE)
+    assert any(start <= 0x1F469 <= end for start, end in EMOJI_MODIFIER_BASE)
+    assert any(start <= 0x261D <= end for start, end in EMOJI_MODIFIER_BASE)
     assert tables["ASSIGNED"] == ASSIGNED
     assert not any(start <= 0x088F <= end for start, end in ASSIGNED)
     assert not any(start <= 0x1ACF <= end for start, end in ASSIGNED)

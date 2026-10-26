@@ -105,6 +105,7 @@ def parse_tables(ucd_dir: Path) -> dict[str, tuple[tuple[int, int], ...]]:
         "JOINING_T": parse_ucd_property(joining, "T"),
         "EXTENDED_PICTOGRAPHIC": parse_ucd_property(emoji, "Extended_Pictographic"),
         "EMOJI_PRESENTATION": parse_ucd_property(emoji, "Emoji_Presentation"),
+        "EMOJI_MODIFIER_BASE": parse_ucd_property(emoji, "Emoji_Modifier_Base"),
         "REGIONAL_INDICATOR": REGIONAL_INDICATOR,
         "ASSIGNED": parse_assigned(category),
     }
