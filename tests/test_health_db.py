@@ -2056,6 +2056,29 @@ def test_conflicting_ssl_query_rejected_on_all_paths(
     assert any(_SSL_CONFLICT_MSG in item for item in messages), messages
 
 
+def test_normalize_rejects_uppercase_and_encoded_conflicts() -> None:
+    """N3/N4/N14/N5: mayúsculas, percent-encoding y tuplas no conectan en claro."""
+
+    from app.db import _SSL_CONFLICT_MSG, normalize_asyncpg_ssl_url
+
+    cases = (
+        "ssl=verify-full&SSL=disable",
+        "sslmode=verify-full&SSLMODE=disable",
+        "SSLMODE=disable&ssl=verify-full",
+        "%73slmode=verify-full&ssl=disable",
+        "ssl=disable&%73slmode=verify-full",
+        "ssl%6Dode=verify-full&SSL=disable",
+        "sslmode=disable&sslmode=verify-full",
+        "ssl=disable&ssl=verify-full",
+        "sslmode=verify-full#&ssl=disable",
+    )
+    for query in cases:
+        url = f"postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?{query}"
+        with pytest.raises(ValueError, match="mezclar ni repetir") as caught:
+            normalize_asyncpg_ssl_url(url)
+        assert str(caught.value) == _SSL_CONFLICT_MSG
+
+
 @pytest.mark.db
 @pytest.mark.timeout(120)
 def test_conflicting_ssl_query_rejected_on_live_tls(
