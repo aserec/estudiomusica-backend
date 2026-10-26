@@ -32,7 +32,8 @@ class User(PersistentModel):
     __tablename__ = "users"
     __table_args__ = (
         CheckConstraint(
-            "is_admin = (system_role_id = 'admin')",
+            "is_admin IS NOT NULL AND system_role_id IS NOT NULL "
+            "AND is_admin = (system_role_id = 'admin')",
             name="is_admin_matches_system_role",
         ),
     )

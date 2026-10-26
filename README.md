@@ -103,11 +103,11 @@ DELETE /api/v1/admin/system-roles/{id}   409 si isSystem o está en uso
 GET    /api/v1/courses/{courseId}/me/permissions
 ```
 
-`GET /admin/system-roles` exige `site:manage-admins` (solo admin). Un no-admin recibe `403 {error: forbidden}`. Sin sesión o token inválido: `401 {error: unauthorized}`. Desactivar un rol impide asignarlo a usuarios nuevos; quienes ya lo tienen lo conservan. DELETE de un rol sembrado responde `409 {error: system_role_protected}`.
+`GET /admin/system-roles` exige `site:manage-admins` (solo admin). Un no-admin recibe `403 {error: forbidden}`. Sin sesión o token inválido: `401 {error: unauthorized}`. Desactivar un rol impide asignarlo a usuarios nuevos; quienes ya lo tienen lo conservan. Desactivar `admin` o DELETE de un rol sembrado responde `409 {error: system_role_protected}`.
 
 Dependencias reutilizables: `require_site_permission(...)` y `require_course_permission(...)` (leen `course_id` del path). La asignación de matrícula queda fuera de este ticket (#403). El TODO(#306) de visibilidad multimedia/SM3 del profesor adjunto es el flag `ASSISTANT_MEDIA_AND_SM3_VISIBLE` (por defecto `false`); no se ha inventado un permiso nuevo.
 
-`0003_system_roles` (en `app/migrations/versions/`) crea `system_roles` y `course_memberships`, siembra los cuatro roles y añade `users.system_role_id`. `/auth/me` deriva `isAdmin` de `system_role_id`; la columna `is_admin` es un espejo con `CHECK (is_admin = (system_role_id = 'admin'))`. Monta el trigger con `op_create_updated_at_trigger`.
+`0003_system_roles` (en `app/migrations/versions/`) crea `system_roles` y `course_memberships`, siembra los cuatro roles y añade `users.system_role_id`. Tras el backfill de 0002, `is_admin` se realinea desde `system_role_id` (fuente de verdad). El CHECK exige `is_admin` no nulo y coherente con el rol. `/auth/me` deriva `isAdmin` del rol. Monta el trigger con `op_create_updated_at_trigger`. Las bases de **dev/staging** creadas con una 0003 anterior (sin este CHECK) hay que **recrearlas**: el id de revisión no cambia, y un `downgrade` + `upgrade` pierde el rol y realinea desde `is_admin`. No hay nada desplegado.
 
 ## Postgres, migraciones y tests con BD
 
@@ -184,7 +184,6 @@ El fixture `production_client` crea el rol `em_prod_tests` (LOGIN, **sin** SUPER
 - `SELECT, INSERT, UPDATE, DELETE` en las tablas de `public`
 - `USAGE, SELECT` en las secuencias de `public`
 - `USAGE` en el tipo `citext` (email)
-- `EXECUTE` en `set_updated_at()` (triggers de `users`, `system_roles`, `course_memberships`)
 
 No puede migrar ni crear bases. Las filas de esos tests (`prod-%@example.com`) se borran al terminar.
 
