@@ -5,6 +5,7 @@ from __future__ import annotations
 import ssl
 from collections.abc import AsyncIterator, Mapping
 from typing import Annotated, Any, get_origin, get_type_hints
+from urllib.parse import parse_qsl
 
 from fastapi import Depends, Request
 from sqlalchemy import event
@@ -37,6 +38,9 @@ _TLS_QUERY_KEYS = frozenset(
     {"ssl", "sslmode", "sslrootcert", "sslcert", "sslkey", "sslpassword"}
 )
 _SSL_CONFLICT_MSG = "DATABASE_URL no puede mezclar ni repetir ssl y sslmode"
+_SSL_BLANK_MSG = (
+    "DATABASE_URL no admite claves TLS vacías ni una query percent-encoded entera"
+)
 
 
 _QUERY_SECRET_KEYS = frozenset({"password", "sslpassword"})
@@ -96,6 +100,40 @@ def _query_scalar(query: Mapping[Any, Any], *keys: str) -> str | None:
     return None
 
 
+def _raw_query_after_database(url: str, database: str | None) -> str | None:
+    """Query cruda tras ``/{database}?``. No usa ``urlparse`` (``[`` / ``]``)."""
+
+    if not database:
+        return None
+    marker = f"/{database}?"
+    index = url.find(marker)
+    if index < 0:
+        return None
+    return url[index + len(marker) :]
+
+
+def _reject_blank_and_encoded_query(url: str, database: str | None) -> None:
+    """``keep_blank_values``: TLS vacía o clave con ``=`` / ``&`` → ValueError."""
+
+    raw = _raw_query_after_database(url, database)
+    if raw is None:
+        return
+    tls_counts: dict[str, int] = {}
+    for key, value in parse_qsl(raw, keep_blank_values=True):
+        if "=" in key or "&" in key:
+            raise ValueError(_SSL_BLANK_MSG)
+        lowered = key.lower()
+        if lowered not in _TLS_QUERY_KEYS:
+            continue
+        if value == "":
+            raise ValueError(_SSL_BLANK_MSG)
+        tls_counts[lowered] = tls_counts.get(lowered, 0) + 1
+    if any(count > 1 for count in tls_counts.values()):
+        raise ValueError(_SSL_CONFLICT_MSG)
+    if "ssl" in tls_counts and "sslmode" in tls_counts:
+        raise ValueError(_SSL_CONFLICT_MSG)
+
+
 def normalize_asyncpg_ssl_url(url: str) -> str:
     """Una sola regla para ``ssl`` / ``sslmode`` (Settings, engine, Alembic).
 
@@ -105,12 +143,16 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
     sin codificar no puede ocultar claves, y ``[`` / ``]`` en la
     contraseña siguen siendo válidos.
     ``SSL`` / ``Ssl`` pasan a ``ssl``. ``sslmode`` pasa a ``ssl``.
+    ``parse_qsl(..., keep_blank_values=True)`` sobre la query cruda
+    rechaza claves TLS vacías y una query percent-encoded entera
+    (clave decodificada con ``=`` o ``&``).
     """
 
     try:
         parsed = make_url(url)
     except Exception:
         return url
+    _reject_blank_and_encoded_query(url, parsed.database)
     query = dict(parsed.query or {})
     pairs: list[tuple[str, Any]] = [(str(key), value) for key, value in query.items()]
     counts: dict[str, int] = {}

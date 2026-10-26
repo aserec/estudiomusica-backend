@@ -2129,6 +2129,42 @@ def test_repeated_tls_keys_raise_value_error(tmp_path: Any) -> None:
     assert str(prepared.value) == _SSL_CONFLICT_MSG
 
 
+def test_blank_tls_keys_and_encoded_query_raise() -> None:
+    """BAJA: ssl=/sslmode= vacíos y query percent-encoded entera → ValueError."""
+
+    from app.db import _SSL_BLANK_MSG, normalize_asyncpg_ssl_url
+
+    cases = (
+        "sslmode=",
+        "ssl=",
+        "sslmode=&application_name=x",
+        "ssl=&application_name=x",
+        "sslrootcert=",
+        "sslcert=",
+        "sslmode%3Dverify-full%26ssl%3Ddisable",
+    )
+    for query in cases:
+        url = f"postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?{query}"
+        with pytest.raises(ValueError, match="claves TLS vacías|percent-encoded") as caught:
+            normalize_asyncpg_ssl_url(url)
+        assert str(caught.value) == _SSL_BLANK_MSG
+    for shape in ("plain", "hash", "qm"):
+        url = _mix_dsn(
+            "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test",
+            "sslmode=",
+            shape=shape,
+        )
+        with pytest.raises(ValueError, match="claves TLS vacías|percent-encoded"):
+            normalize_asyncpg_ssl_url(url)
+        encoded = _mix_dsn(
+            "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test",
+            "sslmode%3Dverify-full%26ssl%3Ddisable",
+            shape=shape,
+        )
+        with pytest.raises(ValueError, match="claves TLS vacías|percent-encoded"):
+            normalize_asyncpg_ssl_url(encoded)
+
+
 def test_normalize_accepts_unencoded_brackets_in_password() -> None:
     """``[`` / ``]`` en la contraseña siguen siendo un DSN válido."""
 
