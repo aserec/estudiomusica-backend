@@ -21,6 +21,7 @@ from app.schemas.categories import (
     _CF_STRIP_CHARS,
     CategoryCreate,
     CategoryUpdate,
+    _next_grapheme,
     category_name_key,
     clip_to_grapheme_limit,
     normalize_category_description,
@@ -1517,6 +1518,48 @@ async def test_dup_name_cuts_on_grapheme_not_tags() -> None:
     assert _BLACK_FLAG not in cut or "\U000e007f" in cut
     assert "\U000e0067" not in cut
     assert normalize_category_name(cut) == cut
+
+
+def test_clip_uax29_devanagari_hangul_prepend_thai() -> None:
+    kssa = "क्ष"
+    assert _next_grapheme(kssa, 0) == len(kssa)
+    assert clip_to_grapheme_limit(("B" * 110) + kssa, 111) == "B" * 110
+    kssa_zwj = "क्\u200dष"
+    assert _next_grapheme(kssa_zwj, 0) == len(kssa_zwj)
+    hangul_lv = "\u1100\u1161"
+    hangul_lvt = "\u1100\u1161\u11a8"
+    hangul_lv_pre = "가"
+    hangul_lvt_pre = "각"
+    assert _next_grapheme(hangul_lv, 0) == 2
+    assert _next_grapheme(hangul_lvt, 0) == 3
+    assert _next_grapheme(hangul_lv_pre + "\u11a8", 0) == 2
+    assert _next_grapheme(hangul_lvt_pre, 0) == 1
+    assert clip_to_grapheme_limit(("B" * 110) + hangul_lvt, 111) == "B" * 110
+    prepend = "\u0600A"
+    assert _next_grapheme(prepend, 0) == 2
+    assert clip_to_grapheme_limit(("B" * 110) + prepend, 111) == "B" * 110
+    thai = "ก\u0e33"
+    assert _next_grapheme(thai, 0) == 2
+    assert "  (dup" not in _dup_name("Piano ", 1)
+    assert _dup_name("Piano ", 1) == "Piano (dup 1)"
+
+
+def test_c_clip_tono_vs_marcas_mc_zwj_ri_zwnj() -> None:
+    assert _next_grapheme("👩\U0001f3fd", 0) == 2
+    assert clip_to_grapheme_limit(("B" * 110) + "👩\U0001f3fd", 111) == "B" * 110
+    assert _next_grapheme("❤\ufe0f", 0) == 2
+    assert clip_to_grapheme_limit(("B" * 110) + "❤\ufe0f", 111) == "B" * 110
+    assert _next_grapheme("e\u0301", 0) == 2
+    assert clip_to_grapheme_limit(("B" * 110) + "e\u0301", 111) == "B" * 110
+    assert _next_grapheme("क\u093e", 0) == 2
+    assert clip_to_grapheme_limit(("B" * 110) + "क\u093e", 111) == "B" * 110
+    family = "👨‍👩‍👧"
+    assert _next_grapheme(family, 0) == len(family)
+    assert clip_to_grapheme_limit(("B" * 110) + family, 111) == "B" * 110
+    assert _next_grapheme(_SPAIN, 0) == 2
+    assert clip_to_grapheme_limit(("B" * 110) + _SPAIN, 111) == "B" * 110
+    assert _next_grapheme("ی\u200c", 0) == 2
+    assert clip_to_grapheme_limit(("B" * 110) + "ی\u200c", 111) == "B" * 110
 
 
 async def test_f_sin_chequeo_clash(db_session: AsyncSession) -> None:

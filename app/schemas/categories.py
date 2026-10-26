@@ -12,6 +12,17 @@ from app.schemas.unicode_props import (
     EMOJI_MODIFIER_BASE,
     EMOJI_PRESENTATION,
     EXTENDED_PICTOGRAPHIC,
+    GRAPHEME_EXTEND,
+    GRAPHEME_L,
+    GRAPHEME_LV,
+    GRAPHEME_LVT,
+    GRAPHEME_PREPEND,
+    GRAPHEME_SPACINGMARK,
+    GRAPHEME_T,
+    GRAPHEME_V,
+    INCB_CONSONANT,
+    INCB_EXTEND,
+    INCB_LINKER,
     JOINING_D,
     JOINING_L,
     JOINING_R,
@@ -234,44 +245,123 @@ def _is_visible(char: str) -> bool:
 
 _RI_START = 0x1F1E6
 _RI_END = 0x1F1FF
-_TAG_TERM = "\U000e007f"
 
 
-def _is_grapheme_extend(char: str) -> bool:
+def _gcb(char: str) -> str:
     code = ord(char)
-    if unicodedata.category(char) in {"Mn", "Me", "Mc"}:
-        return True
-    if 0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF:
-        return True
-    if 0x1F3FB <= code <= 0x1F3FF:
-        return True
-    return char in {_ZWJ, _ZWNJ, _TAG_TERM} or char in _TAG_CF
+    if char == _ZWJ:
+        return "ZWJ"
+    if _RI_START <= code <= _RI_END:
+        return "RI"
+    if _in_ranges(code, GRAPHEME_PREPEND):
+        return "Prepend"
+    if _in_ranges(code, GRAPHEME_EXTEND):
+        return "Extend"
+    if _in_ranges(code, GRAPHEME_SPACINGMARK):
+        return "SpacingMark"
+    if _in_ranges(code, GRAPHEME_L):
+        return "L"
+    if _in_ranges(code, GRAPHEME_V):
+        return "V"
+    if _in_ranges(code, GRAPHEME_T):
+        return "T"
+    if _in_ranges(code, GRAPHEME_LV):
+        return "LV"
+    if _in_ranges(code, GRAPHEME_LVT):
+        return "LVT"
+    if _in_ranges(code, EXTENDED_PICTOGRAPHIC):
+        return "Extended_Pictographic"
+    return "Other"
+
+
+def _incb(char: str) -> str:
+    code = ord(char)
+    if _in_ranges(code, INCB_LINKER):
+        return "Linker"
+    if _in_ranges(code, INCB_CONSONANT):
+        return "Consonant"
+    if _in_ranges(code, INCB_EXTEND):
+        return "Extend"
+    return "None"
+
+
+def _gb9c(value: str, index: int) -> bool:
+    """GB9c: Consonant [Extend|Linker]* Linker [Extend|Linker]* × Consonant."""
+
+    if _incb(value[index + 1]) != "Consonant":
+        return False
+    cursor = index
+    saw_linker = False
+    while cursor >= 0 and _incb(value[cursor]) in {"Extend", "Linker"}:
+        if _incb(value[cursor]) == "Linker":
+            saw_linker = True
+        cursor -= 1
+    return saw_linker and cursor >= 0 and _incb(value[cursor]) == "Consonant"
+
+
+def _gb11(value: str, index: int) -> bool:
+    """GB11: Extended_Pictographic Extend* ZWJ × Extended_Pictographic."""
+
+    if value[index] != _ZWJ:
+        return False
+    if _gcb(value[index + 1]) != "Extended_Pictographic":
+        return False
+    cursor = index - 1
+    while cursor >= 0 and _gcb(value[cursor]) == "Extend":
+        cursor -= 1
+    return cursor >= 0 and _gcb(value[cursor]) == "Extended_Pictographic"
+
+
+def _ri_pair(value: str, index: int) -> bool:
+    """GB12/13: no partir un par de Regional_Indicator."""
+
+    if _gcb(value[index]) != "RI" or _gcb(value[index + 1]) != "RI":
+        return False
+    count = 0
+    cursor = index
+    while cursor >= 0 and _gcb(value[cursor]) == "RI":
+        count += 1
+        cursor -= 1
+    return count % 2 == 1
+
+
+def _grapheme_break(value: str, index: int) -> bool:
+    """True si hay frontera UAX #29 entre ``index`` e ``index+1``."""
+
+    left = _gcb(value[index])
+    right = _gcb(value[index + 1])
+    if left in {"CR", "LF", "Control"} or right in {"CR", "LF", "Control"}:
+        return not (left == "CR" and right == "LF")
+    if left == "L" and right in {"L", "V", "LV", "LVT"}:
+        return False
+    if left in {"LV", "V"} and right in {"V", "T"}:
+        return False
+    if left in {"LVT", "T"} and right == "T":
+        return False
+    if right in {"Extend", "ZWJ"}:
+        return False
+    if right == "SpacingMark":
+        return False
+    if left == "Prepend":
+        return False
+    if _gb9c(value, index):
+        return False
+    if _gb11(value, index):
+        return False
+    return not _ri_pair(value, index)
 
 
 def _next_grapheme(value: str, start: int) -> int:
     if start >= len(value):
         return start
-    index = start + 1
-    if (
-        _RI_START <= ord(value[start]) <= _RI_END
-        and index < len(value)
-        and _RI_START <= ord(value[index]) <= _RI_END
-    ):
+    index = start
+    while index + 1 < len(value) and not _grapheme_break(value, index):
         index += 1
-    while index < len(value) and _is_grapheme_extend(value[index]):
-        joined = value[index] == _ZWJ
-        index += 1
-        if (
-            joined
-            and index < len(value)
-            and _in_ranges(ord(value[index]), EXTENDED_PICTOGRAPHIC)
-        ):
-            index += 1
-    return index
+    return index + 1
 
 
 def clip_to_grapheme_limit(value: str, limit: int) -> str:
-    """Corta por límite de grafema; no parte tags 🏴…󠁿 ni ZWJ/tono/VS."""
+    """Corta en frontera UAX #29 (tablas GCB + InCB de Unicode 16.0.0)."""
 
     if limit <= 0:
         return ""

@@ -321,8 +321,8 @@ def _dup_name(name: str, number: int) -> str:
     if budget < 0:
         return suffix[:120]
     if len(name) <= budget:
-        return name + suffix
-    return clip_to_grapheme_limit(name, budget) + suffix
+        return name.rstrip() + suffix
+    return clip_to_grapheme_limit(name, budget).rstrip() + suffix
 
 
 async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:

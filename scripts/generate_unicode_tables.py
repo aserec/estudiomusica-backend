@@ -4,7 +4,7 @@
 Uso: uv run python scripts/generate_unicode_tables.py
 
 Fuentes: DerivedJoiningType.txt, emoji-data.txt, DerivedGeneralCategory.txt,
-emoji-zwj-sequences.txt.
+emoji-zwj-sequences.txt, GraphemeBreakProperty.txt, IndicConjunctBreak.txt.
 """
 
 from __future__ import annotations
@@ -91,10 +91,34 @@ def parse_assigned(path: Path) -> tuple[tuple[int, int], ...]:
     return _merge(ranges)
 
 
+def parse_incb(path: Path, value: str) -> tuple[tuple[int, int], ...]:
+    """Indic_Conjunct_Break (InCB; Linker|Consonant|Extend)."""
+
+    ranges: list[tuple[int, int]] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("@"):
+            continue
+        codes, _, rest = line.partition(";")
+        fields = [part.strip() for part in rest.split(";")]
+        if len(fields) < 2 or fields[0] != "InCB" or fields[1] != value:
+            continue
+        token = codes.strip()
+        if ".." in token:
+            start_s, end_s = token.split("..", 1)
+            ranges.append((_parse_code(start_s), _parse_code(end_s)))
+        else:
+            code = _parse_code(token)
+            ranges.append((code, code))
+    return _merge(ranges)
+
+
 def parse_tables(ucd_dir: Path) -> dict[str, tuple[tuple[int, int], ...]]:
     joining = ucd_dir / "DerivedJoiningType.txt"
     emoji = ucd_dir / "emoji-data.txt"
     category = ucd_dir / "DerivedGeneralCategory.txt"
+    grapheme = ucd_dir / "GraphemeBreakProperty.txt"
+    incb = ucd_dir / "IndicConjunctBreak.txt"
     return {
         "JOINING_L": parse_ucd_property(joining, "L"),
         "JOINING_D": parse_ucd_property(joining, "D"),
@@ -104,6 +128,17 @@ def parse_tables(ucd_dir: Path) -> dict[str, tuple[tuple[int, int], ...]]:
         "EMOJI_PRESENTATION": parse_ucd_property(emoji, "Emoji_Presentation"),
         "EMOJI_MODIFIER_BASE": parse_ucd_property(emoji, "Emoji_Modifier_Base"),
         "ASSIGNED": parse_assigned(category),
+        "GRAPHEME_PREPEND": parse_ucd_property(grapheme, "Prepend"),
+        "GRAPHEME_EXTEND": parse_ucd_property(grapheme, "Extend"),
+        "GRAPHEME_SPACINGMARK": parse_ucd_property(grapheme, "SpacingMark"),
+        "GRAPHEME_L": parse_ucd_property(grapheme, "L"),
+        "GRAPHEME_V": parse_ucd_property(grapheme, "V"),
+        "GRAPHEME_T": parse_ucd_property(grapheme, "T"),
+        "GRAPHEME_LV": parse_ucd_property(grapheme, "LV"),
+        "GRAPHEME_LVT": parse_ucd_property(grapheme, "LVT"),
+        "INCB_LINKER": parse_incb(incb, "Linker"),
+        "INCB_CONSONANT": parse_incb(incb, "Consonant"),
+        "INCB_EXTEND": parse_incb(incb, "Extend"),
     }
 
 
@@ -121,7 +156,8 @@ def render(tables: dict[str, tuple[tuple[int, int], ...]]) -> str:
         '"""Tablas UCD congeladas. Generado; no editar a mano.',
         "",
         f"Fuente: Unicode {UCD_VERSION}.",
-        "DerivedJoiningType.txt, emoji-data.txt, DerivedGeneralCategory.txt.",
+        "DerivedJoiningType.txt, emoji-data.txt, DerivedGeneralCategory.txt,",
+        "GraphemeBreakProperty.txt, IndicConjunctBreak.txt.",
         '"""',
         "",
         f'UCD_VERSION = "{UCD_VERSION}"',

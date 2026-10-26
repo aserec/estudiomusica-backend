@@ -7,6 +7,11 @@ from app.schemas.unicode_props import (
     EMOJI_MODIFIER_BASE,
     EMOJI_PRESENTATION,
     EXTENDED_PICTOGRAPHIC,
+    GRAPHEME_EXTEND,
+    GRAPHEME_PREPEND,
+    GRAPHEME_SPACINGMARK,
+    INCB_CONSONANT,
+    INCB_LINKER,
     JOINING_D,
     JOINING_L,
     JOINING_R,
@@ -32,6 +37,15 @@ def test_generated_unicode_tables_match_vendored_ucd() -> None:
     assert any(start <= 0x1F469 <= end for start, end in EMOJI_MODIFIER_BASE)
     assert any(start <= 0x261D <= end for start, end in EMOJI_MODIFIER_BASE)
     assert tables["ASSIGNED"] == ASSIGNED
+    assert tables["GRAPHEME_PREPEND"] == GRAPHEME_PREPEND
+    assert tables["GRAPHEME_EXTEND"] == GRAPHEME_EXTEND
+    assert tables["GRAPHEME_SPACINGMARK"] == GRAPHEME_SPACINGMARK
+    assert tables["INCB_LINKER"] == INCB_LINKER
+    assert tables["INCB_CONSONANT"] == INCB_CONSONANT
+    assert any(start <= 0x0600 <= end for start, end in GRAPHEME_PREPEND)
+    assert any(start <= 0x0E33 <= end for start, end in GRAPHEME_SPACINGMARK)
+    assert any(start <= 0x094D <= end for start, end in INCB_LINKER)
+    assert any(start <= 0x200C <= end for start, end in GRAPHEME_EXTEND)
     assert not any(start <= 0x088F <= end for start, end in ASSIGNED)
     assert not any(start <= 0x1ACF <= end for start, end in ASSIGNED)
     assert not any(start <= 0x1FAEF <= end for start, end in ASSIGNED)
