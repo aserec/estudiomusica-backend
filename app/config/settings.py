@@ -93,10 +93,13 @@ class Settings(BaseSettings):
     auth_argon2_parallelism: int = Field(default=4, ge=1)
 
     def __init__(self, **data: Any) -> None:
+        redacted: ValidationError | None = None
         try:
             super().__init__(**data)
         except ValidationError as exc:
-            raise _validation_error_without_secrets(exc) from None
+            redacted = _validation_error_without_secrets(exc)
+        if redacted is not None:
+            raise redacted
 
     def cors_origin_list(self) -> list[str]:
         return [
@@ -382,7 +385,18 @@ def _validation_error_without_secrets(exc: ValidationError) -> ValidationError:
     except Exception:
         return ValidationError.from_exception_data(
             exc.title,
-            [{"type": "value_error", "loc": ("database_url",), "input": None}],
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("settings",),
+                    "input": None,
+                    "ctx": {
+                        "error": ValueError(
+                            "no se pudo reescribir el error de validación sin secretos"
+                        )
+                    },
+                }
+            ],
             hide_input=True,
         )
 

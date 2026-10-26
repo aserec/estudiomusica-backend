@@ -689,6 +689,53 @@ def test_validation_error_redacts_dsn_without_scheme(
     get_settings.cache_clear()
 
 
+def test_validation_error_fallback_does_not_blame_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import settings as settings_mod
+
+    real = ValidationError.from_exception_data
+    state = {"n": 0}
+
+    def flaky(
+        title: str,
+        line_errors: list[object],
+        hide_input: bool = False,
+    ) -> ValidationError:
+        state["n"] += 1
+        if state["n"] == 1:
+            raise RuntimeError("cannot rebuild")
+        return real(title, line_errors, hide_input=hide_input)
+
+    monkeypatch.setattr(settings_mod.ValidationError, "from_exception_data", flaky)
+    with pytest.raises(ValidationError) as caught:
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://app:s3cret@db.example:5432/app_test",
+            _env_file=None,
+        )
+    dumped = caught.value.json()
+    assert "settings" in dumped
+    assert '"database_url"' not in dumped
+    assert "sin secretos" in str(caught.value)
+
+
+def test_validation_error_does_not_keep_secret_in_exception_context() -> None:
+    leaked = "context-leak-secret-too-short"
+    with pytest.raises(ValidationError) as caught:
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://app:s3cret@db.example:5432/app",
+            auth_secret=leaked,
+            _env_file=None,
+        )
+    exc = caught.value
+    assert exc.__context__ is None
+    assert exc.__cause__ is None
+    assert leaked not in str(exc)
+    assert leaked not in repr(exc)
+
+
 def test_validation_error_errors_and_json_redact_auth_secret_type_error() -> None:
     """K2: un error de tipo no debe filtrar auth_secret en json()/errors()."""
 

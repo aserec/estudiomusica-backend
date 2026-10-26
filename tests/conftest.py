@@ -40,8 +40,8 @@ DOWN_DATABASE_URL = (
 UNUSED_DATABASE_URL = "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused"
 PRODUCTION_AUTH_SECRET = "production-test-auth-secret-at-least-32ch"
 # Sufijo con pid: el pytest hijo de leftovers ejecuta migrated_test_database
-# y haría DROP ROLE. #94 (46ec42b) cambia el fixture a scope=function; aquí
-# el padre y el hijo no comparten nombre, así no chocan.
+# y haría DROP ROLE. El padre y el hijo no comparten nombre, así no chocan.
+# Tras un crash, el setup borra los em_prod_tests_<pid> cuyo proceso no vive.
 _PRODUCTION_TEST_ROLE_PREFIX = "em_prod_tests_"
 PRODUCTION_TEST_USER = f"{_PRODUCTION_TEST_ROLE_PREFIX}{os.getpid()}"
 _PRODUCTION_TEST_EMAIL_PREFIX = "prod-"
@@ -656,8 +656,8 @@ def production_client(
     """Cliente production contra la base ``*_test``, sin credenciales por defecto.
 
     ``APP_ENV=production``, ``AUTH_SECRET`` fuerte y DSN de ``estudiomusica_test``
-    (o ``TEST_DATABASE_URL``) con el rol ``em_prod_tests``. El DSN viaja como
-    ``RedactedDsn`` para no filtrar la contraseña con ``--showlocals``.
+    (o ``TEST_DATABASE_URL``) con el rol ``em_prod_tests_<pid>``. El DSN viaja
+    como ``RedactedDsn`` para no filtrar la contraseña con ``--showlocals``.
     """
 
     monkeypatch.setattr("app.config.settings.allow_test_database", lambda: True)
