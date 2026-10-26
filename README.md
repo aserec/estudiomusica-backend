@@ -67,7 +67,7 @@ La sonda de Postgres es `GET /api/v1/health/db` (también hay alias en `GET /hea
 curl -i http://127.0.0.1:8000/api/v1/health/db
 ```
 
-Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde o la sonda supera `DB_HEALTH_TIMEOUT` (2 s por defecto), HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, code, fields}` de las rutas de negocio. El tiempo total de la petición no supera `DB_HEALTH_TIMEOUT` más 0,4 s (`HEALTH_TIMEOUT_MARGIN_SECONDS`): un close/reset congelado se abandona (terminate + invalidate) sin bloquear la respuesta. En el caso sano la conexión vuelve al pool. `GET /health/db` en la raíz es el alias de sonda; no aparece en OpenAPI.
+Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde o la sonda supera `DB_HEALTH_TIMEOUT` (2 s por defecto), HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, code, fields}` de las rutas de negocio. La sonda abre **una** conexión asyncpg propia (sin el pool de la app ni `pre_ping`; el `SELECT 1` es el ping), con los mismos parámetros de DSN que el motor (`create_connect_args` del dialecto) más `timeout` / `command_timeout` / `application_name`. Las peticiones concurrentes esperan esa sonda (`asyncio.shield`) con su propio `DB_HEALTH_TIMEOUT`. El resultado se cachea `DB_HEALTH_CACHE_TTL` segundos (1 s por defecto; `0` lo desactiva). Un connect/SELECT/close congelado se abandona con `Connection.terminate`. `GET /health/db` en la raíz es el alias de sonda; no aparece en OpenAPI.
 
 Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
@@ -103,7 +103,7 @@ DELETE /api/v1/admin/system-roles/{id}   409 si isSystem o está en uso
 GET    /api/v1/courses/{courseId}/me/permissions
 ```
 
-`GET /admin/system-roles` exige `site:manage-admins` (solo admin). Un no-admin recibe `403 {error: forbidden}`. Sin sesión o token inválido: `401 {error: unauthorized}`. Desactivar un rol impide asignarlo a usuarios nuevos; quienes ya lo tienen lo conservan. Desactivar `admin` o DELETE de un rol sembrado responde `409 {error: system_role_protected}`.
+`GET /admin/system-roles` exige `site:manage-admins` (solo admin). Un no-admin recibe `403 {error: forbidden}`. Sin sesión o token inválido: `401 {error: unauthorized}`. Desactivar un rol con usuarios es válido: quienes ya lo tienen lo conservan (aunque quede inactivo). Asignar un rol inactivo responde `409 {error: role_not_assignable}`. `assign_system_role` bloquea el destino `FOR SHARE` (y relee `active`); el PATCH bloquea `FOR UPDATE`, para no clavar a alguien en un rol que se está desactivando. Desactivar `admin` o DELETE de un rol sembrado responde `409 {error: system_role_protected}`.
 
 Dependencias reutilizables: `require_site_permission(...)` y `require_course_permission(...)` (leen `course_id` del path). La asignación de matrícula queda fuera de este ticket (#403). El TODO(#306) de visibilidad multimedia/SM3 del profesor adjunto es el flag `ASSISTANT_MEDIA_AND_SM3_VISIBLE` (por defecto `false`); no se ha inventado un permiso nuevo.
 
@@ -120,7 +120,7 @@ PUT    /api/v1/admin/categories/{id}         {name?, parentId?, description?, so
 DELETE /api/v1/admin/categories/{id}         409 si tiene hijas o cursos
 ```
 
-El ticket #400 pedía PATCH. Se mantiene **PUT** (convención #91) pero **parcial**: un campo omitido no cambia. `PUT {name}` no mueve a la raíz ni borra `description`. Para quitar el padre o la description hay que enviar `null` explícito (`model_fields_set`). El listado no pagina. Nombre: NFC, espacios colapsados, citext (sin distinguir mayúsculas), único entre hermanos vigentes. DELETE es lógico (`deleted_at`). `409 {error: category_not_empty}` si hay hijas vigentes o cursos vigentes; lo mismo al cambiar `parentId` de una categoría con cursos. `409 {error: category_name_taken}` si el nombre ya existe en el mismo padre. Los POST/PUT que fijan o cambian `parentId` toman `pg_advisory_xact_lock(400, 1)` sobre el árbol.
+El ticket #400 pedía PATCH. Se mantiene **PUT** (convención #91) pero **parcial**: un campo omitido no cambia. `PUT {name}` no mueve a la raíz ni borra `description`. Para quitar el padre o la description hay que enviar `null` explícito (`model_fields_set`). El listado no pagina. Nombre: NFC, espacios colapsados, citext (sin distinguir mayúsculas), único entre hermanos vigentes por clave sin Cf (`name_key`). DELETE es lógico (`deleted_at`). `409 {error: category_not_empty}` si hay hijas vigentes o cursos vigentes; lo mismo al cambiar `parentId` de una categoría con cursos. `409 {error: category_name_taken}` si el nombre ya existe en el mismo padre. Los POST/PUT que fijan o cambian `parentId` y el DELETE toman `pg_advisory_xact_lock(400, 1)` sobre el árbol; al validar el padre se hace `SELECT … FOR SHARE`.
 
 `0004_course_categories` crea `categories` (`id`, `name`, `parent_id`, `description`, `sort_order`, timestamps, `deleted_at`) y el trigger `updated_at`. `courses.category_id` (0005) apunta a esta tabla.
 
@@ -158,7 +158,7 @@ postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
 docker compose up -d
 ```
 
-Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings exige usuario, contraseña y base **explícitos** en el DSN (no se heredan de `PGUSER` / `PGPASSWORD` / `PGDATABASE`; asyncpg usaría el usuario como nombre de base) y rechaza la contraseña por defecto, el usuario por defecto (`estudiomusica`, p. ej. `estudiomusica:otra@…`, también en la query) y las bases `*_test` (path o query, sin distinguir mayúsculas, p. ej. `x_TEST`). Los tests de production activan un opt-in (`allow_test_database`) que **no** lee el entorno. En development un DSN sin credenciales sí puede heredar `PGUSER`/`PGPASSWORD`. Los errores de validación no muestran el DSN ni `AUTH_SECRET` (`hide_input_in_errors`; tampoco en `.errors()` / `.json()`). Espera a que el healthcheck esté sano:
+Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings exige usuario, contraseña y base **explícitos** en el DSN (no se heredan de `PGUSER` / `PGPASSWORD` / `PGDATABASE`; asyncpg usaría el usuario como nombre de base) y rechaza la contraseña por defecto, el usuario por defecto (`estudiomusica`, p. ej. `estudiomusica:otra@…`, también en la query) y las bases `*_test` (path o query, sin distinguir mayúsculas, p. ej. `x_TEST`). También rechaza autenticación peer, `.pgpass` (`passfile`) y certificado de cliente (`sslcert` / `sslkey` / `sslpassword` / `sslrootcert`). Los overrides de query (`password`, `user`, `database`, `dbname`) se aplican antes de validar. `sslmode=` de la query se traduce a `ssl=` (asyncpg no acepta `sslmode` como kwarg). Los tests de production activan un opt-in (`allow_test_database`) que **no** lee el entorno. En development un DSN sin credenciales sí puede heredar `PGUSER`/`PGPASSWORD`. Los errores de validación no muestran el DSN ni `AUTH_SECRET` (`hide_input_in_errors`; tampoco en `.errors()` / `.json()`). Espera a que el healthcheck esté sano:
 
 ```bash
 docker compose ps
@@ -176,7 +176,7 @@ Para revertirlas del todo:
 uv run alembic downgrade base
 ```
 
-Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations`). Van en el wheel con el paquete `app`. La fuente de verdad es `app/alembic.ini`. El `alembic.ini` de la raíz es un fichero regular (no un symlink) que delega en el paquete para que `uv run alembic` funcione en el repo y el sdist no lleve enlaces.
+Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations`). Van en el wheel con el paquete `app`. La fuente de verdad es `app/alembic.ini`. El `alembic.ini` de la raíz es un fichero regular (no un symlink) con las mismas claves operativas para que `uv run alembic` funcione en el repo y el sdist no lleve enlaces.
 
 Desde el paquete instalado, en un directorio **sin** un `app/` local (`python -c` y `python -m alembic` importan el `app/` del CWD):
 
@@ -222,7 +222,6 @@ El fixture `production_client` crea el rol `em_prod_tests` (LOGIN, **sin** SUPER
 - `USAGE` en el esquema `public`
 - `SELECT, INSERT, UPDATE, DELETE` en las tablas de `public` (`users`, `auth_sessions`, `system_roles`, `course_memberships`, `categories`)
 - `USAGE, SELECT` en las secuencias de `public`
-- `USAGE` en el tipo `citext` (email y `categories.name`)
 
 No puede migrar ni crear bases. Las filas de esos tests (`prod-%@example.com`) se borran al terminar.
 
@@ -339,7 +338,7 @@ app/
 docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
 tests/               # Tests de pytest (convenciones + BD aislada)
 docker-compose.yml   # Postgres 17 en 127.0.0.1:5432 (sin container_name fijo)
-alembic.ini          # CLI del repo (delegado; no es un symlink)
+alembic.ini          # CLI del repo (copia regular; no es un symlink)
 .env.example         # Plantilla de variables de entorno
 pyproject.toml       # Dependencias, ruff, pytest y mypy
 uv.lock              # Lockfile reproducible de uv

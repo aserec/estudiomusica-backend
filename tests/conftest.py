@@ -546,13 +546,6 @@ def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
                         f"TO {role}"
                     )
                 )
-                citext = await connection.scalar(
-                    text("SELECT 1 FROM pg_type WHERE typname = 'citext'")
-                )
-                if citext is not None:
-                    await connection.execute(
-                        text(f"GRANT USAGE ON TYPE citext TO {role}")
-                    )
         finally:
             await engine.dispose()
 
@@ -858,10 +851,10 @@ def drop_database_if_exists(database_url: str | RedactedDsn) -> None:
         if _is_connection_error(exc):
             raise ConnectionError(
                 f"No se pudo borrar la base de test ({type(exc).__name__}). {dsn}"
-            ) from None
+            ) from exc
         raise RuntimeError(
             f"No se pudo borrar la base de test ({type(exc).__name__}). {dsn}"
-        ) from None
+        ) from exc
 
 
 def _ping_postgres(database_url: str | RedactedDsn) -> None:
@@ -953,6 +946,7 @@ _LEFTOVER_TEST_DATABASES = (
     "autogen_sa_probe_test",
     "autogen_hook_probe_test",
     "schema_autogen_probe_test",
+    "autogen_empty_probe_test",
 )
 
 
@@ -966,6 +960,7 @@ def _drop_leftover_test_tables(dsn: RedactedDsn) -> None:
                         text(f'DROP TABLE IF EXISTS "{name}" CASCADE')
                     )
                 await connection.execute(text("DROP SCHEMA IF EXISTS catalogo CASCADE"))
+                await connection.execute(text("DROP SCHEMA IF EXISTS ajeno CASCADE"))
         finally:
             await engine.dispose()
 

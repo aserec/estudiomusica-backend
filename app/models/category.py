@@ -2,7 +2,15 @@
 
 import uuid
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, text
+from sqlalchemy import (
+    CheckConstraint,
+    Computed,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    text,
+)
 from sqlalchemy.dialects.postgresql import CITEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,20 +39,25 @@ class Category(PersistentModel):
         ),
         Index(
             "uq_categories_root_name_active",
-            "name",
+            "name_key",
             unique=True,
             postgresql_where=text("deleted_at IS NULL AND parent_id IS NULL"),
         ),
         Index(
-            "uq_categories_parent_name_active",
+            "uq_categories_parent_id_name_key",
             "parent_id",
-            "name",
+            "name_key",
             unique=True,
             postgresql_where=text("deleted_at IS NULL AND parent_id IS NOT NULL"),
         ),
     )
 
     name: Mapped[str] = mapped_column(CITEXT(), nullable=False)
+    name_key: Mapped[str] = mapped_column(
+        CITEXT(),
+        Computed("category_name_key(name)", persisted=True),
+        nullable=False,
+    )
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("categories.id", ondelete="RESTRICT"),
         nullable=True,

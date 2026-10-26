@@ -53,8 +53,11 @@ async def get_system_roles(
     summary="Actualizar un rol de sistema",
     description=(
         "Requiere ``site:manage-admins``. Acepta name, active y sortOrder. "
-        "Desactivar un rol impide asignarlo a usuarios nuevos; los que ya "
-        "lo tienen lo conservan. No cambia isSystem ni el id. "
+        "Desactivar un rol impide asignarlo a usuarios nuevos "
+        "(409 role_not_assignable); los que ya lo tienen lo conservan, "
+        "aunque el rol quede inactivo. El PATCH bloquea la fila "
+        "``FOR UPDATE`` para serializar con una asignación concurrente. "
+        "No cambia isSystem ni el id. "
         "Desactivar ``admin`` responde 409 system_role_protected."
     ),
     responses={

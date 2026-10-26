@@ -3,79 +3,25 @@ import contextlib
 import logging
 from typing import Any
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+import asyncpg  # type: ignore[import-untyped]
+from sqlalchemy.engine.url import make_url
 
 from app.config import get_settings
-from app.db import get_engine
+from app.db import HEALTH_APPLICATION_NAME
 from app.schemas.health import DatabaseHealthResponse, HealthResponse
 
 logger = logging.getLogger(__name__)
 
-# Margen extra sobre ``db_health_timeout`` para abandonar un close/reset
-# congelado. La petición no espera más que timeout + este margen.
+# Tope para el close ordenado. Un close congelado se termina.
 HEALTH_TIMEOUT_MARGIN_SECONDS = 0.4
 
 _cleanup_tasks: set[asyncio.Task[Any]] = set()
-
-
-class _ExpectedTerminateFilter(logging.Filter):
-    """SQLAlchemy registra ERROR+traza al terminar una sonda congelada."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if record.levelno < logging.ERROR:
-            return True
-        try:
-            message = record.getMessage()
-        except Exception:
-            return True
-        if "Exception terminating connection" not in message:
-            return True
-        record.levelno = logging.WARNING
-        record.levelname = "WARNING"
-        record.exc_info = None
-        record.exc_text = None
-        return True
-
-
-def _install_pool_log_filter() -> None:
-    """Los filtros no se heredan: hay que colgarlos del logger que emite."""
-
-    filt = _ExpectedTerminateFilter()
-    names = {
-        "sqlalchemy.pool",
-        "sqlalchemy.pool.base",
-        "sqlalchemy.pool.impl.AsyncAdaptedQueuePool",
-        "sqlalchemy.pool.impl.QueuePool",
-    }
-    manager = logging.root.manager
-    for name, candidate in manager.loggerDict.items():
-        if (
-            isinstance(name, str)
-            and name.startswith("sqlalchemy.pool")
-            and isinstance(candidate, logging.Logger)
-        ):
-            names.add(name)
-    for name in names:
-        pool_logger = logging.getLogger(name)
-        if not any(
-            isinstance(item, _ExpectedTerminateFilter) for item in pool_logger.filters
-        ):
-            pool_logger.addFilter(filt)
-        for handler in pool_logger.handlers:
-            if not any(
-                isinstance(item, _ExpectedTerminateFilter) for item in handler.filters
-            ):
-                handler.addFilter(filt)
-    root = logging.getLogger()
-    for handler in root.handlers:
-        if not any(
-            isinstance(item, _ExpectedTerminateFilter) for item in handler.filters
-        ):
-            handler.addFilter(filt)
-
-
-_install_pool_log_filter()
+_health_url_override: str | None = None
+_held_raw: asyncpg.Connection | None = None
+_probe_task: asyncio.Task[DatabaseHealthResponse] | None = None
+_waiters = 0
+_cache: tuple[float, DatabaseHealthResponse] | None = None
+_lock: asyncio.Lock | None = None
 
 
 def check_health() -> HealthResponse:
@@ -84,37 +30,41 @@ def check_health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
-def _driver_terminate(connection: AsyncConnection) -> None:
-    sync_connection = connection.sync_connection
-    if sync_connection is None:
-        return
-    proxied = getattr(sync_connection, "_dbapi_connection", None)
-    driver = None
-    if proxied is not None:
-        driver = getattr(proxied, "driver_connection", None)
+def set_health_database_url(url: str | None) -> None:
+    """DSN solo para la sonda. ``None`` vuelve a ``Settings``."""
+
+    global _health_url_override, _cache
+    _health_url_override = url
+    _cache = None
+
+
+def _health_dsn() -> str:
+    return _health_url_override or get_settings().resolved_database_url()
+
+
+def _terminate_driver_object(driver: object) -> None:
     terminate = getattr(driver, "terminate", None)
     if callable(terminate):
         terminate()
 
 
-def _abandon_health_connection(connection: AsyncConnection) -> None:
-    """Descarta la sonda sin un ``close()`` ordenado.
+def _raw_is_open(connection: asyncpg.Connection | None) -> bool:
+    if connection is None:
+        return False
+    is_closed = getattr(connection, "is_closed", None)
+    if callable(is_closed):
+        try:
+            return not bool(is_closed())
+        except Exception:
+            return True
+    return True
 
-    No toca ``Connection.connection``: ese property revalida y lanza
-    ``PendingRollbackError``. Se termina el driver (sin await) y se
-    invalida. Solo en timeout o error: el caso sano devuelve al pool.
-    """
 
-    try:
-        with contextlib.suppress(Exception, asyncio.CancelledError):
-            _driver_terminate(connection)
-        sync_connection = connection.sync_connection
-        if sync_connection is None:
-            return
-        with contextlib.suppress(Exception, asyncio.CancelledError):
-            sync_connection.invalidate()
-    except Exception, asyncio.CancelledError:
-        return
+def _abandon_health_connection(connection: object) -> None:
+    """Termina el driver asyncpg sin ``close()`` ordenado."""
+
+    with contextlib.suppress(Exception, asyncio.CancelledError):
+        _terminate_driver_object(connection)
 
 
 def _track_cleanup(task: asyncio.Task[Any]) -> None:
@@ -132,22 +82,16 @@ def _track_cleanup(task: asyncio.Task[Any]) -> None:
     task.add_done_callback(_consume)
 
 
-def _release_stuck_checkouts(engine: AsyncEngine) -> None:
-    """Suelta checkouts congelados sin esperar un close ordenado."""
-
-    with contextlib.suppress(Exception, asyncio.CancelledError):
-        engine.sync_engine.dispose(close=False)
-
-
 def _abandon_probe(
-    engine: AsyncEngine,
-    connection: AsyncConnection | None,
+    connection: object | None,
     task: asyncio.Task[Any],
 ) -> None:
+    global _held_raw
     if connection is not None:
         _abandon_health_connection(connection)
-    else:
-        _release_stuck_checkouts(engine)
+    if _raw_is_open(_held_raw) and _held_raw is not connection:
+        _abandon_health_connection(_held_raw)
+    _held_raw = None
     if task.done():
         with contextlib.suppress(Exception, asyncio.CancelledError):
             task.exception()
@@ -156,62 +100,119 @@ def _abandon_probe(
     _track_cleanup(task)
 
 
+def _connect_kwargs() -> dict[str, Any]:
+    """Parámetros de asyncpg: los del dialecto de la app más tope de la sonda."""
+
+    from app.db import get_engine
+
+    settings = get_settings()
+    url = make_url(_health_dsn())
+    _args, opts = get_engine().sync_engine.dialect.create_connect_args(url)
+    kwargs = dict(opts)
+    sslmode = kwargs.pop("sslmode", None)
+    if sslmode is not None and "ssl" not in kwargs:
+        kwargs["ssl"] = sslmode
+    kwargs["timeout"] = settings.db_connect_timeout
+    kwargs["command_timeout"] = settings.db_command_timeout
+    server_settings = dict(kwargs.get("server_settings") or {})
+    server_settings["application_name"] = HEALTH_APPLICATION_NAME
+    kwargs["server_settings"] = server_settings
+    return kwargs
+
+
+def clear_health_probe() -> None:
+    """Cierra la sonda residual (síncrono). Lo llama ``clear_engine``."""
+
+    global _held_raw, _health_url_override, _probe_task, _waiters, _cache, _lock
+    if _raw_is_open(_held_raw):
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            _terminate_driver_object(_held_raw)
+    if _probe_task is not None and not _probe_task.done():
+        _probe_task.cancel()
+        _track_cleanup(_probe_task)
+    _held_raw = None
+    _health_url_override = None
+    _probe_task = None
+    _waiters = 0
+    _cache = None
+    _lock = None
+
+
+async def dispose_health_probe() -> None:
+    """Cierra la sonda residual. Lo llama ``dispose_engine``."""
+
+    clear_health_probe()
+
+
+def _cached(now: float, ttl: float) -> DatabaseHealthResponse | None:
+    if ttl <= 0 or _cache is None:
+        return None
+    stamped, result = _cache
+    if now - stamped >= ttl:
+        return None
+    return result
+
+
+async def _run_probe() -> DatabaseHealthResponse:
+    global _held_raw, _cache
+    raw: asyncpg.Connection | None = None
+    try:
+        raw = await asyncpg.connect(**_connect_kwargs())
+        _held_raw = raw
+        await raw.execute("SELECT 1")
+        try:
+            await asyncio.wait_for(raw.close(), timeout=HEALTH_TIMEOUT_MARGIN_SECONDS)
+        except Exception:
+            _abandon_health_connection(raw)
+            raise
+        result = DatabaseHealthResponse(db="ok")
+        _cache = (asyncio.get_running_loop().time(), result)
+        return result
+    except Exception as exc:
+        logger.warning("database health check failed: %s", type(exc).__name__)
+        result = DatabaseHealthResponse(db="down")
+        _cache = (asyncio.get_running_loop().time(), result)
+        return result
+    except BaseException:
+        _abandon_health_connection(raw)
+        raise
+    finally:
+        if raw is not None and _raw_is_open(raw):
+            _abandon_health_connection(raw)
+        if _held_raw is raw:
+            _held_raw = None
+
+
 async def check_database() -> DatabaseHealthResponse:
-    """Comprueba Postgres con ``SELECT 1``.
+    """Una sonda asyncpg a la vez; las peticiones concurrentes esperan.
 
-    Cualquier fallo (incluida la expiración de ``db_health_timeout``) se
-    traduce en ``down``. No se reenvía el mensaje de la excepción.
-    En éxito la conexión vuelve al pool; solo se descarta si falla.
-
-    El tiempo total de la petición queda acotado a ``db_health_timeout``
-    más ``HEALTH_TIMEOUT_MARGIN_SECONDS``. Lo que no termine se abandona
-    (terminate síncrono + invalidate, o dispose del pool si aún no hay
-    ``AsyncConnection``) sin bloquear la respuesta. Las tareas de limpieza
-    se guardan en ``_cleanup_tasks`` para no dejar huérfanas.
+    El DSN se traduce con el dialecto de la app. El resultado se cachea
+    ``db_health_cache_ttl`` segundos. Cada waiter tiene su propio
+    ``db_health_timeout`` sobre ``asyncio.shield`` de la tarea compartida.
     """
 
-    _install_pool_log_filter()
+    global _probe_task, _waiters, _lock
     settings = get_settings()
-    engine = get_engine()
-    connection: AsyncConnection | None = None
-    budget = settings.db_health_timeout + HEALTH_TIMEOUT_MARGIN_SECONDS
-    started = asyncio.get_running_loop().time()
-
-    async def probe() -> None:
-        nonlocal connection
-        connection = await engine.connect()
-        await connection.execute(text("SELECT 1"))
-
-    task = asyncio.create_task(probe())
+    loop = asyncio.get_running_loop()
+    if _lock is None:
+        _lock = asyncio.Lock()
+    async with _lock:
+        cached = _cached(loop.time(), settings.db_health_cache_ttl)
+        if cached is not None:
+            return cached
+        if _probe_task is None or _probe_task.done():
+            _probe_task = asyncio.create_task(_run_probe())
+        task = _probe_task
+        _waiters += 1
     try:
-        await asyncio.wait_for(asyncio.shield(task), timeout=settings.db_health_timeout)
-    except TimeoutError:
-        logger.warning("database health check failed: %s", "TimeoutError")
-        _abandon_probe(engine, connection, task)
-        return DatabaseHealthResponse(db="down")
-    except Exception as exc:
-        logger.warning("database health check failed: %s", type(exc).__name__)
-        _abandon_probe(engine, connection, task)
-        return DatabaseHealthResponse(db="down")
-
-    remaining = budget - (asyncio.get_running_loop().time() - started)
-    if connection is None:
-        return DatabaseHealthResponse(db="ok")
-    close_task = asyncio.create_task(connection.close())
-    try:
-        await asyncio.wait_for(asyncio.shield(close_task), timeout=max(0.05, remaining))
-    except TimeoutError:
-        logger.warning("database health check failed: %s", "TimeoutError")
-        _abandon_health_connection(connection)
-        if not close_task.done():
-            close_task.cancel()
-        _track_cleanup(close_task)
-        return DatabaseHealthResponse(db="down")
-    except Exception as exc:
-        logger.warning("database health check failed: %s", type(exc).__name__)
-        _abandon_health_connection(connection)
-        if not close_task.done():
-            close_task.cancel()
-        _track_cleanup(close_task)
-        return DatabaseHealthResponse(db="down")
-    return DatabaseHealthResponse(db="ok")
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(task), timeout=settings.db_health_timeout
+            )
+        except TimeoutError:
+            logger.warning("database health check failed: %s", "TimeoutError")
+            return DatabaseHealthResponse(db="down")
+    finally:
+        _waiters -= 1
+        if _waiters == 0 and not task.done():
+            _abandon_probe(_held_raw, task)

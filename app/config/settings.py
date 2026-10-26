@@ -65,6 +65,7 @@ class Settings(BaseSettings):
         repr=False,
     )
     db_health_timeout: float = Field(default=2.0, gt=0)
+    db_health_cache_ttl: float = Field(default=1.0, ge=0)
     db_connect_timeout: float = Field(default=2.0, gt=0)
     db_command_timeout: float = Field(default=5.0, gt=0)
     db_pool_size: int = Field(default=5, ge=1)
@@ -128,7 +129,7 @@ class Settings(BaseSettings):
         return self.app_env != "production"
 
     def resolved_database_url(self) -> str:
-        return self.database_url.get_secret_value()
+        return _normalize_sslmode(self.database_url.get_secret_value())
 
     def resolved_auth_secret(self) -> str:
         return self.auth_secret.get_secret_value()
@@ -173,8 +174,9 @@ class Settings(BaseSettings):
         La comparación de usuario y del sufijo ``_test`` no distingue
         mayúsculas (path o query). asyncpg acepta ``password``, ``user``,
         ``database`` y ``dbname`` en la query; se aplican como override
-        antes de validar. Los tests pueden optar in a ``*_test`` con
-        ``allow_test_database`` (no es variable de entorno).
+        antes de validar. También se rechazan peer, ``.pgpass`` y
+        certificado de cliente. Los tests pueden optar in a ``*_test``
+        con ``allow_test_database`` (no es variable de entorno).
         """
 
         if self.app_env == "development":
@@ -215,6 +217,20 @@ class Settings(BaseSettings):
                 "DATABASE_URL no puede apuntar a una base *_test "
                 "fuera de APP_ENV=development"
             )
+        forbidden = (
+            "passfile",
+            "sslcert",
+            "sslkey",
+            "sslpassword",
+            "sslrootcert",
+        )
+        for key in forbidden:
+            if self._query_value(parsed, key) is not None:
+                raise ValueError(
+                    "DATABASE_URL no puede usar autenticación peer, "
+                    ".pgpass ni certificado de cliente "
+                    "fuera de APP_ENV=development"
+                )
         return self
 
     @model_validator(mode="after")
@@ -247,16 +263,51 @@ class Settings(BaseSettings):
         return self.app_env != "development"
 
 
-def _redact_error_input(value: object) -> object:
+def _normalize_sslmode(url: str) -> str:
+    """``sslmode=`` de la query pasa a ``ssl=`` (asyncpg no acepta sslmode)."""
+
+    try:
+        parsed = make_url(url)
+    except Exception:
+        return url
+    sslmode = Settings._query_value(parsed, "sslmode")
+    if sslmode is None:
+        return url
+    query = {
+        key: value
+        for key, value in (parsed.query or {}).items()
+        if str(key).lower() != "sslmode"
+    }
+    query["ssl"] = sslmode
+    return parsed.set(query=query).render_as_string(hide_password=False)
+
+
+_DSN_FIELD_NAMES = frozenset({"database_url", "DATABASE_URL"})
+
+
+def _loc_is_dsn(loc: object) -> bool:
+    if isinstance(loc, (tuple, list)):
+        return any(part in _DSN_FIELD_NAMES for part in loc)
+    return loc in _DSN_FIELD_NAMES
+
+
+def _redact_error_input(value: object, *, dsn_field: bool = False) -> object:
+    """Si el campo es el DSN, se sustituye entero (sin parsear)."""
+
+    if dsn_field:
+        if isinstance(value, dict):
+            return {
+                key: _redact_error_input(item, dsn_field=key in _DSN_FIELD_NAMES)
+                for key, item in value.items()
+            }
+        return "<dsn-redactado>"
     if isinstance(value, SecretStr):
         return "**********"
-    if isinstance(value, str) and "://" in value:
-        try:
-            return make_url(value).render_as_string(hide_password=True)
-        except Exception:
-            return "<dsn-redactado>"
     if isinstance(value, dict):
-        return {key: _redact_error_input(item) for key, item in value.items()}
+        return {
+            key: _redact_error_input(item, dsn_field=key in _DSN_FIELD_NAMES)
+            for key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [_redact_error_input(item) for item in value]
     return value
@@ -267,14 +318,15 @@ def _validation_error_without_secrets(exc: ValidationError) -> ValidationError:
 
     line_errors: list[Any] = []
     for error in exc.errors(include_url=False):
+        dsn_field = _loc_is_dsn(error.get("loc"))
         item: dict[str, Any] = {
             "type": error.get("type", "value_error"),
             "loc": error.get("loc", ()),
-            "input": _redact_error_input(error.get("input")),
+            "input": _redact_error_input(error.get("input"), dsn_field=dsn_field),
         }
         ctx = error.get("ctx")
         if ctx is not None:
-            item["ctx"] = _redact_error_input(ctx)
+            item["ctx"] = _redact_error_input(ctx, dsn_field=dsn_field)
         line_errors.append(item)
     try:
         return ValidationError.from_exception_data(

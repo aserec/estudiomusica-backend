@@ -17,6 +17,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import CITEXT
 
 from app.migrations.ops import op_create_updated_at_trigger, op_drop_updated_at_trigger
+from app.schemas.categories import category_name_key_function_sql
 
 revision: str = "0004_course_categories"
 down_revision: str | None = "0003_system_roles"
@@ -25,6 +26,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    op.execute(sa.text(category_name_key_function_sql()))
     op.create_table(
         "categories",
         sa.Column(
@@ -47,6 +49,12 @@ def upgrade() -> None:
         ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("name", CITEXT(), nullable=False),
+        sa.Column(
+            "name_key",
+            CITEXT(),
+            sa.Computed("category_name_key(name)", persisted=True),
+            nullable=False,
+        ),
         sa.Column("parent_id", sa.Uuid(), nullable=True),
         sa.Column("description", sa.String(length=2000), nullable=True),
         sa.Column(
@@ -83,14 +91,14 @@ def upgrade() -> None:
     op.create_index(
         "uq_categories_root_name_active",
         "categories",
-        ["name"],
+        ["name_key"],
         unique=True,
         postgresql_where=sa.text("deleted_at IS NULL AND parent_id IS NULL"),
     )
     op.create_index(
-        "uq_categories_parent_name_active",
+        "uq_categories_parent_id_name_key",
         "categories",
-        ["parent_id", "name"],
+        ["parent_id", "name_key"],
         unique=True,
         postgresql_where=sa.text("deleted_at IS NULL AND parent_id IS NOT NULL"),
     )
@@ -100,7 +108,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op_drop_updated_at_trigger("categories")
     op.drop_index(
-        "uq_categories_parent_name_active",
+        "uq_categories_parent_id_name_key",
         table_name="categories",
         if_exists=True,
     )
@@ -120,3 +128,4 @@ def downgrade() -> None:
         if_exists=True,
     )
     op.drop_table("categories")
+    op.execute(sa.text("DROP FUNCTION IF EXISTS category_name_key(citext)"))

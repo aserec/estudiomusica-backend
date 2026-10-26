@@ -279,6 +279,62 @@ def test_production_rejects_query_password_override(
     get_settings.cache_clear()
 
 
+def test_production_rejects_uppercase_query_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q5: la clave de query no distingue mayúsculas (``Password=``)."""
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?Password=estudiomusica",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="contraseña"):
+        Settings()
+    get_settings.cache_clear()
+
+
+def test_resolved_url_translates_sslmode_to_ssl() -> None:
+    from sqlalchemy.dialects.postgresql.asyncpg import PGDialect_asyncpg
+    from sqlalchemy.engine.url import make_url
+
+    settings = Settings(
+        database_url=(
+            "postgresql+asyncpg://app:s3cret@127.0.0.1:5432/app?sslmode=require"
+        )
+    )
+    parsed = make_url(settings.resolved_database_url())
+    query = {str(key).lower(): value for key, value in parsed.query.items()}
+    assert query.get("ssl") == "require"
+    assert "sslmode" not in query
+    dialect = PGDialect_asyncpg()  # type: ignore[no-untyped-call]
+    _args, opts = dialect.create_connect_args(parsed)  # type: ignore[no-untyped-call]
+    assert opts.get("ssl") == "require"
+    assert "sslmode" not in opts
+
+
+def test_production_rejects_client_cert_and_passfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?sslcert=/tmp/c.pem",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="certificado|pgpass|peer"):
+        Settings()
+    get_settings.cache_clear()
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?passfile=/tmp/.pgpass",
+    )
+    with pytest.raises(ValidationError, match="certificado|pgpass|peer"):
+        Settings()
+    get_settings.cache_clear()
+
+
 def test_production_rejects_query_user_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -384,6 +440,44 @@ def test_production_rejects_dsn_without_database_with_test_user(
     get_settings.cache_clear()
 
 
+def test_production_rejects_dsn_without_password_despite_pgpassword(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S4: en producción no se hereda PGPASSWORD."""
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("PGPASSWORD", "from-env-secret")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app@db.example:5432/app",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="contraseña") as caught:
+        Settings()
+    assert "from-env-secret" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_production_rejects_dsn_without_user_despite_pguser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S6: en producción no se hereda PGUSER."""
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("PGUSER", "from-env-user")
+    monkeypatch.setenv("PGPASSWORD", "from-env-secret")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://:s3cret@db.example:5432/app",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="usuario") as caught:
+        Settings()
+    assert "from-env-secret" not in str(caught.value)
+    assert "s3cret" not in str(caught.value)
+    get_settings.cache_clear()
+
+
 def test_development_allows_dsn_without_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -397,6 +491,60 @@ def test_development_allows_dsn_without_credentials(
     get_settings.cache_clear()
     settings = Settings()
     assert "127.0.0.1:5432/estudiomusica" in settings.resolved_database_url()
+    get_settings.cache_clear()
+
+
+def _assert_secret_redacted(exc: ValidationError) -> None:
+    dumped = exc.json()
+    assert _SECRET not in dumped
+    assert _SECRET not in str(exc)
+    assert _SECRET not in repr(exc)
+    for error in exc.errors():
+        assert _SECRET not in str(error.get("input"))
+        assert _SECRET not in repr(error.get("input"))
+        assert _SECRET not in repr(error.get("ctx"))
+
+
+def test_validation_error_redacts_query_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        f"postgresql+asyncpg://app@db.example:5432/app_test?password={_SECRET}",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    _assert_secret_redacted(caught.value)
+    get_settings.cache_clear()
+
+
+def test_validation_error_redacts_query_dsn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:ok@db.example:5432/app_test"
+        f"?dsn=postgresql://u:{_SECRET}@h/x",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    _assert_secret_redacted(caught.value)
+    get_settings.cache_clear()
+
+
+def test_validation_error_redacts_dsn_without_scheme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATABASE_URL", f"u:{_SECRET}@h/app")
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    _assert_secret_redacted(caught.value)
     get_settings.cache_clear()
 
 
