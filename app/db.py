@@ -101,6 +101,8 @@ def ssl_context_from_rootcert(cafile: str, ssl_value: object = None) -> ssl.SSLC
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_REQUIRED
         return ctx
+    # ssl=require + sslrootcert también verifica el hostname; más estricto
+    # que libpq (require no comprueba CA ni hostname).
     ctx.check_hostname = mode not in {"disable", "allow"}
     ctx.verify_mode = ssl.CERT_REQUIRED
     return ctx

@@ -1558,6 +1558,43 @@ def test_require_freeze_tests_converts_skip_to_failure(
         _maybe_skip_hostssl("el servidor rechaza ssl=disable (hostssl)")
 
 
+@pytest.mark.db
+def test_hostssl_helper_does_not_skip_on_plain_host(
+    require_postgres: RedactedDsn,
+) -> None:
+    """K1 en host: ssl=False con éxito no salta. En hostssl real, skip."""
+
+    try:
+        _skip_if_hostssl_rejects_plain(require_postgres)
+    except pytest.skip.Exception as skipped:
+        pytest.skip(
+            f"{skipped}; K1 en hostssl real exige REQUIRE_FREEZE_TESTS"
+        )
+
+
+def test_hostssl_helper_reraises_other_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K2: un error que no es 28000/no encryption no se convierte en skip."""
+
+    class _Other(Exception):
+        sqlstate = "28P01"
+
+        def __str__(self) -> str:
+            return "password authentication failed"
+
+    async def _boom(*_a: object, **_k: object) -> object:
+        raise _Other()
+
+    import asyncpg
+
+    monkeypatch.setattr(asyncpg, "connect", _boom)
+    with pytest.raises(_Other):
+        _skip_if_hostssl_rejects_plain(
+            RedactedDsn("postgresql+asyncpg://u:p@127.0.0.1:1/db_test")
+        )
+
+
 @pytest.fixture(scope="session")
 def tls_postgres(
     tmp_path_factory: pytest.TempPathFactory,
@@ -1747,6 +1784,82 @@ def test_asyncpg_url_translates_sslmode(tmp_path: Any) -> None:
     )
     assert "sslmode=" not in plain.lower()
     assert plain_args.get("ssl") is False
+
+
+def test_sslrootcert_and_sslmode_are_case_insensitive(tmp_path: Any) -> None:
+    """S2a/S4a: ``SSLROOTCERT`` / ``SSLMODE`` se traducen igual."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import asyncpg_url_and_connect_args, prepare_asyncpg_connect_kwargs
+
+    cafile = _write_unrelated_ca(Path(str(tmp_path)) / "case-ca.pem")
+    kwargs = prepare_asyncpg_connect_kwargs(
+        {"host": "127.0.0.1", "SSL": "verify-full", "SSLROOTCERT": str(cafile)}
+    )
+    assert "sslrootcert" not in {str(key).lower() for key in kwargs}
+    assert isinstance(kwargs["ssl"], ssl_mod.SSLContext)
+    url, args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test"
+        f"?SSLMODE=verify-full&SSLROOTCERT={cafile}"
+    )
+    assert "sslmode=" not in url.lower()
+    assert "sslrootcert=" not in url.lower()
+    assert isinstance(args.get("ssl"), ssl_mod.SSLContext)
+
+
+def test_ssl_require_with_rootcert_checks_hostname(tmp_path: Any) -> None:
+    """T1/T11: ``ssl=require`` + CA verifica hostname (más estricto que libpq)."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import ssl_context_from_rootcert
+
+    cafile = str(_write_unrelated_ca(Path(str(tmp_path)) / "require-ca.pem"))
+    require = ssl_context_from_rootcert(cafile, "require")
+    mixed = ssl_context_from_rootcert(cafile, "Require")
+    full = ssl_context_from_rootcert(cafile, "verify-full")
+    verify_ca = ssl_context_from_rootcert(cafile, "verify-ca")
+    assert require.check_hostname is True
+    assert mixed.check_hostname is True
+    assert require.verify_mode == ssl_mod.CERT_REQUIRED
+    assert full.check_hostname is True
+    assert verify_ca.check_hostname is False
+
+
+@pytest.mark.db
+@pytest.mark.timeout(60)
+def test_ssl_require_rootcert_rejects_hostname_mismatch(
+    tls_postgres: tuple[Any, Any, str],
+) -> None:
+    """T1/T11: hostname distinto con ``ssl=require`` + CA no conecta."""
+
+    import ssl as ssl_mod
+    import socket as sock
+
+    from sqlalchemy.engine.url import make_url
+
+    from app.db import ssl_context_from_rootcert
+
+    cafile, _bad_ca, dsn = tls_postgres
+    parsed = make_url(dsn)
+    host = str(parsed.host or "127.0.0.1")
+    port = int(parsed.port or 5432)
+    ctx = ssl_context_from_rootcert(str(cafile), "require")
+    raw = sock.create_connection((host, port), timeout=3)
+    try:
+        with pytest.raises(ssl_mod.SSLError):
+            ctx.wrap_socket(raw, server_hostname="wrong.example")
+    finally:
+        raw.close()
+    matched = sock.create_connection((host, port), timeout=3)
+    try:
+        wrapped = ctx.wrap_socket(matched, server_hostname=host)
+        wrapped.close()
+    finally:
+        matched.close()
 
 
 @pytest.mark.db
