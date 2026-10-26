@@ -344,8 +344,37 @@ def _iter_dependants(dependant: Any) -> Any:
         yield from _iter_dependants(child)
 
 
+def _route_returns_streaming(route: Any) -> bool:
+    from typing import get_args, get_origin, get_type_hints
+
+    from fastapi.responses import StreamingResponse
+    from starlette.responses import StreamingResponse as StarletteStreaming
+
+    response_class = getattr(route, "response_class", None)
+    if isinstance(response_class, type) and issubclass(
+        response_class, StarletteStreaming
+    ):
+        return True
+    endpoint = getattr(route, "endpoint", None)
+    if endpoint is None:
+        return False
+    returned = get_type_hints(endpoint).get("return")
+    if returned is StreamingResponse or returned is StarletteStreaming:
+        return True
+    origin = get_origin(returned)
+    if origin is None:
+        return False
+    return any(
+        arg is StreamingResponse or arg is StarletteStreaming
+        for arg in get_args(returned)
+    )
+
+
 def test_session_route_deps_use_function_scope() -> None:
-    """Ninguna ruta puede inyectar la sesión con el scope por defecto."""
+    """Ninguna ruta puede inyectar la sesión con el scope por defecto.
+
+    ``SessionStreamingDep`` solo en rutas que devuelven ``StreamingResponse``.
+    """
 
     from typing import get_args
 
@@ -371,6 +400,7 @@ def test_session_route_deps_use_function_scope() -> None:
             elif call is _get_streaming_session:
                 seen_streaming = True
                 assert item.scope == "request", route
+                assert _route_returns_streaming(route), route.path
     assert seen_session
     assert seen_streaming
     streaming_args = get_args(SessionStreamingDep)

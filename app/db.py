@@ -251,7 +251,8 @@ async def _get_session() -> AsyncIterator[AsyncSession]:
     Un ``StreamingResponse`` que consulte la sesión en el generador
     arrancaría otra transacción *después* de ese commit (idle in
     transaction → 500 de QueuePool). El listener ``after_begin`` lo
-    prohíbe. Para streaming usa ``SessionStreamingDep``.
+    prohíbe. Para streaming usa ``SessionStreamingDep``. Con
+    ``SessionDep`` el cliente ve 200 truncado (``RemoteProtocolError``).
     """
 
     factory = get_session_factory()
@@ -295,6 +296,9 @@ async def _get_streaming_session() -> AsyncIterator[AsyncSession]:
     enviar el cuerpo. Esta dependencia usa scope=request para que el
     generador pueda consultar y el commit/rollback corran al terminar
     el stream, sin dejar idle in transaction.
+
+    Un fallo de commit no cambia el status: el cuerpo ya salió
+    (200 truncado). No uses ``SessionStreamingDep`` en un POST JSON.
     """
 
     factory = get_session_factory()
