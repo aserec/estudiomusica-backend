@@ -1,5 +1,6 @@
 import asyncio
 import errno
+import logging
 import os
 import re
 import secrets
@@ -50,6 +51,7 @@ _SWEEP_ADVISORY_LOCK_KEY1 = 0x454D50  # EMP
 _SWEEP_ADVISORY_LOCK_KEY2 = 0x535750  # SWP
 _SWEEP_COMMAND_TIMEOUT = 60.0
 _SAFE_PG_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_log = logging.getLogger(__name__)
 _DATABASE_OVERRIDE_QUERY_KEYS = frozenset({"database", "dbname", "service", "options"})
 _PING_CONNECT_TIMEOUT = 2.0
 _PING_TOTAL_TIMEOUT = 3.0
@@ -498,7 +500,53 @@ def _orphan_production_test_role(name: str) -> bool:
     return False
 
 
-async def _drop_named_production_test_role(connection: Any, name: str) -> None:
+async def _other_owned_databases(connection: Any, name: str) -> list[str]:
+    """Bases distintas a la actual donde el rol tiene dependencias."""
+
+    rows = (
+        await connection.execute(
+            text(
+                "SELECT d.datname "
+                "FROM pg_catalog.pg_shdepend s "
+                "JOIN pg_catalog.pg_database d ON d.oid = s.dbid "
+                "JOIN pg_catalog.pg_roles r ON r.oid = s.refobjid "
+                "WHERE r.rolname = :name "
+                "AND s.dbid <> 0 "
+                "AND d.datname <> current_database()"
+            ),
+            {"name": name},
+        )
+    ).all()
+    seen: list[str] = []
+    for (datname,) in rows:
+        if datname not in seen:
+            seen.append(datname)
+    return seen
+
+
+async def _drop_owned_in_database(admin: RedactedDsn, database: str, name: str) -> None:
+    parsed = make_url(admin.secret())
+    other = RedactedDsn(
+        parsed.set(database=database).render_as_string(hide_password=False)
+    )
+    engine = _admin_engine(other)
+    try:
+        async with engine.connect() as connection:
+            role = _pg_ident(name)
+            exists = await connection.scalar(
+                text("SELECT 1 FROM pg_roles WHERE rolname = :name"),
+                {"name": name},
+            )
+            if exists is None:
+                return
+            await connection.execute(text(f"DROP OWNED BY {role}"))
+    finally:
+        await engine.dispose()
+
+
+async def _drop_named_production_test_role(
+    connection: Any, name: str, *, admin: RedactedDsn | None = None
+) -> None:
     role = _pg_ident(name)
     exists = await connection.scalar(
         text("SELECT 1 FROM pg_roles WHERE rolname = :name"),
@@ -506,6 +554,14 @@ async def _drop_named_production_test_role(connection: Any, name: str) -> None:
     )
     if exists is None:
         return
+    if admin is not None:
+        for database in await _other_owned_databases(connection, name):
+            if database.endswith("_test"):
+                await _drop_owned_in_database(admin, database, name)
+                continue
+            raise RuntimeError(
+                f"el rol {name} tiene objetos en {database}, fuera de una base *_test"
+            )
     await connection.execute(
         text(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
@@ -545,10 +601,17 @@ async def _drop_production_test_role(admin: RedactedDsn) -> None:
                 ):
                     continue
                 try:
-                    await _drop_named_production_test_role(connection, name)
-                except Exception:
+                    await _drop_named_production_test_role(
+                        connection, name, admin=admin
+                    )
+                except Exception as exc:
                     if name == PRODUCTION_TEST_USER:
                         raise
+                    _log.warning(
+                        "No se pudo borrar el rol huérfano %s (%s)",
+                        name,
+                        type(exc).__name__,
+                    )
     finally:
         await engine.dispose()
 

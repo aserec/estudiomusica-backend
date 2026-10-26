@@ -448,6 +448,77 @@ def test_concurrent_orphan_drops_do_not_fail(require_postgres: RedactedDsn) -> N
         _cleanup_named_roles(require_postgres, planted)
 
 
+@pytest.mark.db
+def test_orphan_objects_in_other_test_db_do_not_fail_production(
+    require_postgres: RedactedDsn,
+    tmp_path: Path,
+) -> None:
+    """Un huérfano con objetos en otra *_test no tumba el barrido."""
+
+    orphan = f"em_prod_tests_{_unused_pid()}"
+    other_name = "orphan_crossdb_probe_test"
+    parsed = make_url(require_postgres.secret())
+    other = RedactedDsn(
+        parsed.set(database=other_name).render_as_string(hide_password=False)
+    )
+    role = _pg_ident(orphan)
+    ensure_database_exists(other)
+
+    async def plant() -> None:
+        engine = _admin_engine(require_postgres)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(
+                    text(
+                        f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                        f"PASSWORD {_pg_literal('orphan-crossdb-secret')}"
+                    )
+                )
+                await connection.execute(
+                    text(f"GRANT CONNECT ON DATABASE {_pg_ident(other_name)} TO {role}")
+                )
+        finally:
+            await engine.dispose()
+        other_engine = _admin_engine(other)
+        try:
+            async with other_engine.connect() as connection:
+                await connection.execute(
+                    text("CREATE TABLE IF NOT EXISTS orphan_crossdb_owned (id int)")
+                )
+                await connection.execute(
+                    text(f"ALTER TABLE orphan_crossdb_owned OWNER TO {role}")
+                )
+        finally:
+            await other_engine.dispose()
+
+    try:
+        asyncio.run(plant())
+        assert asyncio.run(_role_exists(require_postgres, orphan)) == 1
+        result = _run_leftover_probe(tmp_path, require_postgres, _CHILD_ORPHAN_SETUP)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert asyncio.run(_role_exists(require_postgres, orphan)) is None
+    finally:
+
+        async def cleanup() -> None:
+            other_engine = _admin_engine(other)
+            try:
+                async with other_engine.connect() as connection:
+                    await connection.execute(
+                        text("DROP TABLE IF EXISTS orphan_crossdb_owned")
+                    )
+            finally:
+                await other_engine.dispose()
+            engine = _admin_engine(require_postgres)
+            try:
+                async with engine.connect() as connection:
+                    await _drop_named_production_test_role(connection, orphan)
+            finally:
+                await engine.dispose()
+
+        asyncio.run(cleanup())
+        drop_database_if_exists(other)
+
+
 async def _table_exists_named(dsn: RedactedDsn, name: str) -> object:
     engine = _create_async_engine(dsn.secret())
     try:
