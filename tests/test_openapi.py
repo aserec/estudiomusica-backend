@@ -184,3 +184,21 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
             assert not any(item.get("type") == "null" for item in schema["anyOf"])
         else:
             assert schema.get("type") in {"string", "integer"}
+    assert create_props["name"].get("minLength") == 1
+    assert create_props["name"].get("maxLength") == 120
+    assert update_props["name"].get("minLength") == 1
+    assert update_props["name"].get("maxLength") == 120
+
+    def _string_max_length(schema: dict[str, Any]) -> int | None:
+        if schema.get("type") == "string":
+            raw = schema.get("maxLength")
+            return raw if isinstance(raw, int) else None
+        for item in schema.get("anyOf", []):
+            if isinstance(item, dict) and item.get("type") == "string":
+                raw = item.get("maxLength")
+                if isinstance(raw, int):
+                    return raw
+        return None
+
+    assert _string_max_length(create_props["description"]) == 2000
+    assert _string_max_length(update_props["description"]) == 2000

@@ -4,7 +4,7 @@ import uuid
 from typing import Any
 
 import pytest
-from sqlalchemy import delete, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,11 +15,12 @@ from app.permissions.types import Permission
 from app.schemas.categories import (
     CategoryCreate,
     CategoryUpdate,
+    category_name_key,
+    normalize_category_description,
     normalize_category_name,
 )
 from app.services.categories import (
     _CATEGORY_TREE_LOCK_KEY,
-    _assert_parent_is_root,
     _integrity_name,
     _raise_from_integrity,
     create_category,
@@ -471,6 +472,19 @@ async def test_student_can_list_but_not_create(
     assert admin["email"] not in denied.text
 
 
+_LEGITIMATE_CF_NAMES: tuple[str, ...] = (
+    "👨‍👩‍👧",
+    "🌈\ufe0f",
+    "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f",
+    "שלום\u200f",
+    "سلام\u061c",
+    "क्‍ष",
+    "എന്‍റെ",
+    "ব্যক্তি",
+    "می‌خواهم",
+)
+
+
 def test_normalize_category_name_nfc_spaces_and_invisibles() -> None:
     nfc = "Café"
     nfd = unicodedata.normalize("NFD", nfc)
@@ -479,16 +493,15 @@ def test_normalize_category_name_nfc_spaces_and_invisibles() -> None:
     assert normalize_category_name("Solfeo  I") == "Solfeo I"
     assert normalize_category_name("é" * 100) == "é" * 100
     assert normalize_category_name(unicodedata.normalize("NFD", "é" * 100)) == "é" * 100
+    assert normalize_category_name("Piano\u200bI") == "Piano\u200bI"
+    assert normalize_category_name("Piano\u200dI") == "Piano\u200dI"
+    assert normalize_category_name("\u200bPiano\u200b") == "Piano"
+    for name in _LEGITIMATE_CF_NAMES:
+        got = normalize_category_name(name)
+        assert got
+        assert any(unicodedata.category(char)[0] not in {"C", "Z", "M"} for char in got)
     with pytest.raises(ValueError):
         normalize_category_name("\u200b")
-    with pytest.raises(ValueError):
-        normalize_category_name("Piano\u200bI")
-    with pytest.raises(ValueError):
-        normalize_category_name("Piano\u200dI")
-    with pytest.raises(ValueError):
-        normalize_category_name("Piano\ufeffI")
-    with pytest.raises(ValueError):
-        normalize_category_name("Piano\u00adI")
     with pytest.raises(ValueError):
         normalize_category_name("\u3164")
     with pytest.raises(ValueError):
@@ -496,11 +509,24 @@ def test_normalize_category_name_nfc_spaces_and_invisibles() -> None:
     with pytest.raises(ValueError):
         normalize_category_name("\u115f")
     with pytest.raises(ValueError):
+        normalize_category_name("\u1160")
+    with pytest.raises(ValueError):
         normalize_category_name("\u0301")
     with pytest.raises(ValueError):
         normalize_category_name("\x00ok")
     with pytest.raises(ValueError):
         normalize_category_name("   ")
+    with pytest.raises(ValueError):
+        normalize_category_name("a\udc00")
+    with pytest.raises(ValueError):
+        normalize_category_description("a\udc00")
+    with pytest.raises(ValueError):
+        normalize_category_description("ok\x00")
+    assert category_name_key("a\u200bb") == category_name_key("ab")
+    assert len("x" * 121) == 121
+    with pytest.raises(ValueError):
+        normalize_category_name("x" * 121)
+    assert normalize_category_name("x" * 120) == "x" * 120
 
 
 async def test_name_nfc_nfd_and_double_space_collide(
@@ -536,19 +562,23 @@ async def test_name_rejects_zero_width_and_nul(
         assert nul.json()["error"] == "validation"
 
     for payload in (
-        "Piano\u200bI",
-        "Piano\u200dI",
-        "Piano\ufeffI",
-        "Piano\u00adI",
         "\u3164",
         "\u2800",
         "\u115f",
+        "\u1160",
         "\u0301",
     ):
         response = await session_client.post(_ADMIN, json={"name": payload})
         assert response.status_code == 400
         assert response.json()["error"] == "validation"
         assert "name" in response.json()["fields"]
+
+    for name in _LEGITIMATE_CF_NAMES:
+        created = await _create(session_client, name=name)
+        assert created["name"] == normalize_category_name(name)
+
+    inside = await _create(session_client, name="Piano\u200bI")
+    assert inside["name"] == "Piano\u200bI"
 
 
 async def test_nfd_length_and_nfc_expansion(
@@ -565,6 +595,89 @@ async def test_nfd_length_and_nfc_expansion(
     )
     assert huge.status_code in {400, 422}
     assert huge.status_code != 500
+
+    too_long = await session_client.post(_ADMIN, json={"name": "n" * 121})
+    assert too_long.status_code in {400, 422}
+    assert too_long.status_code != 500
+    created_max = await _create(session_client, name="n" * 120)
+    assert created_max["name"] == "n" * 120
+
+
+async def test_surrogates_are_validation_not_500(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    created = await _create(session_client, name="Base")
+    headers = {"Content-Type": "application/json"}
+    desc = await session_client.post(
+        _ADMIN,
+        content='{"name":"Con surrogate","description":"a\\udc00"}',
+        headers=headers,
+    )
+    assert desc.status_code in {400, 422}
+    assert desc.status_code != 500
+    put_desc = await session_client.put(
+        f"{_ADMIN}/{created['id']}",
+        content='{"description":"b\\udc00"}',
+        headers=headers,
+    )
+    assert put_desc.status_code in {400, 422}
+    assert put_desc.status_code != 500
+    put_name = await session_client.put(
+        f"{_ADMIN}/{created['id']}",
+        content='{"name":"c\\udc00"}',
+        headers=headers,
+    )
+    assert put_name.status_code in {400, 422}
+    assert put_name.status_code != 500
+
+
+async def test_nul_description_is_validation(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    response = await session_client.post(
+        _ADMIN,
+        json={"name": "Nulo", "description": "ok\x00no"},
+    )
+    assert response.status_code in {400, 422}
+    assert response.status_code != 500
+
+
+async def test_zwsp_name_collides_with_plain(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    created = await _create(session_client, name="ab")
+    dup = await session_client.post(_ADMIN, json={"name": "a\u200bb"})
+    assert dup.status_code == 409
+    assert dup.json() == {"error": "category_name_taken"}
+    put = await session_client.put(
+        f"{_ADMIN}/{created['id']}",
+        json={"name": "a\u200bb"},
+    )
+    assert put.status_code == 200
+    assert put.json()["name"] == "a\u200bb"
+    other = await _create(session_client, name="cd")
+    clash = await session_client.put(
+        f"{_ADMIN}/{other['id']}",
+        json={"name": "a\u200bb"},
+    )
+    assert clash.status_code == 409
+
+
+async def test_put_name_is_normalized(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    created = await _create(session_client, name="Original")
+    nfd = unicodedata.normalize("NFD", "Café")
+    response = await session_client.put(
+        f"{_ADMIN}/{created['id']}",
+        json={"name": nfd},
+    )
+    assert response.status_code == 200
+    assert response.json()["name"] == "Café"
 
 
 async def test_put_duplicate_name_is_conflict_not_500(
@@ -620,13 +733,49 @@ async def test_put_null_sort_order_is_validation(
     assert match["sortOrder"] == created["sortOrder"]
 
 
-def test_unknown_integrity_error_is_name_taken() -> None:
+async def test_put_null_payload_is_validated_before_lookup(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    missing = str(uuid.uuid4())
+    sort_null = await session_client.put(
+        f"{_ADMIN}/{missing}",
+        json={"sortOrder": None},
+    )
+    assert sort_null.status_code in {400, 422}
+    assert sort_null.status_code != 404
+    name_null = await session_client.put(
+        f"{_ADMIN}/{missing}",
+        json={"name": None},
+    )
+    assert name_null.status_code in {400, 422}
+    assert name_null.status_code != 404
+
+
+def test_unknown_integrity_error_is_reraised() -> None:
     class _Orig(Exception):
         constraint_name = "ck_unrelated"
 
     exc = IntegrityError("INSERT", {}, _Orig())
+    with pytest.raises(IntegrityError):
+        _raise_from_integrity(exc)
+
+
+def test_name_unique_integrity_error_is_name_taken() -> None:
+    class _Orig(Exception):
+        constraint_name = "uq_categories_root_name_active"
+
+    exc = IntegrityError("INSERT", {}, _Orig())
     with pytest.raises(CategoryNameTaken):
         _raise_from_integrity(exc)
+
+    parent = IntegrityError(
+        "INSERT",
+        {},
+        type("Orig", (Exception,), {"constraint_name": "parent_not_self"})(),
+    )
+    with pytest.raises(IntegrityError):
+        _raise_from_integrity(parent)
 
 
 def test_integrity_name_reads_asyncpg_constraint() -> None:
@@ -648,7 +797,10 @@ def test_integrity_name_reads_asyncpg_constraint() -> None:
         diag = type("Diag", (), {"constraint_name": "psycopg_only"})()
 
     dead = IntegrityError("INSERT", {}, DeadDiag())
-    assert _integrity_name(dead) == str(dead.orig)
+    assert _integrity_name(dead) == ""
+    empty = IntegrityError("INSERT", {}, Exception())
+    empty.orig = None
+    assert _integrity_name(empty) == ""
 
 
 async def test_parent_not_self_check_exists(db_session: AsyncSession) -> None:
@@ -678,6 +830,8 @@ async def test_unique_indexes_filter_deleted_and_name_is_citext(
     )
     assert root_idx is not None and "deleted_at IS NULL" in root_idx
     assert parent_idx is not None and "deleted_at IS NULL" in parent_idx
+    assert "name_key" in root_idx
+    assert "name_key" in parent_idx
     udt = await db_session.scalar(
         text(
             "SELECT udt_name FROM information_schema.columns "
@@ -686,79 +840,111 @@ async def test_unique_indexes_filter_deleted_and_name_is_citext(
         )
     )
     assert udt == "citext"
+    key_udt = await db_session.scalar(
+        text(
+            "SELECT udt_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'categories' "
+            "AND column_name = 'name_key'"
+        )
+    )
+    assert key_udt == "citext"
+    samples = ("ab", "a\u200bb", "می‌خواهم", "👨‍👩‍👧", "Café")
+    for sample in samples:
+        db_key = await db_session.scalar(
+            text("SELECT category_name_key(CAST(:n AS citext))"),
+            {"n": sample},
+        )
+        assert db_key == category_name_key(sample)
 
 
 def test_tree_lock_is_transactional_not_session(
     require_postgres: Any,
     migrated_test_database: None,
 ) -> None:
-    """El candado es xact: tras COMMIT no queda en pg_locks.
-
-    Mata lock-no-xact-sesion. El orden en create mata lock-create-tras-chequeo.
-    """
-
-    import inspect
+    """Tras commit/rollback no queda advisory lock; otra sesión puede tomarlo."""
 
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.db import RedactedDsn
 
-    created = inspect.getsource(create_category)
-    assert created.index("_lock_category_tree") < created.index(
-        "_assert_parent_is_root"
-    )
-    assert created.index("_lock_category_tree") < created.index("_name_taken")
-    deleted = inspect.getsource(delete_category)
-    assert "_lock_category_tree" in deleted
-    assert deleted.index("_lock_category_tree") < deleted.index("_lock_category(")
-    parent_src = inspect.getsource(_assert_parent_is_root)
-    assert "with_for_update" in parent_src
-    updated = inspect.getsource(update_category)
-    assert updated.index("_name_taken") < updated.index("row.name = next_name")
-    assert "_raise_from_integrity" in updated
-    assert "_raise_from_integrity" in created
-
     dsn = require_postgres
     assert isinstance(dsn, RedactedDsn)
     suffix = uuid.uuid4().hex[:8]
     tracked: list[uuid.UUID] = []
+    classid, objid = _CATEGORY_TREE_LOCK_KEY
+
+    async def try_tree_lock(session: Any) -> bool:
+        got = await session.scalar(
+            text("SELECT pg_try_advisory_xact_lock(:classid, :objid)"),
+            {"classid": classid, "objid": objid},
+        )
+        return bool(got)
+
+    async def leftover_locks(session: Any) -> int:
+        return int(
+            await session.scalar(
+                text(
+                    "SELECT count(*) FROM pg_locks "
+                    "WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
+                )
+            )
+            or 0
+        )
 
     async def run() -> None:
-        engine = create_async_engine(dsn.secret(), pool_size=1, max_overflow=0)
+        engine = create_async_engine(dsn.secret(), pool_size=2, max_overflow=0)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
-            async with factory() as session:
+            async with factory() as setup:
                 parent = await create_category(
-                    session, CategoryCreate(name=f"lockp-{suffix}")
+                    setup, CategoryCreate(name=f"lockp-{suffix}")
                 )
                 tracked.append(parent.id)
                 child = await create_category(
-                    session,
+                    setup,
                     CategoryCreate(name=f"lockc-{suffix}", parent_id=parent.id),
                 )
                 tracked.append(child.id)
-                classid, objid = _CATEGORY_TREE_LOCK_KEY
-                held = (
-                    await session.execute(
-                        text(
-                            "SELECT classid, objid FROM pg_locks "
-                            "WHERE locktype = 'advisory' "
-                            "AND pid = pg_backend_pid()"
-                        )
-                    )
-                ).all()
-                assert (classid, objid) in {(row[0], row[1]) for row in held}
-                await update_category(session, child.id, CategoryUpdate(parent_id=None))
-                await delete_category(session, child.id)
-                await session.commit()
-                leftover = await session.scalar(
-                    text(
-                        "SELECT count(*) FROM pg_locks "
-                        "WHERE locktype = 'advisory' "
-                        "AND pid = pg_backend_pid()"
-                    )
+                other = await create_category(
+                    setup, CategoryCreate(name=f"locko-{suffix}")
                 )
-                assert leftover == 0
+                tracked.append(other.id)
+                await setup.commit()
+
+            async with factory() as holder:
+                born = await create_category(
+                    holder,
+                    CategoryCreate(name=f"lockn-{suffix}", parent_id=parent.id),
+                )
+                tracked.append(born.id)
+                async with factory() as waiter:
+                    assert await try_tree_lock(waiter) is False
+                    await waiter.rollback()
+                await holder.commit()
+                assert await leftover_locks(holder) == 0
+
+            async with factory() as free:
+                assert await try_tree_lock(free) is True
+                await free.rollback()
+                assert await leftover_locks(free) == 0
+
+            async with factory() as holder:
+                await update_category(
+                    holder, child.id, CategoryUpdate(parent_id=other.id)
+                )
+                async with factory() as waiter:
+                    assert await try_tree_lock(waiter) is False
+                    await waiter.rollback()
+                await holder.commit()
+                assert await leftover_locks(holder) == 0
+
+            async with factory() as holder:
+                await delete_category(holder, child.id)
+                async with factory() as waiter:
+                    assert await try_tree_lock(waiter) is False
+                    await waiter.rollback()
+                await holder.commit()
+                assert await leftover_locks(holder) == 0
         finally:
             await engine.dispose()
 
@@ -766,6 +952,50 @@ def test_tree_lock_is_transactional_not_session(
         asyncio.run(run())
     finally:
         asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+async def test_duplicate_create_keeps_session_usable(
+    db_session: AsyncSession,
+) -> None:
+    first = await create_category(db_session, CategoryCreate(name="DupSess"))
+    with pytest.raises(CategoryNameTaken):
+        await create_category(db_session, CategoryCreate(name="DupSess"))
+    second = await create_category(db_session, CategoryCreate(name="DupSess2"))
+    assert second.id != first.id
+
+
+def test_cleanup_production_deletes_prod_categories(
+    require_postgres: Any,
+    migrated_test_database: None,
+) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+    from tests.conftest import _cleanup_production_test_rows
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret())
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                row = await create_category(
+                    session, CategoryCreate(name="Prod-cleanup-marker")
+                )
+                await session.commit()
+                marker = row.id
+            await _cleanup_production_test_rows(dsn)
+            async with factory() as session:
+                left = await session.scalar(
+                    select(Category.id).where(Category.id == marker)
+                )
+                assert left is None
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
 
 
 def test_category_mutations_require_manage_courses() -> None:

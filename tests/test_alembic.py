@@ -77,6 +77,9 @@ def _wipe_alembic_schema(dsn: RedactedDsn) -> None:
                 )
                 await connection.execute(text('DROP TABLE IF EXISTS "order" CASCADE'))
                 await connection.execute(text("DROP SCHEMA IF EXISTS catalogo CASCADE"))
+                await connection.execute(
+                    text("DROP FUNCTION IF EXISTS category_name_key(citext)")
+                )
                 await connection.execute(text("DROP EXTENSION IF EXISTS citext"))
                 await connection.execute(
                     text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
@@ -375,18 +378,19 @@ def test_alembic_revision_chain_is_linear() -> None:
     bases = script.get_bases()
     assert len(heads) == 1
     assert len(bases) == 1
-    current: str | list[str] | tuple[str, ...] | None = heads[0]
-    seen: list[str] = []
-    while current is not None:
-        if isinstance(current, list | tuple):
-            raise AssertionError(f"revisión ramificada: {current}")
-        assert current not in seen
-        seen.append(current)
-        current = script.get_revision(current).down_revision
-    assert seen[-1] == bases[0]
-    assert script.get_revision(bases[0]).down_revision is None
-    if len(seen) > 1:
-        assert script.get_revision(heads[0]).down_revision == seen[1]
+    chain = list(script.walk_revisions())
+    assert chain[0].revision == heads[0]
+    assert chain[-1].revision == bases[0]
+    assert chain[-1].down_revision is None
+    for child, parent in zip(chain, chain[1:], strict=False):
+        down = child.down_revision
+        if isinstance(down, list | tuple):
+            raise AssertionError(f"revisión ramificada: {down}")
+        assert down == parent.revision
+    assert [revision.revision for revision in chain] == [
+        revision.revision for revision in script.walk_revisions()
+    ]
+    assert len(chain) == len({revision.revision for revision in chain})
 
 
 def test_alembic_check_has_no_drift(

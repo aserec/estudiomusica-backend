@@ -10,7 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import CategoryNameTaken, CategoryNotEmpty, NotFound, Validation
 from app.models import Category
-from app.schemas.categories import CategoryCreate, CategoryResponse, CategoryUpdate
+from app.schemas.categories import (
+    CategoryCreate,
+    CategoryResponse,
+    CategoryUpdate,
+    category_name_key,
+)
 
 # Un solo candado transaccional para todo el árbol (ticket #400).
 _CATEGORY_TREE_LOCK_KEY = (400, 1)
@@ -33,29 +38,25 @@ def to_category_response(row: Category) -> CategoryResponse:
 
 
 def _integrity_name(exc: IntegrityError) -> str:
-    """Nombre de constraint: en asyncpg vive en ``orig`` o en su causa."""
+    """``constraint_name`` de asyncpg en ``orig`` o en ``orig.__cause__``."""
 
-    current: object | None = exc.orig
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        name = getattr(current, "constraint_name", None)
-        if isinstance(name, str) and name:
-            return name
-        nxt = getattr(current, "__cause__", None)
-        if nxt is None:
-            nxt = getattr(current, "orig", None)
-        current = nxt
-    return str(exc.orig) if exc.orig is not None else str(exc)
+    orig = exc.orig
+    if orig is None:
+        return ""
+    name = getattr(orig, "constraint_name", None)
+    if isinstance(name, str) and name:
+        return name
+    cause = getattr(orig, "__cause__", None)
+    name = getattr(cause, "constraint_name", None)
+    if isinstance(name, str) and name:
+        return name
+    return ""
 
 
 def _raise_from_integrity(exc: IntegrityError) -> NoReturn:
-    name = _integrity_name(exc)
-    if "parent_not_self" in name or (
-        "parent_id" in name and not any(item in name for item in _NAME_CONSTRAINTS)
-    ):
-        raise Validation(fields=["parentId"]) from exc
-    raise CategoryNameTaken() from exc
+    if _integrity_name(exc) in _NAME_CONSTRAINTS:
+        raise CategoryNameTaken() from exc
+    raise exc
 
 
 async def _lock_category_tree(session: AsyncSession) -> None:
@@ -98,7 +99,7 @@ async def _name_taken(
 ) -> bool:
     query = select(Category.id).where(
         Category.deleted_at.is_(None),
-        Category.name == name,
+        Category.name_key == category_name_key(name),
     )
     if parent_id is None:
         query = query.where(Category.parent_id.is_(None))
@@ -186,18 +187,22 @@ async def update_category(
     session: AsyncSession, category_id: UUID, body: CategoryUpdate
 ) -> Category:
     fields = body.model_fields_set
+    next_name_update = body.name
+    next_sort = body.sort_order
+    if "name" in fields and next_name_update is None:
+        raise Validation(fields=["name"])
+    if "sort_order" in fields and next_sort is None:
+        raise Validation(fields=["sortOrder"])
     changing_parent = "parent_id" in fields
     if changing_parent:
         await _lock_category_tree(session)
     row = await _lock_category(session, category_id)
     if row is None:
         raise NotFound()
-    next_name = row.name
+    next_name = next_name_update if "name" in fields else row.name
+    if next_name is None:
+        raise Validation(fields=["name"])
     next_parent = row.parent_id
-    if "name" in fields:
-        if body.name is None:
-            raise Validation(fields=["name"])
-        next_name = body.name
     if changing_parent:
         if body.parent_id is not None:
             if await _has_active_children(session, category_id):
@@ -214,10 +219,8 @@ async def update_category(
         row.parent_id = next_parent
     if "description" in fields:
         row.description = body.description
-    if "sort_order" in fields:
-        if body.sort_order is None:
-            raise Validation(fields=["sortOrder"])
-        row.sort_order = body.sort_order
+    if "sort_order" in fields and next_sort is not None:
+        row.sort_order = next_sort
     try:
         async with session.begin_nested():
             await session.flush()
