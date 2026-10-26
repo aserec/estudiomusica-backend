@@ -312,6 +312,26 @@ def _mount_probes(application: FastAPI) -> None:
 
         return StreamingResponse(generate(), media_type="text/plain")
 
+    @application.get("/api/v1/_test/session-stream-write/{label}")
+    async def session_stream_write(
+        label: str, session: SessionStreamingDep
+    ) -> StreamingResponse:
+        async def generate() -> AsyncIterator[str]:
+            await session.execute(
+                text(
+                    "INSERT INTO session_probes "
+                    "(id, label, created_at, updated_at) "
+                    "VALUES ("
+                    "gen_random_uuid(), :label, "
+                    "clock_timestamp(), clock_timestamp()"
+                    ")"
+                ),
+                {"label": label},
+            )
+            yield f"row={label}"
+
+        return StreamingResponse(generate(), media_type="text/plain")
+
 
 def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> Iterator[TestClient]:
     from app.config import get_settings

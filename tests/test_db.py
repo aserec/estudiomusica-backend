@@ -574,6 +574,114 @@ async def test_streaming_session_dep_leaves_no_idle_in_transaction(
         clear_engine()
 
 
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_streaming_session_commits_written_row(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """ST2: tras el stream la fila insertada es visible."""
+
+    from httpx2 import ASGITransport, AsyncClient
+
+    from app.config import get_settings
+    from app.db import dispose_engine
+    from app.main import create_app
+    from tests.conftest import _mount_probes
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    get_settings.cache_clear()
+    clear_engine()
+    setup_engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
+    await _create_probe_table(setup_engine, probe_table)
+    application = create_app()
+    _mount_probes(application)
+    try:
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            written = await client.get("/api/v1/_test/session-stream-write/st2-row")
+            assert written.status_code == 200
+            assert written.text == "row=st2-row"
+            visible = await client.get("/api/v1/_test/session/st2-row")
+            assert visible.status_code == 200
+            assert visible.json() == {"label": "st2-row"}
+    finally:
+        await _drop_probe_table(setup_engine, probe_table)
+        await setup_engine.dispose()
+        await dispose_engine()
+        get_settings.cache_clear()
+        clear_engine()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_streaming_session_commit_error_is_noticed(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ST3: un commit fallido no se traga; la fila no queda."""
+
+    from httpx2 import ASGITransport, AsyncClient
+    from sqlalchemy.ext.asyncio import AsyncSession as SAAsyncSession
+
+    from app.config import get_settings
+    from app.db import dispose_engine
+    from app.main import create_app
+    from tests.conftest import _mount_probes
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    get_settings.cache_clear()
+    clear_engine()
+    setup_engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
+    await _create_probe_table(setup_engine, probe_table)
+    application = create_app()
+    _mount_probes(application)
+
+    async def _boom(self: SAAsyncSession) -> None:
+        raise RuntimeError("stream-commit-failed")
+
+    monkeypatch.setattr(SAAsyncSession, "commit", _boom)
+    try:
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            noticed = False
+            try:
+                response = await client.get(
+                    "/api/v1/_test/session-stream-write/st3-row"
+                )
+            except Exception as exc:
+                noticed = "stream-commit-failed" in str(exc)
+            else:
+                noticed = (
+                    response.status_code >= 400
+                    or "stream-commit-failed" in caplog.text
+                    or "stream-commit-failed" in response.text
+                )
+            assert noticed
+            leftover = await setup_engine.connect()
+            try:
+                found = await leftover.scalar(
+                    text("SELECT label FROM session_probes WHERE label = :label"),
+                    {"label": "st3-row"},
+                )
+                assert found is None
+            finally:
+                await leftover.close()
+    finally:
+        await _drop_probe_table(setup_engine, probe_table)
+        await setup_engine.dispose()
+        await dispose_engine()
+        get_settings.cache_clear()
+        clear_engine()
+
+
 def test_clear_engine_disposes_sync_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     from app import db as db_module
     from app.config import get_settings
