@@ -88,25 +88,17 @@ def test_health_db_down_does_not_leak_with_expose_errors(
     assert "message" not in response.json()
 
 
-class _HangingConnect:
-    async def __aenter__(self) -> _HangingConnect:
-        await asyncio.Event().wait()
-        return self
-
-    async def __aexit__(self, *_args: object) -> None:
-        return None
-
-
-class _HangingEngine:
-    def connect(self) -> _HangingConnect:
-        return _HangingConnect()
-
-
 @pytest.fixture
 def hang_timeout_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    import asyncpg  # type: ignore[import-untyped]
+
     from tests.conftest import _build_client
 
-    monkeypatch.setattr(health_service, "get_engine", lambda: _HangingEngine())
+    async def _hang(*_args: object, **_kwargs: object) -> object:
+        await asyncio.Event().wait()
+        raise RuntimeError("unreachable")
+
+    monkeypatch.setattr(asyncpg, "connect", _hang)
     yield from _build_client(
         monkeypatch,
         APP_ENV="development",
@@ -214,6 +206,27 @@ def _frozen_url(require_postgres: RedactedDsn, port: int) -> str:
     )
 
 
+async def _count_health_backends(dsn: RedactedDsn) -> int:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.db import HEALTH_APPLICATION_NAME
+
+    engine = create_async_engine(dsn.secret())
+    try:
+        async with engine.connect() as connection:
+            count = await connection.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE application_name = :name"
+                ),
+                {"name": HEALTH_APPLICATION_NAME},
+            )
+    finally:
+        await engine.dispose()
+    return int(count or 0)
+
+
 async def _run_frozen_health(
     monkeypatch: pytest.MonkeyPatch,
     require_postgres: RedactedDsn,
@@ -221,19 +234,17 @@ async def _run_frozen_health(
     freeze_on: str,
     health_timeout: float = 0.6,
     command_timeout: float = 8.0,
-    warmup: bool = False,
 ) -> tuple[float, DatabaseHealthResponse, int, int]:
-    """Devuelve (elapsed, result, abandon_calls, checkedout)."""
+    """Devuelve (elapsed, result, terminate_calls, main_checkedout)."""
+
+    from sqlalchemy.engine.url import make_url
 
     from app.config import get_settings
     from app.db import clear_engine, dispose_engine, get_engine
     from app.services.health import HEALTH_TIMEOUT_MARGIN_SECONDS
     from tests.pg_freeze_proxy import FreezeAfterLoginProxy
 
-    parsed_host = require_postgres.secret()
-    from sqlalchemy.engine.url import make_url
-
-    parsed = make_url(parsed_host)
+    parsed = make_url(require_postgres.secret())
     proxy = FreezeAfterLoginProxy(
         parsed.host or "127.0.0.1",
         parsed.port or 5432,
@@ -241,39 +252,37 @@ async def _run_frozen_health(
     )
     await proxy.start()
     frozen_url = _frozen_url(require_postgres, proxy.port)
-    monkeypatch.setenv("DATABASE_URL", frozen_url)
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     monkeypatch.setenv("DB_HEALTH_TIMEOUT", str(health_timeout))
     monkeypatch.setenv("DB_COMMAND_TIMEOUT", str(command_timeout))
     get_settings.cache_clear()
     clear_engine()
-    abandons = {"n": 0}
-    original = health_service._abandon_health_connection
+    main = get_engine()
+    health_service.set_health_database_url(frozen_url)
+    terminates = {"n": 0}
+    original = health_service._terminate_driver_object
 
-    def _spy(connection: object) -> None:
-        abandons["n"] += 1
-        original(connection)  # type: ignore[arg-type]
+    def _spy(driver: object) -> None:
+        terminates["n"] += 1
+        original(driver)
 
-    monkeypatch.setattr(health_service, "_abandon_health_connection", _spy)
+    monkeypatch.setattr(health_service, "_terminate_driver_object", _spy)
     budget = health_timeout + HEALTH_TIMEOUT_MARGIN_SECONDS + 0.35
     try:
-        if warmup:
-            warm = await health_service.check_database()
-            assert warm.db == "ok"
         started = time.monotonic()
         result = await health_service.check_database()
         elapsed = time.monotonic() - started
-        engine = get_engine()
-        checkedout = engine.sync_engine.pool.checkedout()  # type: ignore[attr-defined]
+        checkedout = main.sync_engine.pool.checkedout()  # type: ignore[attr-defined]
         print(
             f"health freeze[{freeze_on}] elapsed={elapsed:.3f}s "
             f"timeout={health_timeout} command={command_timeout} "
-            f"abandons={abandons['n']} checkedout={checkedout}",
+            f"terminates={terminates['n']} main_checkedout={checkedout}",
             flush=True,
         )
         assert elapsed < budget, (
             f"elapsed={elapsed:.3f}s budget={budget:.3f}s freeze_on={freeze_on}"
         )
-        return elapsed, result, abandons["n"], int(checkedout)
+        return elapsed, result, terminates["n"], int(checkedout)
     finally:
         await dispose_engine()
         get_settings.cache_clear()
@@ -288,25 +297,24 @@ async def test_health_db_frozen_select_1_returns_503_quickly(
     require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
-    """Congela SELECT 1 tras inicializar el dialecto. Mata T1/T2/T4/T5."""
+    """Congela SELECT 1 tras inicializar el dialecto."""
 
     from tests.conftest import _build_client
 
-    elapsed, result, abandons, checkedout = await _run_frozen_health(
+    elapsed, result, terminates, checkedout = await _run_frozen_health(
         monkeypatch, require_postgres, freeze_on="select_1"
     )
     assert result.db == "down"
-    assert abandons >= 1
+    assert terminates >= 1
     assert checkedout == 0
 
-    parsed = require_postgres.secret()
     from sqlalchemy.engine.url import make_url
 
     from app.config import get_settings
     from app.db import clear_engine
     from tests.pg_freeze_proxy import FreezeAfterLoginProxy
 
-    url = make_url(parsed)
+    url = make_url(require_postgres.secret())
     proxy = FreezeAfterLoginProxy(url.host or "127.0.0.1", url.port or 5432)
     await proxy.start()
     frozen_url = _frozen_url(require_postgres, proxy.port)
@@ -340,13 +348,13 @@ async def test_health_db_frozen_select_1_returns_503_quickly(
 
 @pytest.mark.db
 @pytest.mark.asyncio
-async def test_health_db_frozen_pre_ping_returns_503_quickly(
+async def test_health_db_frozen_connect_returns_503_quickly(
     monkeypatch: pytest.MonkeyPatch,
     require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
-    elapsed, result, _abandons, checkedout = await _run_frozen_health(
-        monkeypatch, require_postgres, freeze_on="pre_ping", warmup=True
+    elapsed, result, _terminates, checkedout = await _run_frozen_health(
+        monkeypatch, require_postgres, freeze_on="connect"
     )
     assert result.db == "down"
     assert checkedout == 0
@@ -360,23 +368,23 @@ async def test_health_db_frozen_rollback_returns_503_quickly(
     require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
-    elapsed, result, abandons, checkedout = await _run_frozen_health(
+    elapsed, result, terminates, checkedout = await _run_frozen_health(
         monkeypatch, require_postgres, freeze_on="rollback"
     )
     assert result.db == "down"
-    assert abandons >= 1
+    assert terminates >= 1
     assert checkedout == 0
     assert elapsed < 1.4
 
 
 @pytest.mark.db
 @pytest.mark.asyncio
-async def test_health_db_reuses_pool_connection_when_postgres_is_healthy(
+async def test_health_db_does_not_touch_main_pool(
     monkeypatch: pytest.MonkeyPatch,
     require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
-    from sqlalchemy import event
+    from sqlalchemy import event, text
 
     from app.config import get_settings
     from app.db import clear_engine, dispose_engine, get_engine
@@ -392,12 +400,142 @@ async def test_health_db_reuses_pool_connection_when_postgres_is_healthy(
 
     event.listen(engine.sync_engine, "connect", _on_connect)
     try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+        baseline = connects["n"]
         first = await health_service.check_database()
         second = await health_service.check_database()
         assert first.db == "ok"
         assert second.db == "ok"
-        assert connects["n"] == 1
+        assert connects["n"] == baseline
     finally:
         event.remove(engine.sync_engine, "connect", _on_connect)
         await dispose_engine()
         get_settings.cache_clear()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_health_db_alternating_freeze_does_not_accumulate_backends(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """Sondas sanas y congeladas no crecen por encima del límite del pool."""
+
+    import warnings
+
+    from sqlalchemy.engine.url import make_url
+
+    from app.config import get_settings
+    from app.db import (
+        clear_engine,
+        dispose_engine,
+        get_engine,
+    )
+    from tests.pg_freeze_proxy import FreezeAfterLoginProxy
+
+    parsed = make_url(require_postgres.secret())
+    proxy = FreezeAfterLoginProxy(
+        parsed.host or "127.0.0.1", parsed.port or 5432, freeze_on="none"
+    )
+    await proxy.start()
+    frozen_url = _frozen_url(require_postgres, proxy.port)
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    monkeypatch.setenv("DB_HEALTH_TIMEOUT", "0.5")
+    monkeypatch.setenv("DB_COMMAND_TIMEOUT", "30")
+    get_settings.cache_clear()
+    clear_engine()
+    main = get_engine()
+    health_service.set_health_database_url(frozen_url)
+    max_backends = 0
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            for index in range(8):
+                proxy.freeze_on = "none"
+                healthy = await health_service.check_database()
+                assert healthy.db == "ok"
+                proxy.freeze_on = "select_1" if index % 2 == 0 else "connect"
+                frozen = await health_service.check_database()
+                assert frozen.db == "down"
+                backends = await _count_health_backends(require_postgres)
+                max_backends = max(max_backends, backends)
+            print(f"alternating max_health_backends={max_backends}", flush=True)
+            assert max_backends <= 2
+            assert main.sync_engine.pool.checkedout() == 0  # type: ignore[attr-defined]
+            await dispose_engine()
+            leftover = await _count_health_backends(require_postgres)
+            assert leftover == 0
+            unclosed = [
+                item
+                for item in caught
+                if issubclass(item.category, ResourceWarning)
+                and "unclosed" in str(item.message).lower()
+            ]
+            assert unclosed == []
+    finally:
+        get_settings.cache_clear()
+        with suppress(Exception):
+            await asyncio.wait_for(proxy.aclose(), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_abandon_probe_cancels_pending_task() -> None:
+    """T7: sin ``task.cancel()`` la sonda pendiente sigue viva."""
+
+    async def hang() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(hang())
+    try:
+        health_service._abandon_probe(None, task)
+        await asyncio.sleep(0)
+        assert task.cancelled()
+    finally:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+
+def test_expected_terminate_filter_downgrades_pool_error() -> None:
+    """T12: el filtro baja ERROR+traza a WARNING sin traceback."""
+
+    import logging
+
+    filt = health_service._ExpectedTerminateFilter()
+    record = logging.LogRecord(
+        name="sqlalchemy.pool.impl.AsyncAdaptedQueuePool",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="Exception terminating connection %s",
+        args=("conn",),
+        exc_info=(
+            asyncio.CancelledError,
+            asyncio.CancelledError(),
+            None,
+        ),
+    )
+    assert filt.filter(record) is True
+    assert record.levelno == logging.WARNING
+    assert record.levelname == "WARNING"
+    assert record.exc_info is None
+
+
+def test_health_log_filter_does_not_attach_to_root_handlers() -> None:
+    import logging
+
+    root = logging.getLogger()
+    before = [id(item) for handler in root.handlers for item in handler.filters]
+    with health_service._probe_log_context():
+        during = [id(item) for handler in root.handlers for item in handler.filters]
+        pool = logging.getLogger("sqlalchemy.pool")
+        assert any(
+            isinstance(item, health_service._ExpectedTerminateFilter)
+            for item in pool.filters
+        )
+    assert during == before
+    after = [id(item) for handler in root.handlers for item in handler.filters]
+    assert after == before

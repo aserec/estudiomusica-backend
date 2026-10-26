@@ -2,7 +2,10 @@ import ast
 import asyncio
 import importlib
 import importlib.util
+import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -950,5 +953,121 @@ def downgrade() -> None:
         assert generated
         source = generated[0].read_text()
         assert "schema_trigger_probes" not in source
+    finally:
+        drop_database_if_exists(dsn)
+
+
+def test_alembic_check_ignores_foreign_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    require_postgres: RedactedDsn,
+) -> None:
+    """AG1: include_name=True propondría borrar ``ajeno.cosas``."""
+
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    command.upgrade(alembic_config(dsn), "head")
+
+    async def add_foreign() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text("CREATE SCHEMA IF NOT EXISTS ajeno"))
+                await connection.execute(
+                    text("CREATE TABLE IF NOT EXISTS ajeno.cosas (id integer)")
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(add_foreign())
+    env = os.environ.copy()
+    env["DATABASE_URL"] = dsn.secret()
+    env["PYTHONPATH"] = str(ROOT)
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from alembic import command\n"
+                "from app.migrations.config import make_alembic_config\n"
+                f"command.check(make_alembic_config({dsn.secret()!r}))\n",
+            ],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+            check=False,
+        )
+        output = f"{result.stdout}\n{result.stderr}"
+        assert result.returncode == 0, output
+        assert "ajeno" not in output.lower() or "No new upgrade" in output
+    finally:
+
+        async def drop_foreign() -> None:
+            engine = create_async_engine(dsn.secret())
+            try:
+                async with engine.begin() as connection:
+                    await connection.execute(
+                        text("DROP SCHEMA IF EXISTS ajeno CASCADE")
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(drop_foreign())
+
+
+def test_autogenerate_discards_empty_revision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    require_postgres: RedactedDsn,
+) -> None:
+    """AG5: con ``--autogenerate`` no se escribe una revisión vacía."""
+
+    dest = tmp_path / "migrations"
+    shutil.copytree(ROOT / "app" / "migrations", dest)
+    from sqlalchemy.engine.url import make_url
+
+    parsed = make_url(resolve_alembic_database_url())
+    dsn = RedactedDsn(
+        parsed.set(database="autogen_empty_probe_test").render_as_string(
+            hide_password=False
+        )
+    )
+    ensure_database_exists(dsn)
+    env = os.environ.copy()
+    env["DATABASE_URL"] = dsn.secret()
+    env["PYTHONPATH"] = str(ROOT)
+    script = (
+        "from argparse import Namespace\n"
+        "from pathlib import Path\n"
+        "from alembic import command\n"
+        "from alembic.config import Config\n"
+        f"dest = Path({str(dest)!r})\n"
+        "config = Config()\n"
+        "config.cmd_opts = Namespace(autogenerate=True)\n"
+        "config.set_main_option('script_location', str(dest))\n"
+        "config.set_main_option(\n"
+        f"    'sqlalchemy.url', {dsn.secret()!r}.replace('%', '%%')\n"
+        ")\n"
+        "command.upgrade(config, 'head')\n"
+        "before = {p.name for p in (dest / 'versions').glob('*.py')}\n"
+        "command.revision(config, message='empty_probe', autogenerate=True)\n"
+        "after = {p.name for p in (dest / 'versions').glob('*.py')}\n"
+        "new = after - before\n"
+        "assert not new, new\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     finally:
         drop_database_if_exists(dsn)
