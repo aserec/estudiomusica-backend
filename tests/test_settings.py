@@ -279,6 +279,62 @@ def test_production_rejects_query_password_override(
     get_settings.cache_clear()
 
 
+def test_production_rejects_uppercase_query_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q5: la clave de query no distingue mayúsculas (``Password=``)."""
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?Password=estudiomusica",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="contraseña"):
+        Settings()
+    get_settings.cache_clear()
+
+
+def test_resolved_url_translates_sslmode_to_ssl() -> None:
+    from sqlalchemy.dialects.postgresql.asyncpg import PGDialect_asyncpg
+    from sqlalchemy.engine.url import make_url
+
+    settings = Settings(
+        database_url=(
+            "postgresql+asyncpg://app:s3cret@127.0.0.1:5432/app?sslmode=require"
+        )
+    )
+    parsed = make_url(settings.resolved_database_url())
+    query = {str(key).lower(): value for key, value in parsed.query.items()}
+    assert query.get("ssl") == "require"
+    assert "sslmode" not in query
+    dialect = PGDialect_asyncpg()  # type: ignore[no-untyped-call]
+    _args, opts = dialect.create_connect_args(parsed)  # type: ignore[no-untyped-call]
+    assert opts.get("ssl") == "require"
+    assert "sslmode" not in opts
+
+
+def test_production_rejects_client_cert_and_passfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?sslcert=/tmp/c.pem",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="certificado|pgpass|peer"):
+        Settings()
+    get_settings.cache_clear()
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app?passfile=/tmp/.pgpass",
+    )
+    with pytest.raises(ValidationError, match="certificado|pgpass|peer"):
+        Settings()
+    get_settings.cache_clear()
+
+
 def test_production_rejects_query_user_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

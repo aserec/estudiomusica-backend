@@ -796,10 +796,10 @@ def drop_database_if_exists(database_url: str | RedactedDsn) -> None:
         if _is_connection_error(exc):
             raise ConnectionError(
                 f"No se pudo borrar la base de test ({type(exc).__name__}). {dsn}"
-            ) from None
+            ) from exc
         raise RuntimeError(
             f"No se pudo borrar la base de test ({type(exc).__name__}). {dsn}"
-        ) from None
+        ) from exc
 
 
 def _ping_postgres(database_url: str | RedactedDsn) -> None:

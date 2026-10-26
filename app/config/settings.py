@@ -65,6 +65,7 @@ class Settings(BaseSettings):
         repr=False,
     )
     db_health_timeout: float = Field(default=2.0, gt=0)
+    db_health_cache_ttl: float = Field(default=1.0, ge=0)
     db_connect_timeout: float = Field(default=2.0, gt=0)
     db_command_timeout: float = Field(default=5.0, gt=0)
     db_pool_size: int = Field(default=5, ge=1)
@@ -121,7 +122,7 @@ class Settings(BaseSettings):
         return self.app_env != "production"
 
     def resolved_database_url(self) -> str:
-        return self.database_url.get_secret_value()
+        return _normalize_sslmode(self.database_url.get_secret_value())
 
     def resolved_auth_secret(self) -> str:
         return self.auth_secret.get_secret_value()
@@ -166,8 +167,9 @@ class Settings(BaseSettings):
         La comparación de usuario y del sufijo ``_test`` no distingue
         mayúsculas (path o query). asyncpg acepta ``password``, ``user``,
         ``database`` y ``dbname`` en la query; se aplican como override
-        antes de validar. Los tests pueden optar in a ``*_test`` con
-        ``allow_test_database`` (no es variable de entorno).
+        antes de validar. También se rechazan peer, ``.pgpass`` y
+        certificado de cliente. Los tests pueden optar in a ``*_test``
+        con ``allow_test_database`` (no es variable de entorno).
         """
 
         if self.app_env == "development":
@@ -208,6 +210,20 @@ class Settings(BaseSettings):
                 "DATABASE_URL no puede apuntar a una base *_test "
                 "fuera de APP_ENV=development"
             )
+        forbidden = (
+            "passfile",
+            "sslcert",
+            "sslkey",
+            "sslpassword",
+            "sslrootcert",
+        )
+        for key in forbidden:
+            if self._query_value(parsed, key) is not None:
+                raise ValueError(
+                    "DATABASE_URL no puede usar autenticación peer, "
+                    ".pgpass ni certificado de cliente "
+                    "fuera de APP_ENV=development"
+                )
         return self
 
     @model_validator(mode="after")
@@ -238,6 +254,25 @@ class Settings(BaseSettings):
 
     def auth_cookie_secure(self) -> bool:
         return self.app_env != "development"
+
+
+def _normalize_sslmode(url: str) -> str:
+    """``sslmode=`` de la query pasa a ``ssl=`` (asyncpg no acepta sslmode)."""
+
+    try:
+        parsed = make_url(url)
+    except Exception:
+        return url
+    sslmode = Settings._query_value(parsed, "sslmode")
+    if sslmode is None:
+        return url
+    query = {
+        key: value
+        for key, value in (parsed.query or {}).items()
+        if str(key).lower() != "sslmode"
+    }
+    query["ssl"] = sslmode
+    return parsed.set(query=query).render_as_string(hide_password=False)
 
 
 _DSN_FIELD_NAMES = frozenset({"database_url", "DATABASE_URL"})
