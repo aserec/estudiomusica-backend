@@ -1662,6 +1662,140 @@ async def test_identity_put_name_length_is_checked_after_nfc(
     assert stored.last_name == "é" * 41
 
 
+async def test_identity_put_name_bounds_spaces_and_empty_last(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    admin = await _signup_role(
+        session_client, db_session, SystemRole.ADMIN, prefix="bnd-admin"
+    )
+    target = await _signup(session_client, email=unique_email("bnd-tgt"))
+    await session_client.post(
+        "/api/v1/auth/login",
+        json={"email": admin["email"], "password": PASSWORD},
+    )
+    nfd_e = "e\u0301"
+    fitted_nfc = "é" * 80
+    over_nfc = "é" * 81
+    fitted_nfd = nfd_e * 80
+    over_nfd = nfd_e * 81
+    assert len(unicodedata.normalize("NFC", fitted_nfd)) == 80
+    assert len(unicodedata.normalize("NFC", over_nfd)) == 81
+    raw_ok = "A" + (" " * 799)
+    raw_over = "A" + (" " * 800)
+    assert len(raw_ok) == 800
+    assert len(raw_over) == 801
+
+    for field in ("firstName", "lastName"):
+        ok_nfc = await session_client.put(
+            f"/api/v1/admin/users/{target['id']}",
+            json={field: fitted_nfc},
+        )
+        assert ok_nfc.status_code == 200, ok_nfc.text
+        assert ok_nfc.json()[field] == fitted_nfc
+        bad_nfc = await session_client.put(
+            f"/api/v1/admin/users/{target['id']}",
+            json={field: over_nfc},
+        )
+        assert bad_nfc.status_code == 400, bad_nfc.text
+        assert bad_nfc.json()["error"] == "validation"
+        assert field in bad_nfc.json()["fields"]
+        ok_nfd = await session_client.put(
+            f"/api/v1/admin/users/{target['id']}",
+            json={field: fitted_nfd},
+        )
+        assert ok_nfd.status_code == 200, ok_nfd.text
+        assert ok_nfd.json()[field] == fitted_nfc
+        bad_nfd = await session_client.put(
+            f"/api/v1/admin/users/{target['id']}",
+            json={field: over_nfd},
+        )
+        assert bad_nfd.status_code == 400, bad_nfd.text
+        assert field in bad_nfd.json()["fields"]
+        ok_raw = await session_client.put(
+            f"/api/v1/admin/users/{target['id']}",
+            json={field: raw_ok},
+        )
+        assert ok_raw.status_code == 200, ok_raw.text
+        assert ok_raw.json()[field] == "A"
+        bad_raw = await session_client.put(
+            f"/api/v1/admin/users/{target['id']}",
+            json={field: raw_over},
+        )
+        assert bad_raw.status_code == 400, bad_raw.text
+        assert field in bad_raw.json()["fields"]
+
+    blank_first = await session_client.put(
+        f"/api/v1/admin/users/{target['id']}",
+        json={"firstName": "   "},
+    )
+    assert blank_first.status_code == 400, blank_first.text
+    assert blank_first.json()["error"] == "validation"
+    assert "firstName" in blank_first.json()["fields"]
+    empty_last = await session_client.put(
+        f"/api/v1/admin/users/{target['id']}",
+        json={"lastName": ""},
+    )
+    assert empty_last.status_code == 200, empty_last.text
+    assert empty_last.json()["lastName"] == ""
+    db_session.expire_all()
+    stored = await db_session.get(User, target["id"])
+    assert stored is not None
+    assert stored.last_name == ""
+
+
+async def test_search_matches_last_name_and_full_display_name(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    marker = uuid.uuid4().hex[:8]
+    first = f"Nom{marker}"
+    last = f"Ape{marker}"
+    admin = await _signup_role(
+        session_client, db_session, SystemRole.ADMIN, prefix="n8b-admin"
+    )
+    created = await _signup(
+        session_client,
+        email=unique_email("n8b-hit"),
+        name=f"{first} {last}",
+    )
+    decoy = await _signup(
+        session_client,
+        email=unique_email("n8b-dec"),
+        name=f"{first} Other",
+    )
+    await session_client.post(
+        "/api/v1/auth/login",
+        json={"email": admin["email"], "password": PASSWORD},
+    )
+    for query in (last, f"{first} {last}"):
+        found = await session_client.get(
+            "/api/v1/users/search", params={"q": query, "pageSize": 20}
+        )
+        assert found.status_code == 200, found.text
+        ids = {item["id"] for item in found.json()["items"]}
+        assert str(created["id"]) in ids
+        if query == last:
+            assert str(decoy["id"]) not in ids
+        listed = await session_client.get(
+            "/api/v1/admin/users", params={"query": query, "pageSize": 20}
+        )
+        assert listed.status_code == 200
+        listed_ids = {item["id"] for item in listed.json()["items"]}
+        assert str(created["id"]) in listed_ids
+
+    session_client.cookies.clear()
+    teacher = await _signup(session_client, email=unique_email("n8b-tea"))
+    await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, teacher["id"], _COURSE, CourseRole.TEACHER)
+    by_last = await session_client.get("/api/v1/users/search", params={"q": last})
+    assert by_last.status_code == 200
+    assert str(created["id"]) in {item["id"] for item in by_last.json()["items"]}
+    by_full = await session_client.get(
+        "/api/v1/users/search", params={"q": f"{first} {last}"}
+    )
+    assert by_full.status_code == 200
+    assert str(created["id"]) in {item["id"] for item in by_full.json()["items"]}
+
+
 async def test_search_query_length_is_checked_after_nfc(
     session_client: Any, db_session: AsyncSession
 ) -> None:
