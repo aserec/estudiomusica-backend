@@ -512,16 +512,22 @@ def test_orphan_objects_in_other_test_db_do_not_fail_production(
         assert result.returncode == 0, result.stdout + result.stderr
         assert asyncio.run(_role_exists(require_postgres, orphan)) is None
     finally:
+        if asyncio.run(_database_exists(require_postgres, other_name)) is not None:
 
-        async def cleanup() -> None:
-            other_engine = _admin_engine(other)
-            try:
-                async with other_engine.connect() as connection:
-                    await connection.execute(
-                        text("DROP TABLE IF EXISTS orphan_crossdb_owned")
-                    )
-            finally:
-                await other_engine.dispose()
+            async def cleanup_other() -> None:
+                other_engine = _admin_engine(other)
+                try:
+                    async with other_engine.connect() as connection:
+                        await connection.execute(
+                            text("DROP TABLE IF EXISTS orphan_crossdb_owned")
+                        )
+                finally:
+                    await other_engine.dispose()
+
+            asyncio.run(cleanup_other())
+        drop_database_if_exists(other)
+
+        async def cleanup_role() -> None:
             engine = _admin_engine(require_postgres)
             try:
                 async with engine.connect() as connection:
@@ -529,8 +535,7 @@ def test_orphan_objects_in_other_test_db_do_not_fail_production(
             finally:
                 await engine.dispose()
 
-        asyncio.run(cleanup())
-        drop_database_if_exists(other)
+        asyncio.run(cleanup_role())
 
 
 _NON_TEST_PROBE_DATABASES = frozenset(
