@@ -2,7 +2,7 @@
 
 import unicodedata
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
 from pydantic import EmailStr, TypeAdapter, ValidationError
@@ -23,6 +23,7 @@ from app.models import AuthSession, CourseMembership, User
 from app.models.user import SystemRole
 from app.permissions.matrix import has_site_permission
 from app.permissions.types import CourseRole, Permission
+from app.schemas.auth import normalize_email
 from app.schemas.pagination import Paginated, PaginationQuery
 from app.schemas.users import (
     AdminUserIdentityUpdate,
@@ -37,7 +38,7 @@ _SEARCH_Q_MAX = 200
 # Tope crudo generoso: Query(max_length=200) miraba el texto crudo y
 # rechazaba 101×``é`` (cabe) o aceptaba 101×U+0958 (202 NFC). El de 200
 # se aplica tras NFC; 2000 evita procesar entradas enormes.
-_SEARCH_Q_RAW_MAX = 2000
+SEARCH_Q_RAW_MAX = 2000
 _TEACHER_Q_MIN_EFFECTIVE = 3
 _TEACHER_SEARCH_CAP = 10
 _LIKE_WILDCARDS = frozenset("%_")
@@ -82,7 +83,7 @@ def _search_term(raw: str) -> str:
     return unicodedata.normalize("NFC", raw.strip())
 
 
-def _nfc_text(column: Any) -> Any:
+def _nfc_text(column: ColumnElement[Any]) -> ColumnElement[Any]:
     return func.normalize(column, literal_column("NFC"))
 
 
@@ -94,10 +95,7 @@ def _name_match(term: str) -> ColumnElement[bool]:
 
     pattern = f"%{_escape_like(term)}%"
     display_name = User.first_name + " " + User.last_name
-    return cast(
-        ColumnElement[bool],
-        _nfc_text(display_name).ilike(pattern, escape="\\"),
-    )
+    return _nfc_text(display_name).ilike(pattern, escape="\\")
 
 
 def _email_term(term: str) -> str:
@@ -107,7 +105,7 @@ def _email_term(term: str) -> str:
     email válido, ``strip`` + ``lower`` + NFC.
     """
 
-    prepared = term.strip().lower()
+    prepared = normalize_email(term)
     try:
         return str(_EMAIL_ADAPTER.validate_python(prepared))
     except ValidationError:
