@@ -2043,9 +2043,10 @@ def test_sslrootcert_and_sslmode_are_case_insensitive(tmp_path: Any) -> None:
 
 
 def test_sslrootcert_and_pgsslrootcert_accept_ca_without_keyusage(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    """CA sin ``keyUsage``: ``?sslrootcert=`` y ``PGSSLROOTCERT`` iguales (libpq)."""
+    """CA sin ``keyUsage``: ``?sslrootcert=`` y ``PGSSLROOTCERT`` (asyncpg real)."""
 
     import ssl as ssl_mod
     from pathlib import Path
@@ -2063,14 +2064,17 @@ def test_sslrootcert_and_pgsslrootcert_accept_ca_without_keyusage(
     query_ctx = query_kwargs["ssl"]
     assert isinstance(query_ctx, ssl_mod.SSLContext)
     helper_ctx = ssl_context_from_rootcert(str(cafile), "verify-full")
-    pg_ctx = _pgsslrootcert_ssl_context(str(cafile))
     strict = getattr(ssl_mod, "VERIFY_X509_STRICT", 0)
-    for ctx in (query_ctx, helper_ctx, pg_ctx):
+    partial = getattr(ssl_mod, "VERIFY_X509_PARTIAL_CHAIN", 0)
+    for ctx in (query_ctx, helper_ctx):
         assert ctx.check_hostname is True
         assert ctx.verify_mode == ssl_mod.CERT_REQUIRED
         if strict:
             assert ctx.verify_flags & strict == 0
+        if partial:
+            assert ctx.verify_flags & partial == 0
         _tls_handshake(ctx, server_ctx, "localhost")
+    _asyncpg_connect_with_pgsslrootcert(monkeypatch, cafile, server_ctx)
 
     with pytest.raises(ssl_mod.SSLError):
         _tls_handshake(query_ctx, server_ctx, "wrong.example")
@@ -2366,16 +2370,64 @@ def _write_ca_without_keyusage_and_leaf(directory: Any) -> tuple[Any, Any, Any]:
     return ca_pem, server_crt, server_key
 
 
-def _pgsslrootcert_ssl_context(cafile: str) -> Any:
-    """Construcción de asyncpg cuando hay ``PGSSLROOTCERT`` / verify-full."""
+def _asyncpg_connect_with_pgsslrootcert(
+    monkeypatch: pytest.MonkeyPatch,
+    cafile: Any,
+    server_ctx: Any,
+) -> None:
+    """Handshake TLS con asyncpg + ``PGSSLROOTCERT`` (no se copia el SSLContext)."""
 
     import ssl as ssl_mod
 
-    ctx = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_CLIENT)
-    ctx.load_verify_locations(cafile=cafile)
-    ctx.verify_mode = ssl_mod.CERT_REQUIRED
-    ctx.check_hostname = True
-    return ctx
+    import asyncpg
+
+    port_box: list[int] = []
+    ready = threading.Event()
+
+    def serve() -> None:
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        port_box.append(int(listener.getsockname()[1]))
+        listener.listen(1)
+        ready.set()
+        conn, _ = listener.accept()
+        try:
+            wrapped = server_ctx.wrap_socket(conn, server_side=True)
+            wrapped.close()
+        except OSError:
+            pass
+        finally:
+            conn.close()
+            listener.close()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    assert ready.wait(5)
+    monkeypatch.setenv("PGSSLROOTCERT", str(cafile))
+    monkeypatch.delenv("PGSSLCERT", raising=False)
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+
+    async def _connect() -> None:
+        try:
+            await asyncpg.connect(
+                host="127.0.0.1",
+                port=port_box[0],
+                user="u",
+                password="p",
+                database="db",
+                ssl="verify-full",
+                timeout=3,
+            )
+        except Exception as exc:
+            text = f"{type(exc).__name__}: {exc}".lower()
+            if isinstance(exc, ssl_mod.SSLError) or "certificate verify" in text:
+                raise
+
+    try:
+        asyncio.run(_connect())
+    finally:
+        thread.join(timeout=5)
 
 
 def _tls_handshake(client_ctx: Any, server_ctx: Any, hostname: str) -> None:

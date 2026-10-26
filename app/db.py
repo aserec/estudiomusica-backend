@@ -98,14 +98,13 @@ def ssl_context_from_rootcert(cafile: str, ssl_value: object = None) -> ssl.SSLC
     Misma construcción que asyncpg con ``PGSSLROOTCERT``: no usa
     ``create_default_context`` (Python 3.13+ activa ``VERIFY_X509_STRICT``
     y rechaza CAs sin ``keyUsage``; libpq las acepta). Sigue verificando
-    hostname y cadena.
+    hostname y cadena. Tampoco activa ``VERIFY_X509_PARTIAL_CHAIN``: un
+    ``sslrootcert`` que solo tenga una intermedia no basta (igual que
+    libpq/asyncpg).
     """
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.load_verify_locations(cafile=cafile)
-    strict = getattr(ssl, "VERIFY_X509_STRICT", 0)
-    if strict:
-        ctx.verify_flags &= ~strict
     mode = str(ssl_value).lower() if isinstance(ssl_value, str) else ""
     if mode == "verify-ca":
         ctx.check_hostname = False
@@ -274,7 +273,8 @@ async def _get_session() -> AsyncIterator[AsyncSession]:
                 close()
             raise RuntimeError(
                 "la sesión no se puede usar después del yield; "
-                "un StreamingResponse necesita SessionStreamingDep"
+                "un StreamingResponse o BackgroundTasks necesita "
+                "SessionStreamingDep"
             )
 
         sync = getattr(session, "sync_session", None)

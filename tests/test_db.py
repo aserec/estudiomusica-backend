@@ -559,6 +559,7 @@ async def test_streaming_session_dep_leaves_no_idle_in_transaction(
                 leaked = await client.get("/api/v1/_test/session-stream")
             except RuntimeError as exc:
                 assert "SessionStreamingDep" in str(exc)
+                assert "BackgroundTasks" in str(exc)
             else:
                 assert leaked.status_code >= 400 or "row=" not in leaked.text
             after_leak = await _count_idle_in_transaction(require_postgres)
