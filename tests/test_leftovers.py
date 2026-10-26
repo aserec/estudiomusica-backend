@@ -83,6 +83,18 @@ def test_drop_leftover_test_databases_removes_known_names(
     drop_database_if_exists(leftover)
 
 
+def test_migrated_fixture_calls_leftover_cleanup() -> None:
+    """L1/L2: el fixture de sesión sí llama a los drops (no un no-op)."""
+
+    import inspect
+
+    from tests.conftest import migrated_test_database
+
+    source = inspect.getsource(migrated_test_database)
+    assert source.count("_drop_leftover_test_tables") >= 2
+    assert source.count("_drop_leftover_test_databases") >= 2
+
+
 def test_own_schema_names_includes_public() -> None:
     """AG6: ``public`` está siempre, aunque no haya tablas con schema."""
 
