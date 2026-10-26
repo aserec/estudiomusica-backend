@@ -1562,12 +1562,48 @@ def test_require_freeze_tests_converts_skip_to_failure(
 def test_hostssl_helper_does_not_skip_on_plain_host(
     require_postgres: RedactedDsn,
 ) -> None:
-    """K1 en host: ssl=False con éxito no salta. En hostssl real, skip."""
+    """K1 en host: si ssl=False conecta, el helper no salta.
 
+    En hostssl real (28000/no encryption) este caso se salta; matar K1
+    ahí exige ``REQUIRE_FREEZE_TESTS=1``.
+    """
+
+    import threading
+
+    import asyncpg
+
+    login = _inspector_connect_kwargs(require_postgres)
+    error: list[BaseException] = []
+
+    async def probe() -> None:
+        connection = await asyncpg.connect(
+            host=login.get("host"),
+            port=login.get("port") or 5432,
+            user=login.get("user"),
+            password=login.get("password"),
+            database=login.get("database"),
+            ssl=False,
+            timeout=2,
+        )
+        await connection.close()
+
+    def worker() -> None:
+        try:
+            asyncio.run(probe())
+        except BaseException as exc:
+            error.append(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(timeout=5)
+    if error and _is_hostssl_no_encryption(error[0]):
+        pytest.skip("hostssl real; K1 en hostssl exige REQUIRE_FREEZE_TESTS")
+    if error:
+        raise error[0]
     try:
         _skip_if_hostssl_rejects_plain(require_postgres)
     except pytest.skip.Exception as skipped:
-        pytest.skip(f"{skipped}; K1 en hostssl real exige REQUIRE_FREEZE_TESTS")
+        raise AssertionError("K1: el helper saltó en un host plano") from skipped
 
 
 def test_hostssl_helper_reraises_other_errors(
