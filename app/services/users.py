@@ -74,8 +74,12 @@ def _effective_search_len(term: str) -> int:
     return sum(1 for char in term if char not in _LIKE_WILDCARDS)
 
 
+def _search_term(raw: str) -> str:
+    return unicodedata.normalize("NFC", raw.strip())
+
+
 def _name_match(term: str) -> ColumnElement[bool]:
-    pattern = f"%{_escape_like(unicodedata.normalize('NFC', term))}%"
+    pattern = f"%{_escape_like(term)}%"
     display_name = func.concat(User.first_name, " ", User.last_name)
     return or_(
         User.first_name.ilike(pattern, escape="\\"),
@@ -243,7 +247,7 @@ async def list_admin_users(
     pagination: PaginationQuery,
 ) -> Paginated[AdminUserView]:
     filters = list(_status_filters(status))
-    term = query.strip() if query else ""
+    term = _search_term(query) if query else ""
     if len(term) > _SEARCH_Q_MAX:
         raise Validation(fields=["query"])
     if term:
@@ -411,7 +415,7 @@ async def search_users(
 ) -> Paginated[UserSearchHit]:
     if not await actor_can_search_users(session, actor):
         raise AccessDenied()
-    term = q.strip()
+    term = _search_term(q)
     if len(term) > _SEARCH_Q_MAX:
         raise Validation(fields=["q"])
     email_term = _email_term(term)
