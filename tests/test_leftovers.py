@@ -944,6 +944,61 @@ def test_orphan_production_test_role_ignores_live_and_foreign_names() -> None:
     assert _orphan_production_test_role(f"em_prod_tests_{_unused_pid()}") is True
 
 
+_CHILD_REAL_TEARDOWN = """
+import os
+from pathlib import Path
+
+from tests.conftest import PRODUCTION_TEST_USER
+
+
+def test_records_own_production_role(production_test_database_url):
+    Path(os.environ["EM_ROLE_FILE"]).write_text(PRODUCTION_TEST_USER)
+    assert production_test_database_url is not None
+"""
+
+
+@pytest.mark.db
+@pytest.mark.timeout(120)
+def test_production_role_teardown_drops_own_role(
+    require_postgres: RedactedDsn,
+    tmp_path: Path,
+) -> None:
+    """P1: el teardown real borra el rol propio, sin parchear el nombre."""
+
+    role_file = tmp_path / "own-role.txt"
+    probe = tmp_path / "test_real_teardown.py"
+    probe.write_text(_CHILD_REAL_TEARDOWN)
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env["TEST_DATABASE_URL"] = require_postgres.secret()
+    env["REQUIRE_POSTGRES"] = "1"
+    env["EM_ROLE_FILE"] = str(role_file)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "tests.conftest",
+            "-p",
+            "no:cacheprovider",
+            "-q",
+            str(probe),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=90,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    name = role_file.read_text().strip()
+    assert name.startswith("em_prod_tests_")
+    assert name != "em_prod_tests"
+    assert asyncio.run(_role_exists(require_postgres, name)) is None
+
+
 def test_production_test_role_name_is_unique() -> None:
     from tests.conftest import _production_test_role_name
 
