@@ -15,7 +15,6 @@ from app.schemas.unicode_props import (
     JOINING_L,
     JOINING_R,
     JOINING_T,
-    REGIONAL_INDICATOR,
 )
 
 _NAME_MAX = 120
@@ -100,8 +99,6 @@ def _is_emoji_zwj_side(char: str, saw_vs16: bool) -> bool:
     code = ord(char)
     if not _in_ranges(code, EXTENDED_PICTOGRAPHIC):
         return False
-    if _in_ranges(code, REGIONAL_INDICATOR):
-        return False
     return bool(_in_ranges(code, EMOJI_PRESENTATION) or saw_vs16)
 
 
@@ -145,7 +142,10 @@ def _keep_joiner(value: str, index: int, char: str) -> bool:
 
 
 def _keep_significant_joiners(value: str) -> str:
-    """ZWJ/ZWNJ: virama; ZWNJ CONTEXTJ RFC 5892; ZWJ entre pictográficos emoji."""
+    """ZWJ/ZWNJ: CONTEXTJ RFC 5892 A.1 (ZWNJ) y A.2 (ZWJ tras virama).
+
+    El ZWJ entre emoji es extensión de UTS #51, no de IDNA.
+    """
 
     return "".join(
         char
