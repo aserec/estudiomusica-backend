@@ -1874,7 +1874,7 @@ def test_ssl_disable_sslrootcert_engine_matches_probe(
     from sqlalchemy import text
 
     from app.config import get_settings
-    from app.db import clear_engine, get_engine
+    from app.db import clear_engine, dispose_engine, get_engine
     from tests.conftest import _build_client
 
     _skip_if_hostssl_rejects_plain(require_postgres)
@@ -1905,8 +1905,11 @@ def test_ssl_disable_sslrootcert_engine_matches_probe(
 
     async def _engine_select() -> None:
         engine = get_engine()
-        async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT 1")) == 1
+        try:
+            async with engine.connect() as connection:
+                assert await connection.scalar(text("SELECT 1")) == 1
+        finally:
+            await dispose_engine()
 
     asyncio.run(_engine_select())
     clear_engine()

@@ -258,6 +258,9 @@ async def _get_session() -> AsyncIterator[AsyncSession]:
             rollback = getattr(connection, "rollback", None)
             if callable(rollback):
                 rollback()
+            close = getattr(connection, "close", None)
+            if callable(close):
+                close()
             raise RuntimeError(
                 "la sesión no se puede usar después del yield; "
                 "un StreamingResponse necesita SessionStreamingDep"
