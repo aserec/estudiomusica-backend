@@ -1673,7 +1673,9 @@ async def test_teacher_exact_email_uses_lower_not_casefold(
 async def test_teacher_search_normalizes_istanbul_email_like_login(
     session_client: Any, db_session: AsyncSession
 ) -> None:
-    typed = "İstanbul"
+    typed = "\u0130stanbul"
+    assert typed[0] == "\u0130"
+    assert "\u0307" not in typed
     marker = uuid.uuid4().hex[:8]
     typed_email = f"{typed}-{marker}@example.com"
     stored = normalize_email(typed_email)
@@ -1697,6 +1699,23 @@ async def test_teacher_search_normalizes_istanbul_email_like_login(
     items = found.json()["items"]
     assert len(items) == 1
     assert items[0]["email"] == stored
+
+    session_client.cookies.clear()
+    await _signup_role(session_client, db_session, SystemRole.ADMIN, prefix="ist-admin")
+    admin_search = await session_client.get(
+        "/api/v1/users/search", params={"q": typed_email}
+    )
+    assert admin_search.status_code == 200
+    admin_items = admin_search.json()["items"]
+    assert len(admin_items) == 1
+    assert admin_items[0]["email"] == stored
+    listed = await session_client.get(
+        "/api/v1/admin/users", params={"query": typed_email}
+    )
+    assert listed.status_code == 200
+    listed_items = listed.json()["items"]
+    assert len(listed_items) == 1
+    assert listed_items[0]["email"] == stored
 
 
 async def test_teacher_exact_email_query_uses_unique_index(
