@@ -1375,7 +1375,21 @@ def test_category_dump_restore_preserves_rows(
     dsn = require_postgres
     assert isinstance(dsn, RedactedDsn)
     parsed = make_url(dsn.secret())
-    libpq = parsed.set(drivername="postgresql").render_as_string(hide_password=False)
+    query: dict[str, str] = {
+        str(key): str(value)
+        for key, value in (parsed.query or {}).items()
+        if str(key).lower() != "ssl"
+    }
+    ssl_mode: str | None = None
+    for key, value in (parsed.query or {}).items():
+        if str(key).lower() == "ssl":
+            ssl_mode = str(value)
+            break
+    if ssl_mode is not None and "sslmode" not in {key.lower() for key in query}:
+        query["sslmode"] = ssl_mode
+    libpq = parsed.set(drivername="postgresql", query=query).render_as_string(
+        hide_password=False
+    )
     suffix = uuid.uuid4().hex[:8]
     marker = f"DumpRestore-{suffix}"
 
@@ -1439,7 +1453,7 @@ def test_category_dump_restore_preserves_rows(
             drop_database_if_exists(dest)
             ensure_database_exists(dest)
             dest_libpq = parsed.set(
-                drivername="postgresql", database=dest_name
+                drivername="postgresql", database=dest_name, query=query
             ).render_as_string(hide_password=False)
             restore(dest_libpq)
 
@@ -1459,9 +1473,9 @@ def test_category_dump_restore_preserves_rows(
                 finally:
                     await engine.dispose()
 
-            name, key = asyncio.run(restored(dest.secret()))
-            assert name == marker, kind
-            assert key == category_name_key(marker), kind
+            restored_name, restored_key = asyncio.run(restored(dest.secret()))
+            assert restored_name == marker, kind
+            assert restored_key == category_name_key(marker), kind
             drop_database_if_exists(dest)
     finally:
         shutil.rmtree(dump_dir, ignore_errors=True)
