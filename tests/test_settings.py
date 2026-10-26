@@ -233,6 +233,39 @@ def test_resolved_url_translates_sslmode_to_ssl() -> None:
     assert "sslmode" not in opts
 
 
+def test_resolved_url_translates_uppercase_sslmode() -> None:
+    """Q5b: ``SSLMODE=`` también se quita (hace falta ``.lower()``)."""
+
+    from sqlalchemy.engine.url import make_url
+
+    settings = Settings(
+        database_url=(
+            "postgresql+asyncpg://app:s3cret@127.0.0.1:5432/app?SSLMODE=require"
+        )
+    )
+    parsed = make_url(settings.resolved_database_url())
+    query = {str(key).lower(): value for key, value in parsed.query.items()}
+    assert query.get("ssl") == "require"
+    assert "sslmode" not in query
+    assert all(str(key).lower() != "sslmode" for key in parsed.query)
+
+
+def test_db_health_cache_ttl_default_and_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SF15/SF16: defecto 1 s; negativo y >60 se rechazan."""
+
+    monkeypatch.delenv("DB_HEALTH_CACHE_TTL", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.db_health_cache_ttl == 1.0
+    with pytest.raises(ValidationError):
+        Settings(db_health_cache_ttl=-0.1, _env_file=None)
+    with pytest.raises(ValidationError):
+        Settings(db_health_cache_ttl=60.1, _env_file=None)
+    assert Settings(db_health_cache_ttl=0, _env_file=None).db_health_cache_ttl == 0.0
+    assert Settings(db_health_cache_ttl=60, _env_file=None).db_health_cache_ttl == 60.0
+
+
 def test_production_rejects_client_cert_and_passfile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -242,15 +275,61 @@ def test_production_rejects_client_cert_and_passfile(
         "postgresql+asyncpg://app:s3cret@db.example:5432/app?sslcert=/tmp/c.pem",
     )
     get_settings.cache_clear()
-    with pytest.raises(ValidationError, match="certificado|pgpass|peer"):
+    with pytest.raises(ValidationError, match="certificado") as cert:
         Settings()
+    assert "peer" not in str(cert.value).lower()
+    assert "s3cret" not in str(cert.value)
     get_settings.cache_clear()
     monkeypatch.setenv(
         "DATABASE_URL",
         "postgresql+asyncpg://app:s3cret@db.example:5432/app?passfile=/tmp/.pgpass",
     )
-    with pytest.raises(ValidationError, match="certificado|pgpass|peer"):
+    with pytest.raises(ValidationError, match="passfile|pgpass") as passfile:
         Settings()
+    assert "peer" not in str(passfile.value).lower()
+    get_settings.cache_clear()
+
+
+def test_production_rejects_pgpassfile_and_client_cert_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app",
+    )
+    monkeypatch.setenv("PGPASSFILE", "/tmp/.pgpass")
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="PGPASSFILE") as caught:
+        Settings()
+    assert "peer" not in str(caught.value).lower()
+    get_settings.cache_clear()
+    monkeypatch.delenv("PGPASSFILE")
+    monkeypatch.setenv("PGSSLCERT", "/tmp/c.pem")
+    with pytest.raises(ValidationError, match="PGSSLCERT"):
+        Settings()
+    get_settings.cache_clear()
+    monkeypatch.delenv("PGSSLCERT")
+    monkeypatch.setenv("PGSSLKEY", "/tmp/k.pem")
+    with pytest.raises(ValidationError, match="PGSSLKEY"):
+        Settings()
+    get_settings.cache_clear()
+    monkeypatch.delenv("PGSSLKEY")
+    monkeypatch.setenv("PGSSLROOTCERT", "/tmp/ca.pem")
+    with pytest.raises(ValidationError, match="PGSSLROOTCERT"):
+        Settings()
+    get_settings.cache_clear()
+
+
+def test_development_allows_pgpassfile_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("PGPASSFILE", "/tmp/.pgpass")
+    monkeypatch.setenv("DATABASE_URL", _DEFAULT_DEV_DSN)
+    get_settings.cache_clear()
+    settings = Settings()
+    assert settings.app_env == "development"
     get_settings.cache_clear()
 
 

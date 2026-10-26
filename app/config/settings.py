@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -53,7 +54,7 @@ class Settings(BaseSettings):
         repr=False,
     )
     db_health_timeout: float = Field(default=2.0, gt=0)
-    db_health_cache_ttl: float = Field(default=1.0, ge=0)
+    db_health_cache_ttl: float = Field(default=1.0, ge=0, le=60)
     db_connect_timeout: float = Field(default=2.0, gt=0)
     db_command_timeout: float = Field(default=5.0, gt=0)
     db_pool_size: int = Field(default=5, ge=1)
@@ -134,6 +135,10 @@ class Settings(BaseSettings):
         La comparación de usuario y del sufijo ``_test`` no distingue
         mayúsculas. asyncpg acepta ``password``, ``user``, ``database`` y
         ``dbname`` en la query; se aplican como override antes de validar.
+        También se rechazan ``passfile`` / ``.pgpass`` y certificado de
+        cliente en la query o en ``PGPASSFILE`` / ``PGSSLCERT`` /
+        ``PGSSLKEY`` / ``PGSSLROOTCERT``. El cliente no puede rechazar
+        autenticación peer: eso lo decide ``pg_hba.conf``.
         """
 
         if self.app_env == "development":
@@ -174,19 +179,25 @@ class Settings(BaseSettings):
                 "DATABASE_URL no puede apuntar a una base *_test "
                 "fuera de APP_ENV=development"
             )
-        forbidden = (
-            "passfile",
-            "sslcert",
-            "sslkey",
-            "sslpassword",
-            "sslrootcert",
-        )
-        for key in forbidden:
+        if self._query_value(parsed, "passfile") is not None:
+            raise ValueError(
+                "DATABASE_URL no puede usar passfile/.pgpass "
+                "fuera de APP_ENV=development"
+            )
+        for key in ("sslcert", "sslkey", "sslpassword", "sslrootcert"):
             if self._query_value(parsed, key) is not None:
                 raise ValueError(
-                    "DATABASE_URL no puede usar autenticación peer, "
-                    ".pgpass ni certificado de cliente "
-                    "fuera de APP_ENV=development"
+                    f"DATABASE_URL no puede usar certificado de cliente "
+                    f"({key}) fuera de APP_ENV=development"
+                )
+        if os.environ.get("PGPASSFILE"):
+            raise ValueError(
+                "PGPASSFILE no puede estar definido fuera de APP_ENV=development"
+            )
+        for env_name in ("PGSSLCERT", "PGSSLKEY", "PGSSLROOTCERT"):
+            if os.environ.get(env_name):
+                raise ValueError(
+                    f"{env_name} no puede estar definido fuera de APP_ENV=development"
                 )
         return self
 
