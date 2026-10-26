@@ -188,20 +188,20 @@ async def update_category(
 ) -> Category:
     fields = body.model_fields_set
     next_name_update = body.name
-    next_sort = body.sort_order
+    next_sort: int | None = None
     if "name" in fields and next_name_update is None:
         raise Validation(fields=["name"])
-    if "sort_order" in fields and next_sort is None:
-        raise Validation(fields=["sortOrder"])
+    if "sort_order" in fields:
+        if body.sort_order is None:
+            raise Validation(fields=["sortOrder"])
+        next_sort = body.sort_order
     changing_parent = "parent_id" in fields
     if changing_parent:
         await _lock_category_tree(session)
     row = await _lock_category(session, category_id)
     if row is None:
         raise NotFound()
-    next_name = next_name_update if "name" in fields else row.name
-    if next_name is None:
-        raise Validation(fields=["name"])
+    next_name = row.name if next_name_update is None else next_name_update
     next_parent = row.parent_id
     if changing_parent:
         if body.parent_id is not None:
@@ -219,7 +219,7 @@ async def update_category(
         row.parent_id = next_parent
     if "description" in fields:
         row.description = body.description
-    if "sort_order" in fields and next_sort is not None:
+    if next_sort is not None:
         row.sort_order = next_sort
     try:
         async with session.begin_nested():
