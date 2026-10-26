@@ -1,5 +1,5 @@
 from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -677,6 +677,59 @@ async def test_streaming_session_commit_error_is_noticed(
     finally:
         await _drop_probe_table(setup_engine, probe_table)
         await setup_engine.dispose()
+        await dispose_engine()
+        get_settings.cache_clear()
+        clear_engine()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_reject_begin_after_yield_rolls_back_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """L3/L4: 4d1ecc4 — el after_begin hace rollback y close (si no, leak)."""
+
+    from httpx2 import ASGITransport, AsyncClient
+    from sqlalchemy.engine.base import Connection
+
+    from app.config import get_settings
+    from app.db import dispose_engine, get_engine
+    from app.main import create_app
+    from tests.conftest import _mount_probes
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    get_settings.cache_clear()
+    clear_engine()
+    application = create_app()
+    _mount_probes(application)
+    engine = get_engine()
+    rollbacks: list[object] = []
+    closes: list[object] = []
+    original_rollback = Connection.rollback
+    original_close = Connection.close
+
+    def _spy_rollback(self: Connection) -> None:
+        rollbacks.append(self)
+        original_rollback(self)
+
+    def _spy_close(self: Connection) -> None:
+        closes.append(self)
+        original_close(self)
+
+    monkeypatch.setattr(Connection, "rollback", _spy_rollback)
+    monkeypatch.setattr(Connection, "close", _spy_close)
+    try:
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            with suppress(Exception):
+                await client.get("/api/v1/_test/session-stream")
+        assert rollbacks, "L4: after_begin debe llamar connection.rollback"
+        assert closes, "L3: after_begin debe llamar connection.close"
+        assert engine.sync_engine.pool.checkedout() == 0
+        assert await _count_idle_in_transaction(require_postgres) == 0
+    finally:
         await dispose_engine()
         get_settings.cache_clear()
         clear_engine()
