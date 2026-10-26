@@ -400,7 +400,7 @@ def test_session_route_deps_use_function_scope() -> None:
             elif call is _get_streaming_session:
                 seen_streaming = True
                 assert item.scope == "request", route
-                assert _route_returns_streaming(route), route.path
+                assert _route_returns_streaming(route), getattr(route, "path", route)
     assert seen_session
     assert seen_streaming
     streaming_args = get_args(SessionStreamingDep)
@@ -728,7 +728,9 @@ async def test_reject_begin_after_yield_rolls_back_and_closes(
                 await client.get("/api/v1/_test/session-stream")
         assert rollbacks, "L4: after_begin debe llamar connection.rollback"
         assert closes, "L3: after_begin debe llamar connection.close"
-        assert engine.sync_engine.pool.checkedout() == 0
+        checkedout = getattr(engine.sync_engine.pool, "checkedout", None)
+        assert callable(checkedout)
+        assert int(checkedout()) == 0
         assert await _count_idle_in_transaction(require_postgres) == 0
     finally:
         await dispose_engine()

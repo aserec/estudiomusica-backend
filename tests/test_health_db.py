@@ -1710,20 +1710,14 @@ def test_health_sslrootcert_good_ca_up_bad_ca_down(
                         )
                     )
                     await connection.run_sync(
-                        lambda sync_conn: probe_table.drop(
-                            sync_conn, checkfirst=True
-                        )
+                        lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
                     )
                     await connection.run_sync(
-                        lambda sync_conn: probe_table.create(
-                            sync_conn, checkfirst=True
-                        )
+                        lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
                     )
                 else:
                     await connection.run_sync(
-                        lambda sync_conn: probe_table.drop(
-                            sync_conn, checkfirst=True
-                        )
+                        lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
                     )
         finally:
             await engine.dispose()
@@ -1969,8 +1963,7 @@ def test_sslmode_verify_full_without_rootcert_rejects_untrusted(
         asyncio.run(_connect())
     engine_text = str(engine_exc.value).lower()
     assert any(
-        token in engine_text
-        for token in ("ssl", "certificate", "certificat", "verify")
+        token in engine_text for token in ("ssl", "certificate", "certificat", "verify")
     ), engine_exc.value
 
 
