@@ -73,7 +73,9 @@ def process_revision_directives(
     """Añade el trigger ``updated_at`` a cada ``CreateTable`` PersistentModel.
 
     Las revisiones vacías solo se descartan con ``--autogenerate``
-    (``cmd_opts.autogenerate``). ``alembic check`` necesita el script.
+    (``cmd_opts.autogenerate``). Sin ``cmd_opts`` (o con
+    ``alembic check``, que no pone ese flag) no se descartan: el
+    script vacío es lo que ``check`` compara.
     """
 
     if not directives:

@@ -67,7 +67,7 @@ La sonda de Postgres es `GET /api/v1/health/db` (también hay alias en `GET /hea
 curl -i http://127.0.0.1:8000/api/v1/health/db
 ```
 
-Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde o la sonda supera `DB_HEALTH_TIMEOUT` (2 s por defecto), HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, code, fields}` de las rutas de negocio. El tiempo total de la petición no supera `DB_HEALTH_TIMEOUT` más 0,4 s (`HEALTH_TIMEOUT_MARGIN_SECONDS`): un close/reset congelado se abandona (terminate + invalidate) sin bloquear la respuesta. En el caso sano la conexión vuelve al pool. `GET /health/db` en la raíz es el alias de sonda; no aparece en OpenAPI.
+Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde o la sonda supera `DB_HEALTH_TIMEOUT` (2 s por defecto), HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, code, fields}` de las rutas de negocio. La sonda abre su propia conexión asyncpg (sin el pool de la app ni `pre_ping`; el `SELECT 1` es el ping) y guarda la referencia antes de la query. El tiempo total no supera `DB_HEALTH_TIMEOUT` más 0,4 s (`HEALTH_TIMEOUT_MARGIN_SECONDS`): un connect/SELECT/close congelado se abandona con `Connection.terminate`. Si hay una sonda abandonada pendiente se responde 503 sin abrir otra. `GET /health/db` en la raíz es el alias de sonda; no aparece en OpenAPI.
 
 Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 

@@ -7,7 +7,7 @@ import contextlib
 import struct
 from typing import Literal
 
-FreezeOn = Literal["select_1", "pre_ping", "rollback"]
+FreezeOn = Literal["select_1", "pre_ping", "rollback", "connect", "none"]
 
 
 def _buffer_has_ready_for_query(buf: bytes) -> bool:
@@ -74,6 +74,7 @@ class FreezeAfterLoginProxy:
         self,
         data: bytes,
         *,
+        logged_in: bool,
         dialect_ready: bool,
         seen_select_1: bool,
         first_cycle_done: bool,
@@ -84,10 +85,14 @@ class FreezeAfterLoginProxy:
         is_rollback = "rollback" in sql
         is_empty_ping = ";" in sql and "select" not in sql and not is_rollback
 
+        if self.freeze_on == "none":
+            return False
+        if self.freeze_on == "connect":
+            return True
         if self.freeze_on == "select_1":
-            return dialect_ready and is_select_1
+            return logged_in and is_select_1
         if self.freeze_on == "rollback":
-            return dialect_ready and seen_select_1 and is_rollback
+            return logged_in and seen_select_1
         if self.freeze_on == "pre_ping":
             return first_cycle_done and (is_empty_ping or is_select_1 or is_rollback)
         return False
@@ -97,6 +102,18 @@ class FreezeAfterLoginProxy:
         client_reader: asyncio.StreamReader,
         client_writer: asyncio.StreamWriter,
     ) -> None:
+        if self.freeze_on == "connect":
+            self._writers.append(client_writer)
+            try:
+                while True:
+                    data = await client_reader.read(65536)
+                    if not data:
+                        break
+            except Exception:
+                return
+            finally:
+                client_writer.close()
+            return
         pg_reader, pg_writer = await asyncio.open_connection(
             self.target_host, self.target_port
         )
@@ -121,6 +138,7 @@ class FreezeAfterLoginProxy:
                     sql = _client_sql(data)
                     if self._should_freeze(
                         data,
+                        logged_in=logged_in.is_set(),
                         dialect_ready=dialect_ready,
                         seen_select_1=seen_select_1,
                         first_cycle_done=first_cycle_done,
