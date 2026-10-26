@@ -476,6 +476,37 @@ def test_production_rejects_query_database_test_name(
     get_settings.cache_clear()
 
 
+def test_production_rejects_duplicate_database_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app"
+        "?database=ok&database=x_test",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="database/dbname") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_production_rejects_duplicate_dbname_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/app"
+        "?dbname=ok&dbname=x_test",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="database/dbname"):
+        Settings()
+    get_settings.cache_clear()
+
+
 def test_production_rejects_query_dbname_test_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

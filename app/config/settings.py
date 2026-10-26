@@ -158,6 +158,24 @@ class Settings(BaseSettings):
             return str(value)
         return None
 
+    @staticmethod
+    def _unique_query_value(parsed: object, *keys: str) -> str | None:
+        query = getattr(parsed, "query", {}) or {}
+        found: list[str] = []
+        wanted = {key.lower() for key in keys}
+        for raw_key, value in query.items():
+            if str(raw_key).lower() not in wanted:
+                continue
+            if isinstance(value, list | tuple):
+                found.extend(str(item) for item in value)
+            else:
+                found.append(str(value))
+        if len(found) > 1:
+            raise ValueError(
+                "DATABASE_URL no puede repetir database/dbname en la query"
+            )
+        return found[0] if found else None
+
     @model_validator(mode="after")
     def reject_default_database_credentials(self) -> Self:
         """Las credenciales y bases de test no valen fuera de development.
@@ -187,7 +205,7 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_URL no es un DSN válido") from None
         query_password = self._query_value(parsed, "password")
         query_user = self._query_value(parsed, "user")
-        query_database = self._query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
+        query_database = self._unique_query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
         password = query_password if query_password is not None else parsed.password
         username = query_user if query_user is not None else parsed.username
         database = query_database if query_database is not None else parsed.database
