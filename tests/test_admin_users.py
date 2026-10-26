@@ -596,8 +596,8 @@ async def test_query_wildcard_escape_does_not_match_everyone(
     await _signup_role(session_client, db_session, SystemRole.ADMIN, prefix="wc-admin")
     marker = uuid.uuid4().hex[:8]
     special = User(
-        first_name=marker,
-        last_name="100% Match",
+        first_name=f"{marker}%Special",
+        last_name="Match",
         email=unique_email(f"{marker}-pct"),
         password_hash="x",
         system_role_id=SystemRole.ALUMNO,
@@ -950,9 +950,7 @@ async def test_suspended_admin_does_not_count_as_active(
         json={"suspended": True},
     )
     assert parked.status_code == 200
-    await _demote_foreign_admins(
-        db_session, {actor["id"], target["id"], suspended["id"]}
-    )
+    await _demote_foreign_admins(db_session, {target["id"], suspended["id"]})
     stale = await _signup(session_client, email=unique_email("k11-stale"))
     with pytest.raises(LastAdmin):
         await set_user_admin(

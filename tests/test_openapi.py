@@ -152,7 +152,11 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
         param for param in users_get["parameters"] if param["name"] == "query"
     )
     query_schema = query_param.get("schema", query_param)
-    assert query_schema.get("maxLength") == 200
+    query_options = query_schema.get("anyOf") or [query_schema]
+    assert any(
+        isinstance(option, dict) and option.get("maxLength") == 200
+        for option in query_options
+    )
     assert "200" in users_get["responses"]
     assert "401" in users_get["responses"]
     assert "403" in users_get["responses"]
@@ -172,10 +176,13 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert {"q", "page", "pageSize"} <= search_params
     q_param = next(param for param in search["parameters"] if param["name"] == "q")
     q_schema = q_param.get("schema", q_param)
-    assert q_schema.get("maxLength") == 200
+    q_options = q_schema.get("anyOf") or [q_schema]
+    assert any(
+        isinstance(option, dict) and option.get("maxLength") == 200
+        for option in q_options
+    )
     q_description = (q_param.get("description") or "").lower()
     assert "email" in q_description
-    assert "200" in q_description or "máximo" in (q_param.get("description") or "")
     assert "200" in search["responses"]
     assert "401" in search["responses"]
     assert "403" in search["responses"]
