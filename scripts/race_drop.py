@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -36,7 +37,12 @@ def _plant(count: int) -> list[str]:
 
     from tests.conftest import _admin_engine, _pg_ident, _pg_literal
 
-    names = [f"em_prod_tests_{3_100_000 + i}_race_{i}" for i in range(1, count + 1)]
+    token = secrets.token_hex(4)
+    names = [
+        f"em_prod_tests_{os.getpid()}_race_{token}_{index}"
+        for index in range(1, count + 1)
+    ]
+    password = os.environ.get("EM_RACE_DROP_PASSWORD") or secrets.token_urlsafe(24)
     admin = _admin_dsn()
 
     async def plant() -> None:
@@ -54,7 +60,7 @@ def _plant(count: int) -> list[str]:
                     await connection.execute(
                         text(
                             f"CREATE ROLE {role} LOGIN NOSUPERUSER "
-                            f"PASSWORD {_pg_literal('orphan-race-secret')}"
+                            f"PASSWORD {_pg_literal(password)}"
                         )
                     )
                     await connection.execute(
