@@ -7,6 +7,15 @@ from pydantic import Field, field_validator
 from pydantic.config import JsonDict
 
 from app.schemas.base import APIModel
+from app.schemas.unicode_props import (
+    EMOJI_PRESENTATION,
+    EXTENDED_PICTOGRAPHIC,
+    JOINING_D,
+    JOINING_L,
+    JOINING_R,
+    JOINING_T,
+    REGIONAL_INDICATOR,
+)
 
 _NAME_MAX = 120
 _DESCRIPTION_MAX = 2000
@@ -18,9 +27,15 @@ _BIDI_EMBED = frozenset(
     {chr(code) for code in range(0x202A, 0x202F)}
     | {chr(code) for code in range(0x2066, 0x206A)}
 )
-# UTS #51: 🏴 + 3-5 tags de minúsculas/dígitos + cancel.
+# RGI de subdivisión UTS #51: Inglaterra, Escocia, Gales.
+_RGI_SUBDIVISION_TAGS = ("gbeng", "gbsct", "gbwls")
 _FLAG_SEQUENCE = re.compile(
-    "\U0001f3f4[\U000e0030-\U000e0039\U000e0061-\U000e007a]{3,5}\U000e007f"
+    "\U0001f3f4(?:"
+    + "|".join(
+        "".join(chr(0xE0000 + ord(char)) for char in tag)
+        for tag in _RGI_SUBDIVISION_TAGS
+    )
+    + ")\U000e007f"
 )
 # Unicode 16/17 Cf salvo ZWJ, ZWNJ y tags de bandera (E0020-E007F).
 _CF_STRIP_CHARS = (
@@ -40,94 +55,88 @@ _NFC_LENGTH_NOTE = "Longitud máxima tras NFC."
 _ZWJ = "\u200d"
 _ZWNJ = "\u200c"
 _VIRAMA_CCC = 9
-_EMOJI_MODIFIERS = frozenset(
-    {chr(code) for code in range(0x1F3FB, 0x1F400)} | {"\ufe0e", "\ufe0f"}
-)
-# Extended_Pictographic aproximado (bloques emoji + extras UTS #51).
-_EP_RANGES: tuple[tuple[int, int], ...] = (
-    (0x00A9, 0x00A9),
-    (0x00AE, 0x00AE),
-    (0x203C, 0x203C),
-    (0x2049, 0x2049),
-    (0x2122, 0x2122),
-    (0x2139, 0x2139),
-    (0x2194, 0x2199),
-    (0x21A9, 0x21AA),
-    (0x2300, 0x23FF),
-    (0x24C2, 0x24C2),
-    (0x25A0, 0x25FF),
-    (0x2600, 0x27BF),
-    (0x2934, 0x2935),
-    (0x2B05, 0x2B07),
-    (0x2B1B, 0x2B1C),
-    (0x2B50, 0x2B50),
-    (0x2B55, 0x2B55),
-    (0x3030, 0x3030),
-    (0x303D, 0x303D),
-    (0x3297, 0x3297),
-    (0x3299, 0x3299),
-    (0x1F000, 0x1FAFF),
-)
-# Letras Dual/Left/Right Joining de árabe, persa y siríaco (ArabicShaping).
-_JOINING_RANGES: tuple[tuple[int, int], ...] = (
-    (0x0620, 0x064A),
-    (0x066E, 0x066F),
-    (0x0671, 0x06D3),
-    (0x06D5, 0x06D5),
-    (0x06EE, 0x06EF),
-    (0x06FA, 0x06FC),
-    (0x06FF, 0x06FF),
-    (0x0712, 0x072F),
-    (0x074D, 0x074F),
-    (0x0750, 0x077F),
-    (0x08A0, 0x08C9),
-)
+_VS16 = "\ufe0f"
 
 
 def _in_ranges(code: int, ranges: tuple[tuple[int, int], ...]) -> bool:
-    return any(start <= code <= end for start, end in ranges)
+    low, high = 0, len(ranges) - 1
+    while low <= high:
+        mid = (low + high) // 2
+        start, end = ranges[mid]
+        if code < start:
+            high = mid - 1
+        elif code > end:
+            low = mid + 1
+        else:
+            return True
+    return False
 
 
-def _is_extended_pictographic(char: str) -> bool:
-    return _in_ranges(ord(char), _EP_RANGES)
+def _joining_type(char: str) -> str:
+    code = ord(char)
+    if _in_ranges(code, JOINING_L):
+        return "L"
+    if _in_ranges(code, JOINING_D):
+        return "D"
+    if _in_ranges(code, JOINING_R):
+        return "R"
+    if _in_ranges(code, JOINING_T):
+        return "T"
+    return "U"
 
 
-def _is_joining_letter(char: str) -> bool:
-    return _in_ranges(ord(char), _JOINING_RANGES)
-
-
-def _is_transparent(char: str) -> bool:
-    return unicodedata.category(char).startswith("M")
-
-
-def _has_emoji_neighbor(value: str, index: int, step: int) -> bool:
+def _skip_transparent(value: str, index: int, step: int) -> tuple[int, bool]:
     cursor = index + step
-    while 0 <= cursor < len(value) and value[cursor] in _EMOJI_MODIFIERS:
+    saw_vs16 = False
+    while 0 <= cursor < len(value) and _joining_type(value[cursor]) == "T":
+        if value[cursor] == _VS16:
+            saw_vs16 = True
         cursor += step
-    return 0 <= cursor < len(value) and _is_extended_pictographic(value[cursor])
+    return cursor, saw_vs16
 
 
-def _has_joining_neighbor(value: str, index: int, step: int) -> bool:
-    cursor = index + step
-    while 0 <= cursor < len(value) and _is_transparent(value[cursor]):
-        cursor += step
-    return 0 <= cursor < len(value) and _is_joining_letter(value[cursor])
+def _is_emoji_zwj_side(char: str, saw_vs16: bool) -> bool:
+    code = ord(char)
+    if not _in_ranges(code, EXTENDED_PICTOGRAPHIC):
+        return False
+    if _in_ranges(code, REGIONAL_INDICATOR):
+        return False
+    return bool(_in_ranges(code, EMOJI_PRESENTATION) or saw_vs16)
 
 
-def _keep_joiner(value: str, index: int, char: str) -> bool:
+def _keep_zwj(value: str, index: int) -> bool:
     if index > 0 and unicodedata.combining(value[index - 1]) == _VIRAMA_CCC:
         return True
-    if char == _ZWJ:
-        return _has_emoji_neighbor(value, index, -1) and _has_emoji_neighbor(
-            value, index, 1
-        )
-    return _has_joining_neighbor(value, index, -1) and _has_joining_neighbor(
-        value, index, 1
+    left, left_vs = _skip_transparent(value, index, -1)
+    right, right_vs = _skip_transparent(value, index, 1)
+    if not (0 <= left < len(value) and 0 <= right < len(value)):
+        return False
+    return _is_emoji_zwj_side(value[left], left_vs) and _is_emoji_zwj_side(
+        value[right], right_vs
     )
 
 
+def _keep_zwnj(value: str, index: int) -> bool:
+    if index > 0 and unicodedata.combining(value[index - 1]) == _VIRAMA_CCC:
+        return True
+    left, _ = _skip_transparent(value, index, -1)
+    right, _ = _skip_transparent(value, index, 1)
+    if not (0 <= left < len(value) and 0 <= right < len(value)):
+        return False
+    return _joining_type(value[left]) in {"L", "D"} and _joining_type(value[right]) in {
+        "R",
+        "D",
+    }
+
+
+def _keep_joiner(value: str, index: int, char: str) -> bool:
+    if char == _ZWJ:
+        return _keep_zwj(value, index)
+    return _keep_zwnj(value, index)
+
+
 def _keep_significant_joiners(value: str) -> str:
-    """ZWJ/ZWNJ solo tras virama, en emoji (ZWJ) o entre letras joining (ZWNJ)."""
+    """ZWJ/ZWNJ: virama; ZWNJ CONTEXTJ RFC 5892; ZWJ entre pictográficos emoji."""
 
     return "".join(
         char
@@ -155,6 +164,8 @@ def _reject_forbidden_chars(value: str) -> None:
         raise ValueError("nul")
     if _has_surrogate(value):
         raise ValueError("surrogate")
+    if any(unicodedata.category(char) == "Cn" for char in value):
+        raise ValueError("unassigned")
     if "\ufffc" in value:
         raise ValueError("object replacement")
     if any(char in _BIDI_EMBED for char in value):
@@ -186,7 +197,10 @@ def _is_visible(char: str) -> bool:
 
 
 def category_name_key(value: str) -> str:
-    """Clave de unicidad: sin Cf de relleno; ZWJ/ZWNJ solo donde importan."""
+    """Clave de unicidad: sin Cf de relleno; ZWJ/ZWNJ solo donde importan.
+
+    NFC es defensa para INSERT SQL en NFD; las rutas HTTP ya normalizan.
+    """
 
     normalized = unicodedata.normalize("NFC", value).translate(_CF_TABLE)
     return _WHITESPACE.sub(" ", _keep_significant_joiners(normalized)).strip()
