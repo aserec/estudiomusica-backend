@@ -538,9 +538,14 @@ def test_orphan_objects_in_other_test_db_do_not_fail_production(
         asyncio.run(cleanup_role())
 
 
-_NON_TEST_PROBE_DATABASES = frozenset(
-    {"orphan_owner_probe", "orphan_nontest_objects_probe"}
-)
+def _non_test_probe_database(kind: str) -> str:
+    token = secrets.token_hex(2)
+    return f"{kind}_{os.getpid()}_{token}_probe"
+
+
+def _is_allowed_probe_database(name: str) -> bool:
+    prefixes = ("orphan_owner_", "orphan_nontest_objects_")
+    return name.startswith(prefixes) and name.endswith("_probe")
 
 
 def _maintenance_engine(admin: RedactedDsn):
@@ -554,7 +559,7 @@ def _maintenance_engine(admin: RedactedDsn):
 def _create_probe_database(
     admin: RedactedDsn, name: str, *, owner: str | None = None
 ) -> None:
-    if name not in _NON_TEST_PROBE_DATABASES:
+    if not _is_allowed_probe_database(name):
         raise RuntimeError(f"base sonda no permitida: {name}")
 
     async def create() -> None:
@@ -578,7 +583,7 @@ def _create_probe_database(
 
 
 def _drop_probe_database(admin: RedactedDsn, name: str) -> None:
-    if name not in _NON_TEST_PROBE_DATABASES:
+    if not _is_allowed_probe_database(name):
         raise RuntimeError(f"base sonda no permitida: {name}")
 
     async def drop() -> None:
@@ -609,7 +614,7 @@ def test_orphan_owning_database_does_not_abort_sweep(
     """L8: un huérfano dueño de una base no aborta la transacción del barrido."""
 
     orphan = _orphan_role_name()
-    dbname = "orphan_owner_probe"
+    dbname = _non_test_probe_database("orphan_owner")
     role = _pg_ident(orphan)
     try:
 
@@ -644,7 +649,7 @@ def test_orphan_objects_in_non_test_db_are_not_dropped(
     """L11: DROP OWNED no corre en bases que no terminan en _test."""
 
     orphan = _orphan_role_name()
-    dbname = "orphan_nontest_objects_probe"
+    dbname = _non_test_probe_database("orphan_nontest_objects")
     parsed = make_url(require_postgres.secret())
     other = RedactedDsn(
         parsed.set(database=dbname).render_as_string(hide_password=False)
