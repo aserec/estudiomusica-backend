@@ -1404,9 +1404,6 @@ async def test_audit_groups_with_citext_not_python_lower(
         pg_same = await _citext_equal(
             db_session, category_name_key(left), category_name_key(right)
         )
-        python_same = (
-            category_name_key(left).lower() == category_name_key(right).lower()
-        )
         fold_left = await db_session.scalar(
             text("SELECT lower(CAST(:v AS citext))"), {"v": category_name_key(left)}
         )
@@ -1417,7 +1414,6 @@ async def test_audit_groups_with_citext_not_python_lower(
         assert fold_right is not None
         assert (fold_left in collided) == pg_same
         assert (fold_right in collided) == pg_same
-        assert (fold_left in collided) == pg_same or python_same == pg_same
 
 
 async def test_fix_odos_nandu_follow_citext_not_python(
@@ -2078,15 +2074,7 @@ async def test_fix_candidate_and_oldkey_use_citext_not_python(
     ]
     folded = await _citext_fold(db_session, keys)
     assert len(set(folded)) == 6
-    python_iz = category_name_key("İzmir (dup 1)").lower()
-    citext_iz = (await _citext_fold(db_session, [category_name_key("İzmir (dup 1)")]))[
-        0
-    ]
-    citext_taken = (
-        await _citext_fold(db_session, [category_name_key("izmir (dup 1)")])
-    )[0]
-    if python_iz != citext_taken and citext_iz == citext_taken:
-        assert "İzmir (dup 1)" not in names
+    assert "İzmir (dup 1)" not in names or "izmir (dup 1)" not in names
 
 
 def test_fix_does_not_clobber_concurrent_put_or_post(

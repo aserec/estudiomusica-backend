@@ -344,7 +344,6 @@ async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
     groups: dict[tuple[UUID | None, str], list[Category]] = {}
     for row, key in zip(live, folded, strict=True):
         groups.setdefault((row.parent_id, key), []).append(row)
-    row_fold = {row.id: key for row, key in zip(live, folded, strict=True)}
     taken: dict[tuple[UUID | None, str], Category] = {}
     for (parent_id, key), members in groups.items():
         members.sort(
@@ -377,10 +376,9 @@ async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
                     )[0]
                 new_key = fold_of[candidate]
                 clash = taken.get((row.parent_id, new_key))
-                if clash is None or clash.id == row.id:
+                if clash is None:
                     row.name = candidate
                     taken[(row.parent_id, new_key)] = row
-                    row_fold[row.id] = new_key
                     break
                 suffix += 1
     changing: list[tuple[Category, str]] = []
