@@ -1,3 +1,4 @@
+import unicodedata
 import uuid
 from datetime import datetime
 from enum import StrEnum
@@ -49,7 +50,7 @@ class AdminUserIdentityUpdate(APIModel):
         stripped = value.strip()
         if not stripped:
             raise ValueError("firstName required")
-        return stripped
+        return unicodedata.normalize("NFC", stripped)
 
     @field_validator("last_name")
     @classmethod
@@ -57,7 +58,7 @@ class AdminUserIdentityUpdate(APIModel):
         if value is None:
             return None
         reject_nul(value)
-        return value.strip()
+        return unicodedata.normalize("NFC", value.strip())
 
     @field_validator("email", mode="before")
     @classmethod

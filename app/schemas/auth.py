@@ -1,3 +1,4 @@
+import unicodedata
 import uuid
 
 from pydantic import EmailStr, Field, field_validator
@@ -23,7 +24,7 @@ class SignUpRequest(APIModel):
         stripped = value.strip()
         if not stripped:
             raise ValueError("name required")
-        return stripped
+        return unicodedata.normalize("NFC", stripped)
 
     @field_validator("email", mode="before")
     @classmethod

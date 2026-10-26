@@ -1829,6 +1829,93 @@ async def test_search_j_caron_email_matches_login_nfc(
     assert items[0]["id"] == str(created["id"])
 
 
+async def test_accented_names_nfc_and_nfd_appear_in_search(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    marker = uuid.uuid4().hex[:8]
+    nfc_first = f"Émile{marker}"
+    nfd_first = unicodedata.normalize("NFD", nfc_first)
+    assert nfd_first != nfc_first
+
+    signup_nfd = await _signup(
+        session_client,
+        email=unique_email("nm-nfd"),
+        name=f"{nfd_first} Nfd",
+    )
+    assert signup_nfd["response"].json()["user"]["firstName"] == nfc_first
+    stored_nfd = await db_session.get(User, signup_nfd["id"])
+    assert stored_nfd is not None
+    assert stored_nfd.first_name == nfc_first
+
+    signup_nfc = await _signup(
+        session_client,
+        email=unique_email("nm-nfc"),
+        name=f"{nfc_first} Nfc",
+    )
+    assert signup_nfc["response"].json()["user"]["firstName"] == nfc_first
+
+    session_client.cookies.clear()
+    admin = await _signup_role(
+        session_client, db_session, SystemRole.ADMIN, prefix="nm-admin"
+    )
+    put_nfd = await _signup(session_client, email=unique_email("nm-put-nfd"))
+    await session_client.post(
+        "/api/v1/auth/login",
+        json={"email": admin["email"], "password": PASSWORD},
+    )
+    edited = await session_client.put(
+        f"/api/v1/admin/users/{put_nfd['id']}",
+        json={"firstName": nfd_first, "lastName": "PutNfd"},
+    )
+    assert edited.status_code == 200
+    assert edited.json()["firstName"] == nfc_first
+    db_session.expire_all()
+    put_row = await db_session.get(User, put_nfd["id"])
+    assert put_row is not None
+    assert put_row.first_name == nfc_first
+
+    put_nfc = await _signup(session_client, email=unique_email("nm-put-nfc"))
+    await session_client.post(
+        "/api/v1/auth/login",
+        json={"email": admin["email"], "password": PASSWORD},
+    )
+    edited_nfc = await session_client.put(
+        f"/api/v1/admin/users/{put_nfc['id']}",
+        json={"firstName": nfc_first, "lastName": "PutNfc"},
+    )
+    assert edited_nfc.status_code == 200
+    assert edited_nfc.json()["firstName"] == nfc_first
+
+    leftover = User(
+        first_name=nfd_first,
+        last_name=f"Legacy{marker}",
+        email=unique_email("nm-legacy"),
+        password_hash="x",
+        system_role_id=SystemRole.ALUMNO,
+    )
+    db_session.add(leftover)
+    await db_session.flush()
+    assert leftover.first_name == nfd_first
+
+    for query in (nfc_first, nfd_first):
+        found = await session_client.get(
+            "/api/v1/users/search", params={"q": query, "pageSize": 20}
+        )
+        assert found.status_code == 200
+        ids = {item["id"] for item in found.json()["items"]}
+        assert str(signup_nfd["id"]) in ids
+        assert str(signup_nfc["id"]) in ids
+        assert str(put_nfd["id"]) in ids
+        assert str(put_nfc["id"]) in ids
+        assert str(leftover.id) in ids
+        listed = await session_client.get(
+            "/api/v1/admin/users", params={"query": query, "pageSize": 20}
+        )
+        assert listed.status_code == 200
+        listed_ids = {item["id"] for item in listed.json()["items"]}
+        assert str(leftover.id) in listed_ids
+
+
 def test_email_term_fallback_applies_nfc_after_strip_lower() -> None:
     assert _email_term("  J\u030cX  ") == "\u01f0x"
     assert _email_term("J\u030cX") == "\u01f0x"

@@ -2,10 +2,11 @@
 
 import unicodedata
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import EmailStr, TypeAdapter, ValidationError
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, literal_column, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -78,13 +79,17 @@ def _search_term(raw: str) -> str:
     return unicodedata.normalize("NFC", raw.strip())
 
 
+def _nfc_text(column: ColumnElement[Any]) -> ColumnElement[Any]:
+    return func.normalize(column, literal_column("NFC"))
+
+
 def _name_match(term: str) -> ColumnElement[bool]:
     pattern = f"%{_escape_like(term)}%"
     display_name = func.concat(User.first_name, " ", User.last_name)
     return or_(
-        User.first_name.ilike(pattern, escape="\\"),
-        User.last_name.ilike(pattern, escape="\\"),
-        display_name.ilike(pattern, escape="\\"),
+        _nfc_text(User.first_name).ilike(pattern, escape="\\"),
+        _nfc_text(User.last_name).ilike(pattern, escape="\\"),
+        _nfc_text(display_name).ilike(pattern, escape="\\"),
     )
 
 
