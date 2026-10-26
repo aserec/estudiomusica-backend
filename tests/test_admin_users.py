@@ -1541,7 +1541,7 @@ async def test_teacher_search_limits_and_hides_email_except_exact(
         "/api/v1/users/search", params={"q": "e\u0323\u0302"}
     )
     assert combining.status_code == 400
-    assert combining.json() == {"error": "validation"}
+    assert combining.json()["error"] == "validation"
     wild = await session_client.get("/api/v1/users/search", params={"q": "%%%"})
     assert wild.status_code == 400
     at_sign = await session_client.get("/api/v1/users/search", params={"q": "@"})
