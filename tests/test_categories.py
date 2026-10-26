@@ -8,11 +8,23 @@ from sqlalchemy import delete, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.exceptions import CategoryNameTaken
 from app.models import Category
 from app.models.user import SystemRole
 from app.permissions.types import Permission
-from app.schemas.categories import normalize_category_name
-from app.services.categories import _raise_from_integrity
+from app.schemas.categories import (
+    CategoryCreate,
+    CategoryUpdate,
+    normalize_category_name,
+)
+from app.services.categories import (
+    _CATEGORY_TREE_LOCK_KEY,
+    _integrity_name,
+    _raise_from_integrity,
+    create_category,
+    delete_category,
+    update_category,
+)
 from tests.test_auth import unique_email
 from tests.test_roles import (
     SYSTEM_ROLES,
@@ -464,8 +476,26 @@ def test_normalize_category_name_nfc_spaces_and_invisibles() -> None:
     assert nfc != nfd
     assert normalize_category_name(nfd) == nfc
     assert normalize_category_name("Solfeo  I") == "Solfeo I"
+    assert normalize_category_name("é" * 100) == "é" * 100
+    assert normalize_category_name(unicodedata.normalize("NFD", "é" * 100)) == "é" * 100
     with pytest.raises(ValueError):
         normalize_category_name("\u200b")
+    with pytest.raises(ValueError):
+        normalize_category_name("Piano\u200bI")
+    with pytest.raises(ValueError):
+        normalize_category_name("Piano\u200dI")
+    with pytest.raises(ValueError):
+        normalize_category_name("Piano\ufeffI")
+    with pytest.raises(ValueError):
+        normalize_category_name("Piano\u00adI")
+    with pytest.raises(ValueError):
+        normalize_category_name("\u3164")
+    with pytest.raises(ValueError):
+        normalize_category_name("\u2800")
+    with pytest.raises(ValueError):
+        normalize_category_name("\u115f")
+    with pytest.raises(ValueError):
+        normalize_category_name("\u0301")
     with pytest.raises(ValueError):
         normalize_category_name("\x00ok")
     with pytest.raises(ValueError):
@@ -504,14 +534,120 @@ async def test_name_rejects_zero_width_and_nul(
     if nul.status_code == 400:
         assert nul.json()["error"] == "validation"
 
+    for payload in (
+        "Piano\u200bI",
+        "Piano\u200dI",
+        "Piano\ufeffI",
+        "Piano\u00adI",
+        "\u3164",
+        "\u2800",
+        "\u115f",
+        "\u0301",
+    ):
+        response = await session_client.post(_ADMIN, json={"name": payload})
+        assert response.status_code == 400
+        assert response.json()["error"] == "validation"
+        assert "name" in response.json()["fields"]
 
-def test_unknown_integrity_error_is_not_name_taken() -> None:
+
+async def test_nfd_length_and_nfc_expansion(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    nfd_hundred = unicodedata.normalize("NFD", "é" * 100)
+    created = await _create(session_client, name=nfd_hundred)
+    assert created["name"] == "é" * 100
+
+    huge = await session_client.post(
+        _ADMIN,
+        json={"name": "Ok", "description": "\u0344" * 2000},
+    )
+    assert huge.status_code in {400, 422}
+    assert huge.status_code != 500
+
+
+async def test_put_duplicate_name_is_conflict_not_500(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    first = await _create(session_client, name="Armonía")
+    second = await _create(session_client, name="Solfeo")
+    response = await session_client.put(
+        f"{_ADMIN}/{second['id']}",
+        json={"name": "armonía"},
+    )
+    assert response.status_code == 409
+    assert response.json() == {"error": "category_name_taken"}
+    assert first["id"] not in response.text
+
+
+async def test_put_null_name_is_validation(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    created = await _create(session_client, name="Nombre fijo")
+    response = await session_client.put(
+        f"{_ADMIN}/{created['id']}",
+        json={"name": None},
+    )
+    assert response.status_code in {400, 422}
+    assert response.status_code != 500
+    if response.status_code == 400:
+        assert response.json()["error"] == "validation"
+        assert "name" in response.json()["fields"]
+    listed = await session_client.get(_LIST)
+    match = next(item for item in listed.json() if item["id"] == created["id"])
+    assert match["name"] == created["name"]
+
+
+async def test_put_null_sort_order_is_validation(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    created = await _create(session_client, name="Compás")
+    response = await session_client.put(
+        f"{_ADMIN}/{created['id']}",
+        json={"sortOrder": None},
+    )
+    assert response.status_code in {400, 422}
+    assert response.status_code != 500
+    if response.status_code == 400:
+        assert response.json()["error"] == "validation"
+        assert "sortOrder" in response.json()["fields"]
+    listed = await session_client.get(_LIST)
+    match = next(item for item in listed.json() if item["id"] == created["id"])
+    assert match["sortOrder"] == created["sortOrder"]
+
+
+def test_unknown_integrity_error_is_name_taken() -> None:
     class _Orig(Exception):
         constraint_name = "ck_unrelated"
 
     exc = IntegrityError("INSERT", {}, _Orig())
-    with pytest.raises(IntegrityError):
+    with pytest.raises(CategoryNameTaken):
         _raise_from_integrity(exc)
+
+
+def test_integrity_name_reads_asyncpg_constraint() -> None:
+    class AsyncpgError(Exception):
+        constraint_name = "uq_categories_root_name_active"
+
+    class Wrapper(Exception):
+        pass
+
+    wrapper = Wrapper()
+    wrapper.__cause__ = AsyncpgError()
+    exc = IntegrityError("INSERT", {}, wrapper)
+    assert _integrity_name(exc) == "uq_categories_root_name_active"
+
+    direct = IntegrityError("INSERT", {}, AsyncpgError())
+    assert _integrity_name(direct) == "uq_categories_root_name_active"
+
+    class DeadDiag(Exception):
+        diag = type("Diag", (), {"constraint_name": "psycopg_only"})()
+
+    dead = IntegrityError("INSERT", {}, DeadDiag())
+    assert _integrity_name(dead) == str(dead.orig)
 
 
 async def test_parent_not_self_check_exists(db_session: AsyncSession) -> None:
@@ -551,6 +687,40 @@ async def test_unique_indexes_filter_deleted_and_name_is_citext(
     assert udt == "citext"
 
 
+async def test_tree_lock_is_transactional_not_session(
+    db_session: AsyncSession,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    parent = await create_category(db_session, CategoryCreate(name=f"lockp-{suffix}"))
+    child = await create_category(
+        db_session,
+        CategoryCreate(name=f"lockc-{suffix}", parent_id=parent.id),
+    )
+    classid, objid = _CATEGORY_TREE_LOCK_KEY
+    held = (
+        await db_session.execute(
+            text(
+                "SELECT objsubid FROM pg_locks "
+                "WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
+                "AND classid = :classid AND objid = :objid"
+            ),
+            {"classid": classid, "objid": objid},
+        )
+    ).all()
+    assert any(row[0] == 1 for row in held)
+    assert not any(row[0] == 2 for row in held)
+    await update_category(db_session, child.id, CategoryUpdate(parent_id=None))
+    await delete_category(db_session, child.id)
+    leftover_session = await db_session.scalar(
+        text(
+            "SELECT count(*) FROM pg_locks "
+            "WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
+            "AND objsubid = 2"
+        )
+    )
+    assert leftover_session == 0
+
+
 def test_category_mutations_require_manage_courses() -> None:
     from app.routers.categories import _MANAGE
 
@@ -585,17 +755,15 @@ def _tree_depth_and_cycles(items: list[dict[str, Any]]) -> tuple[int, bool]:
     return max(depths, default=0), any(depth >= 999 for depth in depths)
 
 
-def _reparent_in_thread(
-    database_url: str,
-    category_id: uuid.UUID,
-    parent_id: uuid.UUID,
-    barrier: Any,
-) -> str:
+def _run_in_thread(database_url: str, barrier: Any, work: Any) -> str:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from app.exceptions import Validation
-    from app.schemas.categories import CategoryUpdate
-    from app.services.categories import update_category
+    from app.exceptions import (
+        CategoryNameTaken,
+        CategoryNotEmpty,
+        NotFound,
+        Validation,
+    )
 
     async def run() -> str:
         engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
@@ -604,129 +772,290 @@ def _reparent_in_thread(
             async with factory() as session:
                 barrier.wait(timeout=5)
                 try:
-                    await update_category(
-                        session,
-                        category_id,
-                        CategoryUpdate(parent_id=parent_id),
-                    )
+                    result = await work(session)
                     await session.commit()
-                    return "ok"
+                    assert isinstance(result, str)
+                    return result
                 except Validation:
                     await session.rollback()
                     return "validation"
+                except CategoryNameTaken:
+                    await session.rollback()
+                    return "name_taken"
+                except CategoryNotEmpty:
+                    await session.rollback()
+                    return "not_empty"
+                except NotFound:
+                    await session.rollback()
+                    return "not_found"
         finally:
             await engine.dispose()
 
     return asyncio.run(run())
 
 
-def test_concurrent_reparent_never_creates_grandchildren_or_cycles(
+def _race(database_url: str, left: Any, right: Any) -> list[str]:
+    import threading
+
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+
+    def run(work: Any) -> None:
+        results.append(_run_in_thread(database_url, barrier, work))
+
+    t1 = threading.Thread(target=run, args=(left,))
+    t2 = threading.Thread(target=run, args=(right,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    return results
+
+
+async def _cleanup_ids(database_url: str, ids: list[uuid.UUID]) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    engine = create_async_engine(database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            if ids:
+                await session.execute(delete(Category).where(Category.id.in_(ids)))
+            leftover_session = await session.scalar(
+                text(
+                    "SELECT count(*) FROM pg_locks "
+                    "WHERE locktype = 'advisory' AND objsubid = 2"
+                )
+            )
+            assert leftover_session == 0
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+async def _orphans(session: Any) -> int:
+    return int(
+        await session.scalar(
+            text(
+                "SELECT count(*) FROM categories child "
+                "JOIN categories parent ON parent.id = child.parent_id "
+                "WHERE child.deleted_at IS NULL AND parent.deleted_at IS NOT NULL"
+            )
+        )
+        or 0
+    )
+
+
+def test_concurrent_tree_mutations(
     require_postgres: Any,
     migrated_test_database: None,
 ) -> None:
-    import threading
-
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.db import RedactedDsn
-    from app.schemas.categories import CategoryCreate
-    from app.services.categories import create_category, list_categories
+    from app.schemas.categories import CategoryCreate, CategoryUpdate
+    from app.services.categories import (
+        create_category,
+        delete_category,
+        list_categories,
+        update_category,
+    )
 
     dsn = require_postgres
     assert isinstance(dsn, RedactedDsn)
     suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
 
     async def seed() -> dict[str, uuid.UUID]:
         engine = create_async_engine(dsn.secret())
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory() as session:
-                root = await create_category(
-                    session, CategoryCreate(name=f"Root-{suffix}")
+                created: dict[str, uuid.UUID] = {}
+                for key in ("root", "x", "leaf", "a", "b", "parent", "mover"):
+                    row = await create_category(
+                        session, CategoryCreate(name=f"{key}-{suffix}")
+                    )
+                    created[key] = row.id
+                    tracked.append(row.id)
+                named = await create_category(
+                    session, CategoryCreate(name=f"keep-{suffix}")
                 )
-                node_x = await create_category(
-                    session, CategoryCreate(name=f"X-{suffix}")
+                other = await create_category(
+                    session, CategoryCreate(name=f"rename-{suffix}")
                 )
-                leaf = await create_category(
-                    session, CategoryCreate(name=f"Leaf-{suffix}")
-                )
-                node_a = await create_category(
-                    session, CategoryCreate(name=f"A-{suffix}")
-                )
-                node_b = await create_category(
-                    session, CategoryCreate(name=f"B-{suffix}")
-                )
+                created["keep"] = named.id
+                created["rename"] = other.id
+                tracked.extend([named.id, other.id])
                 await session.commit()
-                return {
-                    "root": root.id,
-                    "x": node_x.id,
-                    "leaf": leaf.id,
-                    "a": node_a.id,
-                    "b": node_b.id,
-                }
+                return created
         finally:
             await engine.dispose()
 
-    ids = asyncio.run(seed())
-    first_barrier = threading.Barrier(2)
-    second_barrier = threading.Barrier(2)
-    first_results: list[str] = []
-    second_results: list[str] = []
+    try:
+        ids = asyncio.run(seed())
 
-    t1 = threading.Thread(
-        target=lambda: first_results.append(
-            _reparent_in_thread(dsn.secret(), ids["leaf"], ids["x"], first_barrier)
-        )
-    )
-    t2 = threading.Thread(
-        target=lambda: first_results.append(
-            _reparent_in_thread(dsn.secret(), ids["x"], ids["root"], first_barrier)
-        )
-    )
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-    assert sorted(first_results) == ["ok", "validation"]
+        async def reparent_leaf(session: Any) -> str:
+            await update_category(
+                session, ids["leaf"], CategoryUpdate(parent_id=ids["x"])
+            )
+            return "ok"
 
-    t3 = threading.Thread(
-        target=lambda: second_results.append(
-            _reparent_in_thread(dsn.secret(), ids["a"], ids["b"], second_barrier)
-        )
-    )
-    t4 = threading.Thread(
-        target=lambda: second_results.append(
-            _reparent_in_thread(dsn.secret(), ids["b"], ids["a"], second_barrier)
-        )
-    )
-    t3.start()
-    t4.start()
-    t3.join()
-    t4.join()
-    assert sorted(second_results) == ["ok", "validation"]
+        async def reparent_x(session: Any) -> str:
+            await update_category(
+                session, ids["x"], CategoryUpdate(parent_id=ids["root"])
+            )
+            return "ok"
 
-    async def inspect() -> None:
-        engine = create_async_engine(dsn.secret())
+        first = _race(dsn.secret(), reparent_leaf, reparent_x)
+        assert sorted(first) == ["ok", "validation"]
+
+        async def a_to_b(session: Any) -> str:
+            await update_category(session, ids["a"], CategoryUpdate(parent_id=ids["b"]))
+            return "ok"
+
+        async def b_to_a(session: Any) -> str:
+            await update_category(session, ids["b"], CategoryUpdate(parent_id=ids["a"]))
+            return "ok"
+
+        second = _race(dsn.secret(), a_to_b, b_to_a)
+        assert sorted(second) == ["ok", "validation"]
+
+        async def rename_keep(session: Any) -> str:
+            await update_category(
+                session, ids["keep"], CategoryUpdate(name=f"same-{suffix}")
+            )
+            return "ok"
+
+        async def rename_other(session: Any) -> str:
+            await update_category(
+                session, ids["rename"], CategoryUpdate(name=f"same-{suffix}")
+            )
+            return "ok"
+
+        renamed = _race(dsn.secret(), rename_keep, rename_other)
+        assert "ok" in renamed
+        assert "name_taken" in renamed
+        assert "error" not in renamed
+
+        async def post_child(session: Any) -> str:
+            row = await create_category(
+                session,
+                CategoryCreate(name=f"born-{suffix}", parent_id=ids["parent"]),
+            )
+            tracked.append(row.id)
+            return "ok"
+
+        async def delete_parent(session: Any) -> str:
+            await delete_category(session, ids["parent"])
+            return "ok"
+
+        delete_vs_post = _race(dsn.secret(), post_child, delete_parent)
+        assert "ok" in delete_vs_post
+        assert set(delete_vs_post) <= {"ok", "validation", "not_empty"}
+
+        delete_parent_id = seed_one(dsn.secret(), f"delp-{suffix}", tracked)
+        mover2 = seed_one(dsn.secret(), f"mov2-{suffix}", tracked)
+
+        async def put_under_fresh(session: Any) -> str:
+            await update_category(
+                session, mover2, CategoryUpdate(parent_id=delete_parent_id)
+            )
+            return "ok"
+
+        async def delete_fresh_parent(session: Any) -> str:
+            await delete_category(session, delete_parent_id)
+            return "ok"
+
+        delete_vs_put = _race(dsn.secret(), put_under_fresh, delete_fresh_parent)
+        assert "ok" in delete_vs_put
+        assert set(delete_vs_put) <= {"ok", "validation", "not_empty"}
+
+        extra_parent = seed_one(dsn.secret(), f"p2-{suffix}", tracked)
+        extra_root = seed_one(dsn.secret(), f"r2-{suffix}", tracked)
+
+        async def create_under_extra(session: Any) -> str:
+            row = await create_category(
+                session,
+                CategoryCreate(name=f"c2-{suffix}", parent_id=extra_parent),
+            )
+            tracked.append(row.id)
+            return "ok"
+
+        async def move_extra_under_root(session: Any) -> str:
+            await update_category(
+                session, extra_parent, CategoryUpdate(parent_id=extra_root)
+            )
+            return "ok"
+
+        create_vs_update = _race(
+            dsn.secret(), create_under_extra, move_extra_under_root
+        )
+        assert sorted(create_vs_update) == ["ok", "validation"]
+
+        sibling_parent = seed_one(dsn.secret(), f"p3-{suffix}", tracked)
+
+        async def create_one(session: Any) -> str:
+            row = await create_category(
+                session,
+                CategoryCreate(name=f"s1-{suffix}", parent_id=sibling_parent),
+            )
+            tracked.append(row.id)
+            return "ok"
+
+        async def create_two(session: Any) -> str:
+            row = await create_category(
+                session,
+                CategoryCreate(name=f"s2-{suffix}", parent_id=sibling_parent),
+            )
+            tracked.append(row.id)
+            return "ok"
+
+        create_vs_create = _race(dsn.secret(), create_one, create_two)
+        assert create_vs_create == ["ok", "ok"]
+
+        async def inspect() -> None:
+            engine = create_async_engine(dsn.secret())
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            try:
+                async with factory() as session:
+                    rows = await list_categories(session)
+                    ours = [
+                        {
+                            "id": str(row.id),
+                            "parentId": (str(row.parent_id) if row.parent_id else None),
+                        }
+                        for row in rows
+                        if row.id in set(tracked)
+                    ]
+                    depth, has_cycle = _tree_depth_and_cycles(ours)
+                    assert has_cycle is False
+                    assert depth <= 1
+                    assert await _orphans(session) == 0
+            finally:
+                await engine.dispose()
+
+        asyncio.run(inspect())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+def seed_one(database_url: str, name: str, tracked: list[uuid.UUID]) -> uuid.UUID:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.schemas.categories import CategoryCreate
+    from app.services.categories import create_category
+
+    async def run() -> uuid.UUID:
+        engine = create_async_engine(database_url)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory() as session:
-                rows = await list_categories(session)
-                ours = [
-                    {
-                        "id": str(row.id),
-                        "parentId": str(row.parent_id) if row.parent_id else None,
-                    }
-                    for row in rows
-                    if row.id in set(ids.values())
-                ]
-                depth, has_cycle = _tree_depth_and_cycles(ours)
-                assert has_cycle is False
-                assert depth <= 1
-                await session.execute(
-                    delete(Category).where(Category.id.in_(list(ids.values())))
-                )
+                row = await create_category(session, CategoryCreate(name=name))
                 await session.commit()
+                tracked.append(row.id)
+                return row.id
         finally:
             await engine.dispose()
 
-    asyncio.run(inspect())
+    return asyncio.run(run())

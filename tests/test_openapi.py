@@ -177,3 +177,10 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert set(create_props) == {"name", "parentId", "description", "sortOrder"}
     update_props = schemas["CategoryUpdate"]["properties"]
     assert set(update_props) == {"name", "parentId", "description", "sortOrder"}
+    for key in ("name", "sortOrder"):
+        schema = update_props[key]
+        assert schema.get("nullable") is not True
+        if "anyOf" in schema:
+            assert not any(item.get("type") == "null" for item in schema["anyOf"])
+        else:
+            assert schema.get("type") in {"string", "integer"}

@@ -536,13 +536,6 @@ def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
                         f"TO {role}"
                     )
                 )
-                citext = await connection.scalar(
-                    text("SELECT 1 FROM pg_type WHERE typname = 'citext'")
-                )
-                if citext is not None:
-                    await connection.execute(
-                        text(f"GRANT USAGE ON TYPE citext TO {role}")
-                    )
         finally:
             await engine.dispose()
 

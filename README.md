@@ -120,7 +120,7 @@ PUT    /api/v1/admin/categories/{id}         {name?, parentId?, description?, so
 DELETE /api/v1/admin/categories/{id}         409 si tiene hijas
 ```
 
-El ticket #400 pedía PATCH. Se mantiene **PUT** (convención #91) pero **parcial**: un campo omitido no cambia. `PUT {name}` no mueve a la raíz ni borra `description`. Para quitar el padre o la description hay que enviar `null` explícito (`model_fields_set`). El listado no pagina. Nombre: NFC, espacios colapsados, citext (sin distinguir mayúsculas), único entre hermanos vigentes. DELETE es lógico (`deleted_at`). `409 {error: category_not_empty}` si hay hijas vigentes. Hasta #97 no hay tabla `courses`: el borrado no protege cursos. `409 {error: category_name_taken}` si el nombre ya existe en el mismo padre. Los POST/PUT que fijan o cambian `parentId` toman `pg_advisory_xact_lock(400, 1)` sobre el árbol.
+El ticket #400 pedía PATCH. Se mantiene **PUT** (convención #91) pero **parcial**: un campo omitido no cambia. `PUT {name}` no mueve a la raíz ni borra `description`. Para quitar el padre o la description hay que enviar `null` explícito (`model_fields_set`). El listado no pagina. Nombre: NFC, espacios colapsados, citext (sin distinguir mayúsculas), único entre hermanos vigentes. DELETE es lógico (`deleted_at`). `409 {error: category_not_empty}` si hay hijas vigentes. Hasta #97 no hay tabla `courses`: el borrado no protege cursos. `409 {error: category_name_taken}` si el nombre ya existe en el mismo padre. Los POST/PUT que fijan o cambian `parentId` y el DELETE toman `pg_advisory_xact_lock(400, 1)` sobre el árbol; al validar el padre se hace `SELECT … FOR SHARE`.
 
 `0004_course_categories` crea `categories` (`id`, `name`, `parent_id`, `description`, `sort_order`, timestamps, `deleted_at`) y el trigger `updated_at`. #97 añadirá `courses.category_id` FK a esta tabla.
 
@@ -202,7 +202,6 @@ El fixture `production_client` crea el rol `em_prod_tests` (LOGIN, **sin** SUPER
 - `USAGE` en el esquema `public`
 - `SELECT, INSERT, UPDATE, DELETE` en las tablas de `public` (`users`, `auth_sessions`, `system_roles`, `course_memberships`, `categories`)
 - `USAGE, SELECT` en las secuencias de `public`
-- `USAGE` en el tipo `citext` (email y `categories.name`)
 
 No puede migrar ni crear bases. Las filas de esos tests (`prod-%@example.com`) se borran al terminar.
 
