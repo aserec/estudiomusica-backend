@@ -4,6 +4,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -206,25 +207,62 @@ def _frozen_url(require_postgres: RedactedDsn, port: int) -> str:
     )
 
 
-async def _count_health_backends(dsn: RedactedDsn) -> int:
-    from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import create_async_engine
+def _dsn_with_ssl_query(url: str, **ssl_query: str | None) -> str:
+    """Copia el DSN y sustituye ``ssl`` / ``sslmode``. ``None`` los quita."""
+
+    from sqlalchemy.engine.url import make_url
+
+    parsed = make_url(url)
+    query = {
+        str(key): value
+        for key, value in (parsed.query or {}).items()
+        if str(key).lower() not in {"ssl", "sslmode"}
+    }
+    for key, value in ssl_query.items():
+        if value is not None:
+            query[key] = value
+    return parsed.set(query=query).render_as_string(hide_password=False)
+
+
+async def _count_app_backends(
+    dsn: RedactedDsn,
+    *,
+    connect: Any | None = None,
+) -> tuple[int, int]:
+    """Backends de la app: sonda (application_name) y usuario, sin el inspector.
+
+    Devuelve ``(health_backends, user_backends)``. El inspector se excluye
+    con ``pid <> pg_backend_pid()`` para no inflar el recuento.
+    """
+
+    import asyncpg
+    from sqlalchemy.engine.url import make_url
 
     from app.db import HEALTH_APPLICATION_NAME
 
-    engine = create_async_engine(dsn.secret())
+    opener = connect if callable(connect) else asyncpg.connect
+    parsed = make_url(dsn.secret())
+    connection = await opener(
+        host=parsed.host,
+        port=parsed.port or 5432,
+        user=parsed.username,
+        password=parsed.password,
+        database=parsed.database,
+    )
     try:
-        async with engine.connect() as connection:
-            count = await connection.scalar(
-                text(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE application_name = :name"
-                ),
-                {"name": HEALTH_APPLICATION_NAME},
-            )
+        health = await connection.fetchval(
+            "SELECT count(*) FROM pg_stat_activity "
+            "WHERE application_name = $1 AND pid <> pg_backend_pid()",
+            HEALTH_APPLICATION_NAME,
+        )
+        user = await connection.fetchval(
+            "SELECT count(*) FROM pg_stat_activity "
+            "WHERE usename = $1 AND pid <> pg_backend_pid()",
+            parsed.username,
+        )
     finally:
-        await engine.dispose()
-    return int(count or 0)
+        await connection.close()
+    return int(health or 0), int(user or 0)
 
 
 async def _run_frozen_health(
@@ -421,10 +459,16 @@ async def test_health_db_alternating_freeze_does_not_accumulate_backends(
     require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> None:
-    """Sondas sanas y congeladas no crecen por encima del límite del pool."""
+    """Sondas sanas y congeladas no dejan backends residuales.
+
+    El recuento *después* de cada ciclo (antes: «backends máximos 0»)
+    mide leftovers: la sonda ya cerró. Una sonda sana abre ≥1 backend
+    de la app; ese pico se mide con la conexión aún abierta.
+    """
 
     import warnings
 
+    import asyncpg
     from sqlalchemy.engine.url import make_url
 
     from app.config import get_settings
@@ -448,7 +492,23 @@ async def test_health_db_alternating_freeze_does_not_accumulate_backends(
     clear_engine()
     main = get_engine()
     health_service.set_health_database_url(frozen_url)
-    max_backends = 0
+    original_connect = asyncpg.connect
+    baseline_health, baseline_user = await _count_app_backends(
+        require_postgres, connect=original_connect
+    )
+    peak = {"health": baseline_health, "user": baseline_user}
+    leftover_after_cycle = {"health": 0, "user": 0}
+
+    async def _connect_and_count(*args: object, **kwargs: object) -> object:
+        connection = await original_connect(*args, **kwargs)
+        health, user = await _count_app_backends(
+            require_postgres, connect=original_connect
+        )
+        peak["health"] = max(peak["health"], health)
+        peak["user"] = max(peak["user"], user)
+        return connection
+
+    monkeypatch.setattr(asyncpg, "connect", _connect_and_count)
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", ResourceWarning)
@@ -459,14 +519,41 @@ async def test_health_db_alternating_freeze_does_not_accumulate_backends(
                 proxy.freeze_on = "select_1" if index % 2 == 0 else "connect"
                 frozen = await health_service.check_database()
                 assert frozen.db == "down"
-                backends = await _count_health_backends(require_postgres)
-                max_backends = max(max_backends, backends)
-            print(f"alternating max_health_backends={max_backends}", flush=True)
-            assert max_backends <= 2
+                leftover_h, leftover_u = await _count_app_backends(
+                    require_postgres, connect=original_connect
+                )
+                leftover_after_cycle["health"] = max(
+                    leftover_after_cycle["health"], leftover_h
+                )
+                leftover_after_cycle["user"] = max(
+                    leftover_after_cycle["user"], leftover_u
+                )
+            # leftover_after_cycle es residual *después* de cerrar
+            # (el «backends máximos 0» anterior). El pico real se mide
+            # con la conexión de la sonda aún abierta.
+            print(
+                f"alternating baseline health={baseline_health} "
+                f"app_user={baseline_user} peak_during health={peak['health']} "
+                f"app_user={peak['user']} leftover_after_cycle "
+                f"health={leftover_after_cycle['health']} "
+                f"app_user={leftover_after_cycle['user']}",
+                flush=True,
+            )
+            assert peak["health"] >= 1
+            assert leftover_after_cycle["health"] == 0
+            assert leftover_after_cycle["user"] <= baseline_user
             assert main.sync_engine.pool.checkedout() == 0  # type: ignore[attr-defined]
             await dispose_engine()
-            leftover = await _count_health_backends(require_postgres)
-            assert leftover == 0
+            end_health, end_user = await _count_app_backends(
+                require_postgres, connect=original_connect
+            )
+            print(
+                f"alternating leftover_after_dispose health={end_health} "
+                f"app_user={end_user}",
+                flush=True,
+            )
+            assert end_health == 0
+            assert end_user <= baseline_user
             unclosed = [
                 item
                 for item in caught
@@ -539,3 +626,95 @@ def test_health_log_filter_does_not_attach_to_root_handlers() -> None:
     assert during == before
     after = [id(item) for handler in root.handlers for item in handler.filters]
     assert after == before
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ({"sslmode": "require"}, "require"),
+        ({"ssl": "disable"}, "disable"),
+        ({"ssl": "disable", "sslmode": "verify-full"}, "verify-full"),
+        ({}, None),
+    ],
+)
+def test_health_connect_kwargs_forwards_dsn_ssl(
+    monkeypatch: pytest.MonkeyPatch,
+    query: dict[str, str],
+    expected: str | None,
+) -> None:
+    """``ssl`` / ``sslmode`` del DSN llegan a asyncpg; sin ellos no se pasa."""
+
+    from app.config import get_settings
+
+    base = "postgresql+asyncpg://probe:secret@127.0.0.1:5432/probe_db"
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("DATABASE_URL", base)
+    get_settings.cache_clear()
+    health_service.set_health_database_url(_dsn_with_ssl_query(base, **query))
+    try:
+        kwargs = health_service._connect_kwargs()
+        if expected is None:
+            assert "ssl" not in kwargs
+        else:
+            assert kwargs["ssl"] == expected
+    finally:
+        health_service.clear_health_probe()
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_health_probe_passes_sslmode_to_asyncpg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La sonda reenvía sslmode a ``asyncpg.connect`` (no el prefer implícito)."""
+
+    import asyncpg
+
+    from app.config import get_settings
+
+    captured: dict[str, object] = {}
+
+    async def _fake_connect(**kwargs: object) -> object:
+        captured.update(kwargs)
+        raise OSError("stop-after-capture")
+
+    base = "postgresql+asyncpg://probe:secret@127.0.0.1:5432/probe_db"
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("DATABASE_URL", base)
+    monkeypatch.setenv("DB_HEALTH_TIMEOUT", "1")
+    monkeypatch.setattr(asyncpg, "connect", _fake_connect)
+    get_settings.cache_clear()
+    health_service.set_health_database_url(_dsn_with_ssl_query(base, sslmode="require"))
+    try:
+        result = await health_service.check_database()
+        assert result.db == "down"
+        assert captured.get("ssl") == "require"
+    finally:
+        health_service.clear_health_probe()
+        get_settings.cache_clear()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_health_plain_proxy_works_without_sslmode(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """Sin ssl/sslmode el proxy en claro sigue congelando SELECT 1."""
+
+    from sqlalchemy.engine.url import make_url
+
+    stripped = _dsn_with_ssl_query(require_postgres.secret())
+    parsed = make_url(stripped)
+    query_keys = {str(key).lower() for key in (parsed.query or {})}
+    assert "ssl" not in query_keys
+    assert "sslmode" not in query_keys
+
+    elapsed, result, terminates, checkedout = await _run_frozen_health(
+        monkeypatch, RedactedDsn(stripped), freeze_on="select_1"
+    )
+    assert result.db == "down"
+    assert terminates >= 1
+    assert checkedout == 0
+    assert elapsed < 1.4
