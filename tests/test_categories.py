@@ -1782,6 +1782,218 @@ async def test_get_40001_is_503_not_500(
     assert response.headers.get("retry-after") == "1"
 
 
+async def test_retry_rejects_session_already_in_transaction(
+    db_session: AsyncSession,
+) -> None:
+    from app.services.categories import _run_with_transient_retry
+
+    await db_session.execute(text("SELECT 1"))
+    assert db_session.in_transaction()
+
+    async def noop() -> None:
+        return None
+
+    with pytest.raises(RuntimeError, match="sin transacción"):
+        await _run_with_transient_retry(db_session, noop)
+
+
+def test_retry_keeps_prior_uncommitted_work(
+    require_postgres: Any,
+    migrated_test_database: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P6: el reintento no borra trabajo previo sin commit de la misma sesión."""
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+    from app.exceptions import TransientDbConflict
+    from app.services import categories as categories_svc
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret())
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        monkeypatch.setattr("app.db.get_session_factory", lambda: factory)
+        original = categories_svc._name_taken
+        calls = {"n": 0}
+
+        async def flaky(
+            session: AsyncSession,
+            name: str,
+            parent_id: uuid.UUID | None,
+            *,
+            exclude_id: uuid.UUID | None = None,
+        ) -> bool:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TransientDbConflict()
+            return await original(session, name, parent_id, exclude_id=exclude_id)
+
+        try:
+            async with factory() as session:
+                first = await create_category(
+                    session, CategoryCreate(name=f"p6a-{suffix}")
+                )
+                tracked.append(first.id)
+                categories_svc._name_taken = flaky
+                calls["n"] = 0
+                second = await create_category(
+                    session, CategoryCreate(name=f"p6b-{suffix}")
+                )
+                tracked.append(second.id)
+                await session.commit()
+            async with factory() as check:
+                names = {
+                    row.name
+                    for row in await list_categories(check)
+                    if row.id in {first.id, second.id}
+                }
+            assert names == {f"p6a-{suffix}", f"p6b-{suffix}"}
+            assert calls["n"] == 2
+        finally:
+            categories_svc._name_taken = original
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+def test_retry_inside_session_begin_does_not_break(
+    require_postgres: Any,
+    migrated_test_database: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P7: create dentro de session.begin() con un transitorio no explota."""
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+    from app.exceptions import TransientDbConflict
+    from app.services import categories as categories_svc
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret())
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        monkeypatch.setattr("app.db.get_session_factory", lambda: factory)
+        original = categories_svc._name_taken
+        calls = {"n": 0}
+
+        async def flaky(
+            session: AsyncSession,
+            name: str,
+            parent_id: uuid.UUID | None,
+            *,
+            exclude_id: uuid.UUID | None = None,
+        ) -> bool:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TransientDbConflict()
+            return await original(session, name, parent_id, exclude_id=exclude_id)
+
+        categories_svc._name_taken = flaky
+        try:
+            async with factory() as session, session.begin():
+                row = await create_category(
+                    session, CategoryCreate(name=f"p7-{suffix}")
+                )
+                tracked.append(row.id)
+            assert calls["n"] == 2
+            async with factory() as check:
+                found = await check.get(Category, row.id)
+            assert found is not None
+            assert found.name == f"p7-{suffix}"
+        finally:
+            categories_svc._name_taken = original
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+def test_retry_does_not_expire_objects_loaded_before(
+    require_postgres: Any,
+    migrated_test_database: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P3: un objeto cargado antes del servicio (p. ej. User) sigue accesible."""
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+    from app.exceptions import TransientDbConflict
+    from app.services import categories as categories_svc
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret())
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        monkeypatch.setattr("app.db.get_session_factory", lambda: factory)
+        original = categories_svc._name_taken
+        try:
+            async with factory() as setup:
+                loaded = await create_category(
+                    setup, CategoryCreate(name=f"p3a-{suffix}")
+                )
+                target = await create_category(
+                    setup, CategoryCreate(name=f"p3b-{suffix}")
+                )
+                tracked.extend([loaded.id, target.id])
+                await setup.commit()
+
+            calls = {"n": 0}
+
+            async def flaky(
+                session: AsyncSession,
+                name: str,
+                parent_id: uuid.UUID | None,
+                *,
+                exclude_id: uuid.UUID | None = None,
+            ) -> bool:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise TransientDbConflict()
+                return await original(session, name, parent_id, exclude_id=exclude_id)
+
+            categories_svc._name_taken = flaky
+            async with factory() as session:
+                other = await session.get(Category, loaded.id)
+                assert other is not None
+                await update_category(
+                    session,
+                    target.id,
+                    CategoryUpdate(name=f"p3b2-{suffix}"),
+                )
+                assert other.name == f"p3a-{suffix}"
+                await session.commit()
+            assert calls["n"] == 2
+        finally:
+            categories_svc._name_taken = original
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
 async def test_f_sin_chequeo_clash(db_session: AsyncSession) -> None:
     await db_session.execute(
         text(

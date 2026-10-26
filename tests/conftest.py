@@ -17,7 +17,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.db import RedactedDsn, get_session, redact_database_url
 from app.exceptions import Validation
@@ -254,6 +259,9 @@ def _mount_probes(application: FastAPI) -> None:
         from app.services.categories import _run_with_transient_retry
 
         class _Session:
+            def in_transaction(self) -> bool:
+                return False
+
             async def rollback(self) -> None:
                 return None
 
@@ -273,6 +281,9 @@ def _mount_probes(application: FastAPI) -> None:
         from app.services.categories import _run_with_transient_retry
 
         class _Session:
+            def in_transaction(self) -> bool:
+                return False
+
             async def rollback(self) -> None:
                 return None
 
@@ -1116,6 +1127,12 @@ async def db_session(
                 expire_on_commit=False,
                 join_transaction_mode="create_savepoint",
             )
+            test_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+                bind=connection,
+                expire_on_commit=False,
+                join_transaction_mode="create_savepoint",
+            )
+            monkeypatch.setattr("app.db.get_session_factory", lambda: test_factory)
 
             async def _override_session() -> AsyncIterator[AsyncSession]:
                 yield session
