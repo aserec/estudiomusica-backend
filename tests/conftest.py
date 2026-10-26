@@ -1080,14 +1080,18 @@ def _drop_leftover_test_databases(dsn: RedactedDsn) -> None:
         )
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def production_test_database_url(
     require_postgres: RedactedDsn,
     migrated_test_database: None,
 ) -> Iterator[RedactedDsn]:
     """DSN de la base ``*_test`` con rol de production (sin password por defecto).
 
-    El rol se borra al terminar la sesión, también si la suite falla.
+    Scope de función: ``test_leftovers`` lanza un pytest hijo que ejecuta
+    ``migrated_test_database`` y hace ``DROP ROLE em_prod_tests``. Si el
+    rol viviera toda la sesión, los tests de production posteriores
+    fallarían con ``InvalidPasswordError`` (Postgres no distingue
+    «rol ausente» de «password mala»). Se crea y se borra en cada test.
     """
 
     try:
