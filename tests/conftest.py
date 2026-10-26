@@ -553,7 +553,7 @@ class _SessionAdvisoryLock:
     def stop(self) -> None:
         self._stop.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=15)
+            self._thread.join(timeout=3)
 
     def _run(self) -> None:
         try:
@@ -587,14 +587,20 @@ class _SessionAdvisoryLock:
                     self._lost = True
                     return
                 await asyncio.sleep(0.5)
-            await connection.scalar(
-                text("SELECT pg_advisory_unlock(:k1, :k2)"),
-                {"k1": key1, "k2": key2},
-            )
+            with suppress(Exception):
+                await asyncio.wait_for(
+                    connection.scalar(
+                        text("SELECT pg_advisory_unlock(:k1, :k2)"),
+                        {"k1": key1, "k2": key2},
+                    ),
+                    timeout=2,
+                )
         finally:
             if connection is not None:
-                await connection.close()
-            await engine.dispose()
+                with suppress(Exception):
+                    await asyncio.wait_for(connection.close(), timeout=2)
+            with suppress(Exception):
+                await asyncio.wait_for(engine.dispose(), timeout=2)
 
 
 _ROLE_LIFE_LOCK: _SessionAdvisoryLock | None = None

@@ -945,6 +945,22 @@ def test_orphan_production_test_role_captures_overflow(
 
 
 @pytest.mark.db
+def test_lock_stop_finishes_quickly_and_reaps_thread(
+    require_postgres: RedactedDsn,
+) -> None:
+    """stop() no debe bloquearse ni dejar el hilo del lock vivo."""
+
+    import time
+
+    lock = _SessionAdvisoryLock(require_postgres, "em_prod_tests_1_stop_quick")
+    assert lock.start() is True
+    started = time.monotonic()
+    lock.stop()
+    assert time.monotonic() - started < 3
+    assert lock._thread.is_alive() is False
+
+
+@pytest.mark.db
 def test_killed_lock_connection_fails_teardown(
     require_postgres: RedactedDsn,
     monkeypatch: pytest.MonkeyPatch,
