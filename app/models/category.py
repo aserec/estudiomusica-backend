@@ -10,10 +10,11 @@ from app.models.base import PersistentModel
 
 
 class Category(PersistentModel):
-    """Nodo del árbol de categorías.
+    """Nodo del árbol de categorías (un solo nivel: padre = raíz).
 
-    ``courses.category_id`` apunta a ``categories.id``. El borrado
-    responde ``409 category_not_empty`` si hay cursos vigentes.
+    ``courses.category_id`` apunta a ``categories.id``. Borrar o mover
+    (cambiar ``parent_id``) responde ``409 category_not_empty`` si hay
+    cursos vigentes.
     """
 
     __tablename__ = "categories"

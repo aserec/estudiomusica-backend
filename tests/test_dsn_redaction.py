@@ -12,6 +12,7 @@ import pytest
 from app.db import RedactedDsn
 from tests.conftest import (
     ROOT,
+    _as_redacted_dsn,
     _ping_postgres,
     apply_test_migrations,
     ensure_database_exists,
@@ -33,6 +34,45 @@ def test_redacted_dsn_hides_password_in_str_and_repr() -> None:
     assert SENTINEL not in repr(dsn)
     assert "***" in str(dsn)
     assert dsn.secret().endswith("/app_test")
+
+
+def test_as_redacted_dsn_wraps_raw_string() -> None:
+    dsn = _as_redacted_dsn(
+        f"postgresql+asyncpg://leaky_user:{SENTINEL}@127.0.0.1:5432/app_test"
+    )
+    assert type(dsn) is RedactedDsn
+    assert SENTINEL not in repr(dsn)
+    assert SENTINEL not in str(dsn)
+
+
+def test_ping_postgres_raw_str_does_not_leak_or_chain_cause() -> None:
+    with pytest.raises(ConnectionError) as caught:
+        _ping_postgres(_DOWN_DSN)
+    assert SENTINEL not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+
+
+def test_ensure_database_exists_raw_str_does_not_chain_cause() -> None:
+    with pytest.raises(ConnectionError) as caught:
+        ensure_database_exists(_DOWN_DSN)
+    assert SENTINEL not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+
+
+def test_apply_test_migrations_does_not_chain_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("broken migration")
+
+    monkeypatch.setattr("tests.conftest.command.upgrade", boom)
+    with pytest.raises(RuntimeError, match="migraciones de test") as caught:
+        apply_test_migrations(_DOWN_DSN)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    assert SENTINEL not in str(caught.value)
 
 
 def test_ping_postgres_masks_password_in_connection_error() -> None:
@@ -144,6 +184,8 @@ def test_broken_migration_does_not_leak_password_with_showlocals(
         "        raise RuntimeError('broken migration')\n"
         "    _conftest._ping_postgres = ok\n"
         "    _conftest.ensure_database_exists = ok\n"
+        "    _conftest._drop_leftover_test_tables = ok\n"
+        "    _conftest.drop_production_test_role = ok\n"
         "    command.upgrade = boom\n"
     )
     result = _run_suite_with_showlocals(

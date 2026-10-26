@@ -3,7 +3,7 @@ import logging
 import pytest
 from pydantic import ValidationError
 
-from app.config import Settings, get_settings
+from app.config import Settings, allow_test_database, get_settings
 
 _DEFAULT_DEV_DSN = (
     "postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica"
@@ -116,6 +116,21 @@ def test_production_rejects_default_password_on_other_database(
     get_settings.cache_clear()
 
 
+def test_production_rejects_default_user_with_other_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://estudiomusica:otra-clave@db.example:5432/app",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="usuario") as caught:
+        Settings()
+    assert "otra-clave" not in str(caught.value)
+    get_settings.cache_clear()
+
+
 def test_production_rejects_default_password_with_other_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -130,7 +145,44 @@ def test_production_rejects_default_password_with_other_user(
     get_settings.cache_clear()
 
 
-def test_production_accepts_test_database_with_non_default_password() -> None:
+def test_production_rejects_test_database_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@127.0.0.1:5432/estudiomusica_test",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match=r"\*_test"):
+        Settings()
+    get_settings.cache_clear()
+
+
+def test_allow_test_database_cannot_be_enabled_from_env_or_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@127.0.0.1:5432/estudiomusica_test",
+    )
+    monkeypatch.setenv("ALLOW_TEST_DATABASE", "true")
+    monkeypatch.setenv("PYTEST_ALLOW_TEST_DATABASE", "true")
+    monkeypatch.setenv("ALLOW_TEST_DATABASE_IN_PRODUCTION", "1")
+    get_settings.cache_clear()
+    assert allow_test_database() is False
+    with pytest.raises(ValidationError, match=r"\*_test"):
+        Settings()
+    with pytest.raises(ValidationError, match=r"\*_test"):
+        Settings(allow_test_database=True, _env_file=None)
+    get_settings.cache_clear()
+
+
+def test_allow_test_database_opt_in_is_only_via_monkeypatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.config.settings.allow_test_database", lambda: True)
     settings = Settings(
         app_env="production",
         database_url=(
@@ -141,6 +193,23 @@ def test_production_accepts_test_database_with_non_default_password() -> None:
     )
     assert settings.resolved_database_url().endswith("/estudiomusica_test")
     assert settings.auth_cookie_secure() is True
+
+
+def test_allow_test_database_still_rejects_default_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.config.settings.allow_test_database", lambda: True)
+    with pytest.raises(ValidationError, match="usuario") as caught:
+        Settings(
+            app_env="production",
+            database_url=(
+                "postgresql+asyncpg://estudiomusica:otra-clave"
+                "@db.example:5432/estudiomusica_test"
+            ),
+            auth_secret="production-auth-secret-at-least-32ch",
+            _env_file=None,
+        )
+    assert "otra-clave" not in str(caught.value)
 
 
 def test_production_accepts_non_default_database_url() -> None:
@@ -234,7 +303,7 @@ def test_short_dsn_password_is_hidden_in_validation_error(
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv(
         "DATABASE_URL",
-        f"postgresql+asyncpg://a:{_SECRET}@h/app?database=d_test",
+        f"postgresql+asyncpg://a:{_SECRET}@h/d_test",
     )
     get_settings.cache_clear()
     with pytest.raises(ValidationError) as caught:

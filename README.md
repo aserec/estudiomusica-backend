@@ -107,20 +107,20 @@ GET    /api/v1/courses/{courseId}/me/permissions
 
 Dependencias reutilizables: `require_site_permission(...)` y `require_course_permission(...)` (leen `course_id` del path). La asignación de matrícula queda fuera de este ticket (#403). El TODO(#306) de visibilidad multimedia/SM3 del profesor adjunto es el flag `ASSISTANT_MEDIA_AND_SM3_VISIBLE` (por defecto `false`); no se ha inventado un permiso nuevo.
 
-`0003_system_roles` (en `app/migrations/versions/`) crea `system_roles` y `course_memberships`, siembra los cuatro roles y añade `users.system_role_id`. `is_admin` se mantiene sincronizado para no romper `/auth/me`. Usa `updated_at_trigger_sql` para el trigger.
+`0003_system_roles` (en `app/migrations/versions/`) crea `system_roles` y `course_memberships`, siembra los cuatro roles y añade `users.system_role_id`. `/auth/me` deriva `isAdmin` de `system_role_id`; la columna `is_admin` es un espejo con `CHECK (is_admin = (system_role_id = 'admin'))`. Monta el trigger con `op_create_updated_at_trigger`.
 
 ## Categorías de curso
 
-El catálogo es jerárquico (`parentId`). Cualquier usuario autenticado lee el listado; crear, actualizar y borrar exige `site:manage-courses` (solo admin). Alumno, profesor y profesor adjunto reciben `403 {error: forbidden}` en las mutaciones. Sin sesión o token inválido: `401 {error: unauthorized}`.
+El catálogo tiene **un solo nivel** (regla del front, `category-service.ts`): el padre de una categoría tiene que ser una raíz, y una categoría con hijas se queda en la raíz. Un nieto, un padre que no es raíz o mover un nodo con hijas responde `400 {error: validation, fields: ["parentId"]}`. Cualquier usuario autenticado lee el listado; crear, actualizar y borrar exige `site:manage-courses` (solo admin). Alumno, profesor y profesor adjunto reciben `403 {error: forbidden}` en las mutaciones. Sin sesión o token inválido: `401 {error: unauthorized}`.
 
 ```text
 GET    /api/v1/categories
 POST   /api/v1/admin/categories              {name, parentId?, description?, sortOrder?}
-PUT    /api/v1/admin/categories/{id}         {name, parentId?, description?, sortOrder?}
+PUT    /api/v1/admin/categories/{id}         {name?, parentId?, description?, sortOrder?}
 DELETE /api/v1/admin/categories/{id}         409 si tiene hijas o cursos
 ```
 
-El ticket #400 pedía PATCH y un array sin más. Se usa **PUT** (convención #91) y el listado sigue sin paginar: el árbol es el catálogo completo, no hace falta `page`/`pageSize`. Nombre único (citext, sin distinguir mayúsculas) entre hermanos vigentes. DELETE es lógico (`deleted_at`). `409 {error: category_not_empty}` si hay hijas vigentes o cursos vigentes. `409 {error: category_cycle}` si el nuevo padre sería un descendiente. `409 {error: category_name_taken}` si el nombre ya existe en el mismo padre.
+El ticket #400 pedía PATCH. Se mantiene **PUT** (convención #91) pero **parcial**: un campo omitido no cambia. `PUT {name}` no mueve a la raíz ni borra `description`. Para quitar el padre o la description hay que enviar `null` explícito (`model_fields_set`). El listado no pagina. Nombre: NFC, espacios colapsados, citext (sin distinguir mayúsculas), único entre hermanos vigentes. DELETE es lógico (`deleted_at`). `409 {error: category_not_empty}` si hay hijas vigentes o cursos vigentes; lo mismo al cambiar `parentId` de una categoría con cursos. `409 {error: category_name_taken}` si el nombre ya existe en el mismo padre. Los POST/PUT que fijan o cambian `parentId` toman `pg_advisory_xact_lock(400, 1)` sobre el árbol.
 
 `0004_course_categories` crea `categories` (`id`, `name`, `parent_id`, `description`, `sort_order`, timestamps, `deleted_at`) y el trigger `updated_at`. `courses.category_id` (0005) apunta a esta tabla.
 
@@ -158,7 +158,7 @@ postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
 docker compose up -d
 ```
 
-Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings rechaza la contraseña o el usuario por defecto, también si vienen en la query (`password`, `user`). Un `*_test` por query (`database`, `dbname`) tampoco vale; el path `*_test` sí, si las credenciales no son las de desarrollo (fixture `production_client`). Los errores de validación no muestran el DSN (`hide_input_in_errors`). Espera a que el healthcheck esté sano:
+Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings rechaza la contraseña por defecto, el usuario por defecto (`estudiomusica`, p. ej. `estudiomusica:otra@…`, también en la query) y cualquier base `*_test` en el path o en `database`/`dbname`. Los tests de production activan un opt-in (`allow_test_database`) que **no** lee el entorno: un despliegue real no puede encenderlo. `str(ValidationError)` y los logs no incluyen el DSN ni `AUTH_SECRET` (`SecretStr` + `hide_input_in_errors`); `ValidationError.errors()` y `.json()` de Pydantic sí pueden traer `input_value` — no los registres ni los devuelvas. Espera a que el healthcheck esté sano:
 
 ```bash
 docker compose ps
@@ -176,19 +176,19 @@ Para revertirlas del todo:
 uv run alembic downgrade base
 ```
 
-Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations`). Van en el wheel con el paquete `app`. El `alembic.ini` de la raíz **no** viaja en el wheel: desde el paquete instalado usa el helper programático (también hay `app/alembic.ini`):
+Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations`). Van en el wheel con el paquete `app`. La fuente de verdad es `app/alembic.ini` (el de la raíz es un enlace para que `uv run alembic` siga funcionando en el repo). Desde el paquete instalado:
 
 ```bash
 python -c "from alembic import command; from app.migrations.config import make_alembic_config; command.upgrade(make_alembic_config(), 'head')"
 ```
 
-La inicial crea `set_updated_at()` (`clock_timestamp()`). No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. `PersistentModel` monta el trigger en las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. Nueva revisión, cuando exista un modelo:
+`0001` solo crea la función `set_updated_at()` (`clock_timestamp()`), no el trigger. No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. El trigger de cada tabla `PersistentModel` lo montan las revisiones que la crean (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. Nueva revisión, cuando exista un modelo:
 
 ```bash
 uv run alembic revision -m "descripcion" --autogenerate
 ```
 
-Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. No hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext`, `users` y `auth_sessions` y monta ese trigger en ambas. `0003_system_roles` añade `system_roles` (id slug, no UUID), `users.system_role_id` y `course_memberships`. `0004_course_categories` añade `categories` (árbol con `parent_id`, citext, índices únicos parciales por hermano). `0005_courses` añade `courses` (`short_name` único entre vigentes, `category_id` FK, enums por check, `archived_at`) y la FK de `course_memberships`.
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. No hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes). `0002_auth_users` crea `citext` si falta, `users` y `auth_sessions`, y monta ese trigger en ambas. El downgrade de 0002 **no** hace `DROP EXTENSION citext` (puede venir preinstalada o usarla otra revisión). `0003_system_roles` añade `system_roles` (id slug, no UUID), `users.system_role_id` y `course_memberships`. `0004_course_categories` añade `categories` (árbol con `parent_id`, citext, índices únicos parciales por hermano) y monta el trigger con `op_create_updated_at_trigger` (0001 solo crea la función; el SQL va quoted por el preparer). `0005_courses` añade `courses` (`short_name` único entre vigentes, `category_id` FK, enums por check, `archived_at`) y la FK de `course_memberships`.
 
 `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
@@ -211,6 +211,17 @@ uv run pytest
 ```
 
 `uv run pytest` sin Postgres en marcha **salta** los tests de BD solo si el error es de conexión (refused, host desconocido, timeout). Un fallo de autenticación o una migración rota **falla**. En CI: `REQUIRE_POSTGRES=1 uv run pytest` (también `true`/`yes`/`on`, como Pydantic) convierte el skip en fallo; un valor desconocido aborta. Los mensajes y `--showlocals` no incluyen la contraseña. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
+
+El fixture `production_client` crea el rol `em_prod_tests` (LOGIN, **sin** SUPERUSER / CREATEDB / CREATEROLE) con contraseña aleatoria por ejecución y lo borra al terminar la suite, también si falla. Grants mínimos, los mismos que un rol de producción:
+
+- `CONNECT` en la base de test
+- `USAGE` en el esquema `public`
+- `SELECT, INSERT, UPDATE, DELETE` en las tablas de `public` (`users`, `auth_sessions`, `system_roles`, `course_memberships`, `categories`)
+- `USAGE, SELECT` en las secuencias de `public`
+- `USAGE` en el tipo `citext` (email y `categories.name`)
+- `EXECUTE` en `set_updated_at()` (triggers de `users`, `auth_sessions`, `system_roles`, `course_memberships`, `categories`)
+
+No puede migrar ni crear bases. Las filas de esos tests (`prod-%@example.com`) se borran al terminar.
 
 ## Tests, lint y types
 
@@ -321,11 +332,11 @@ app/
   auth/              # Hash argon2, JWT HS256 y cookie de sesión
   models/            # PersistentModel, User, AuthSession, SystemRoleRow, CourseMembership, Category, Course
   migrations/        # Alembic (env.py async + versions/ + config programático)
-  alembic.ini        # Copia empaquetada (el de la raíz no va en el wheel)
+  alembic.ini        # Fuente de verdad (el de la raíz es un enlace)
 docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
 tests/               # Tests de pytest (convenciones + BD aislada)
 docker-compose.yml   # Postgres 17 en 127.0.0.1:5432 (sin container_name fijo)
-alembic.ini          # CLI `uv run alembic` desde el repo
+alembic.ini          # Enlace a app/alembic.ini para `uv run alembic`
 .env.example         # Plantilla de variables de entorno
 pyproject.toml       # Dependencias, ruff, pytest y mypy
 uv.lock              # Lockfile reproducible de uv

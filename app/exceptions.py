@@ -119,12 +119,6 @@ class CategoryNameTaken(Conflict):
     error = "category_name_taken"
 
 
-class CategoryCycle(Conflict):
-    """409 {error: category_cycle}."""
-
-    error = "category_cycle"
-
-
 class DuplicateShortName(Conflict):
     """409 {error: duplicate_short_name}."""
 
