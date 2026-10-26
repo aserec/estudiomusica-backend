@@ -1935,16 +1935,21 @@ async def test_accented_names_nfc_and_nfd_appear_in_search(
         "/api/v1/auth/login",
         json={"email": admin["email"], "password": PASSWORD},
     )
+    nfc_last = f"Ñúñez{marker}"
+    nfd_last = unicodedata.normalize("NFD", nfc_last)
+    assert nfd_last != nfc_last
     edited = await session_client.put(
         f"/api/v1/admin/users/{put_nfd['id']}",
-        json={"firstName": nfd_first, "lastName": "PutNfd"},
+        json={"firstName": nfd_first, "lastName": nfd_last},
     )
     assert edited.status_code == 200
     assert edited.json()["firstName"] == nfc_first
+    assert edited.json()["lastName"] == nfc_last
     db_session.expire_all()
     put_row = await db_session.get(User, put_nfd["id"])
     assert put_row is not None
     assert put_row.first_name == nfc_first
+    assert put_row.last_name == nfc_last
 
     put_nfc = await _signup(session_client, email=unique_email("nm-put-nfc"))
     await session_client.post(
@@ -1992,6 +1997,43 @@ def test_email_term_fallback_applies_nfc_after_strip_lower() -> None:
     assert _email_term("  J\u030cX  ") == "\u01f0x"
     assert _email_term("J\u030cX") == "\u01f0x"
     assert _email_term("j\u030cx") == "\u01f0x"
+    ligature = "\ufb01"
+    assert unicodedata.normalize("NFC", ligature) == ligature
+    assert unicodedata.normalize("NFKC", ligature) == "fi"
+    assert _email_term(f"  {ligature}LE  ") == f"{ligature}le"
+    assert _email_term(ligature) != "fi"
+
+
+async def test_identity_put_keeps_nfc_not_nfkc_ligature(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    admin = await _signup_role(
+        session_client, db_session, SystemRole.ADMIN, prefix="nfkc-admin"
+    )
+    target = await _signup(session_client, email=unique_email("nfkc-tgt"))
+    await session_client.post(
+        "/api/v1/auth/login",
+        json={"email": admin["email"], "password": PASSWORD},
+    )
+    marker = uuid.uuid4().hex[:8]
+    ligature_first = f"\ufb01le{marker}"
+    ligature_last = f"o\ufb03ce{marker}"
+    assert unicodedata.normalize("NFKC", ligature_first) == f"file{marker}"
+    assert unicodedata.normalize("NFKC", ligature_last) == f"office{marker}"
+    edited = await session_client.put(
+        f"/api/v1/admin/users/{target['id']}",
+        json={"firstName": ligature_first, "lastName": ligature_last},
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["firstName"] == ligature_first
+    assert edited.json()["lastName"] == ligature_last
+    db_session.expire_all()
+    stored = await db_session.get(User, target["id"])
+    assert stored is not None
+    assert stored.first_name == ligature_first
+    assert stored.last_name == ligature_last
+    assert stored.first_name != f"file{marker}"
+    assert stored.last_name != f"office{marker}"
 
 
 async def test_admin_search_fallback_nfd_local_finds_nfc_email(
@@ -2012,6 +2054,35 @@ async def test_admin_search_fallback_nfd_local_finds_nfc_email(
     listed = await session_client.get("/api/v1/admin/users", params={"query": fragment})
     assert listed.status_code == 200
     assert listed.json()["items"][0]["email"] == stored
+
+
+async def test_admin_search_fallback_keeps_nfc_not_nfkc_ligature(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    marker = uuid.uuid4().hex[:8]
+    typed = f"\ufb01le-{marker}@example.com"
+    created = await _signup(session_client, email=typed, name=f"Lig {marker}")
+    stored = created["response"].json()["user"]["email"]
+    assert stored == typed
+    assert "\ufb01" in stored
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    fragment = f"\ufb01le-{marker}"
+    assert "@" not in fragment
+    assert _email_term(fragment) == fragment
+    found = await session_client.get("/api/v1/users/search", params={"q": fragment})
+    assert found.status_code == 200
+    items = found.json()["items"]
+    assert len(items) == 1
+    assert items[0]["email"] == stored
+    listed = await session_client.get("/api/v1/admin/users", params={"query": fragment})
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["email"] == stored
+    ascii_fragment = f"file-{marker}"
+    missed = await session_client.get(
+        "/api/v1/users/search", params={"q": ascii_fragment}
+    )
+    assert missed.status_code == 200
+    assert missed.json()["items"] == []
 
 
 async def test_teacher_exact_email_query_uses_unique_index(
