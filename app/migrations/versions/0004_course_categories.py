@@ -123,6 +123,9 @@ def downgrade() -> None:
         if_exists=True,
     )
     op.drop_table("categories")
+    # Las 0004 de revisión (78b08eaf, 8924e0a0 y 510acf77) creaban
+    # public.category_name_key. El downgrade de HEAD la quita para que
+    # `downgrade 0003 && upgrade head` deje la BD limpia.
     op.execute(
         sa.text("DROP FUNCTION IF EXISTS public.category_name_key(public.citext)")
     )
