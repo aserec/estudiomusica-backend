@@ -2015,45 +2015,70 @@ def test_uppercase_ssl_query_key_normalizes(
 
 @pytest.mark.db
 @pytest.mark.timeout(60)
+@pytest.mark.parametrize("sslmode", ["verify-full", "verify-ca", "require"])
 def test_sslmode_verify_full_without_rootcert_rejects_untrusted(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
     tls_postgres: tuple[Any, Any, str],
+    require_postgres: RedactedDsn,
+    sslmode: str,
 ) -> None:
-    """ALTA: ``?sslmode=verify-full`` sin CA no degrada a prefer (Alembic y engine)."""
+    """ALTA: ``sslmode`` sin CA no degrada a prefer (Alembic, env y engine).
+
+    ``require`` va contra el servidor sin TLS / hostnossl; verify-* contra
+    el Postgres TLS sin CA de confianza.
+    """
 
     from pathlib import Path
 
     from alembic import command
     from sqlalchemy import text
 
+    from app.config import get_settings
     from app.db import asyncpg_url_and_connect_args
     from app.migrations.config import make_alembic_config
     from tests.conftest import _create_async_engine
 
-    _cafile, _bad_ca, dsn = tls_postgres
-    raw = _dsn_with_query(dsn, sslmode="verify-full", sslrootcert=None, ssl=None)
-    assert "sslmode=verify-full" in raw.lower()
+    if sslmode == "require":
+        _skip_if_hostssl_rejects_plain(require_postgres)
+        dsn = require_postgres.secret()
+    else:
+        _cafile, _bad_ca, dsn = tls_postgres
+    raw = _dsn_with_query(dsn, sslmode=sslmode, sslrootcert=None, ssl=None)
+    assert f"sslmode={sslmode}" in raw.lower()
     assert "sslrootcert=" not in raw.lower()
     url, args = asyncpg_url_and_connect_args(raw)
     assert "sslmode=" not in url.lower()
-    assert args.get("ssl") == "verify-full"
+    assert args.get("ssl") == sslmode
 
     home = Path(str(tmp_path)) / "empty-home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("DATABASE_URL", raw)
     monkeypatch.delenv("PGSSLROOTCERT", raising=False)
     monkeypatch.delenv("PGSSLMODE", raising=False)
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    get_settings.cache_clear()
+    env_url, env_args = asyncpg_url_and_connect_args(
+        get_settings().resolved_database_url()
+    )
+    assert env_args.get("ssl") == sslmode
+    del env_url
+
+    ssl_tokens = ("ssl", "certificate", "certificat", "verify", "encryption")
 
     with pytest.raises(Exception) as alembic_exc:
         command.current(make_alembic_config(raw))
     alembic_text = str(alembic_exc.value).lower()
-    assert any(
-        token in alembic_text
-        for token in ("ssl", "certificate", "certificat", "verify")
-    ), alembic_exc.value
+    assert any(token in alembic_text for token in ssl_tokens), alembic_exc.value
+
+    get_settings.cache_clear()
+    with pytest.raises(Exception) as env_exc:
+        command.current(make_alembic_config())
+    env_text = str(env_exc.value).lower()
+    assert any(token in env_text for token in ssl_tokens), env_exc.value
 
     engine = _create_async_engine(raw, pool_pre_ping=True)
 
@@ -2067,9 +2092,8 @@ def test_sslmode_verify_full_without_rootcert_rejects_untrusted(
     with pytest.raises(Exception) as engine_exc:
         asyncio.run(_connect())
     engine_text = str(engine_exc.value).lower()
-    assert any(
-        token in engine_text for token in ("ssl", "certificate", "certificat", "verify")
-    ), engine_exc.value
+    assert any(token in engine_text for token in ssl_tokens), engine_exc.value
+    get_settings.cache_clear()
 
 
 def test_prepare_translates_uppercase_sslmode_alone() -> None:
