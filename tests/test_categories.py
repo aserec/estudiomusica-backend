@@ -3287,6 +3287,34 @@ def test_concurrent_tree_mutations(
     suffix = uuid.uuid4().hex[:8]
     tracked: list[uuid.UUID] = []
 
+    async def pg_deadlocks() -> int:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.connect() as connection:
+                value = await connection.scalar(
+                    text(
+                        "SELECT deadlocks FROM pg_stat_database "
+                        "WHERE datname = current_database()"
+                    )
+                )
+                return int(value or 0)
+        finally:
+            await engine.dispose()
+
+    async def clear_parents(*category_ids: uuid.UUID) -> None:
+        engine = create_async_engine(dsn.secret())
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                for category_id in category_ids:
+                    await session.execute(
+                        text("UPDATE categories SET parent_id = NULL WHERE id = :id"),
+                        {"id": category_id},
+                    )
+                await session.commit()
+        finally:
+            await engine.dispose()
+
     async def seed() -> dict[str, uuid.UUID]:
         engine = create_async_engine(dsn.secret())
         factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -3328,9 +3356,10 @@ def test_concurrent_tree_mutations(
             )
             return "ok"
 
+        before_deadlocks = asyncio.run(pg_deadlocks())
+
         first = _race(dsn.secret(), reparent_leaf, reparent_x)
-        assert "ok" in first
-        assert set(first) <= {"ok", "validation", "deadlock"}
+        assert sorted(first) == ["ok", "validation"]
 
         async def a_to_b(session: Any) -> str:
             await update_category(session, ids["a"], CategoryUpdate(parent_id=ids["b"]))
@@ -3340,10 +3369,12 @@ def test_concurrent_tree_mutations(
             await update_category(session, ids["b"], CategoryUpdate(parent_id=ids["a"]))
             return "ok"
 
-        second = _race(dsn.secret(), a_to_b, b_to_a)
-        assert "ok" in second or "deadlock" in second
-        assert set(second) <= {"ok", "validation", "deadlock"}
-        assert second.count("ok") <= 1
+        for _ in range(8):
+            asyncio.run(clear_parents(ids["a"], ids["b"]))
+            second = _race(dsn.secret(), a_to_b, b_to_a)
+            assert sorted(second) == ["ok", "validation"]
+
+        assert asyncio.run(pg_deadlocks()) == before_deadlocks
 
         async def rename_keep(session: Any) -> str:
             await update_category(
