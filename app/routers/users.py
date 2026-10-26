@@ -10,7 +10,7 @@ from app.permissions.deps import get_current_user
 from app.schemas.errors import ErrorResponse
 from app.schemas.pagination import Paginated, PaginationQuery, pagination_query
 from app.schemas.users import UserSearchHit, reject_nul
-from app.services.users import _SEARCH_Q_RAW_MAX, search_users
+from app.services.users import SEARCH_Q_RAW_MAX, search_users
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -52,7 +52,7 @@ async def get_users_search(
     q: Annotated[
         str,
         Query(
-            max_length=_SEARCH_Q_RAW_MAX,
+            max_length=SEARCH_Q_RAW_MAX,
             description=(
                 "Nombre o email. Vacío no lista a nadie. Máximo 200 "
                 "tras NFC (tope crudo 2000 para no rechazar NFD que cabe). "

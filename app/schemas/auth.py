@@ -1,10 +1,24 @@
 import unicodedata
 import uuid
+from typing import overload
 
 from pydantic import EmailStr, Field, field_validator
 
 from app.models.user import SystemRole
 from app.schemas.base import APIModel
+
+PERSON_NAME_MAX = 80
+PERSON_NAME_RAW_MAX = 800
+# first + espacio + last; tope semántico 80+80 tras NFC.
+SIGNUP_NAME_RAW_MAX = PERSON_NAME_RAW_MAX * 2 + 1
+
+
+@overload
+def normalize_email(value: str) -> str: ...
+
+
+@overload
+def normalize_email(value: object) -> object: ...
 
 
 def normalize_email(value: object) -> object:
@@ -13,14 +27,8 @@ def normalize_email(value: object) -> object:
     return value
 
 
-# El tope semántico es 80+80 tras NFC (split_display_name). El crudo es
-# generoso para no rechazar NFD que cabe (50×``é`` + espacio + 50×``é``
-# son 201 crudos y 101 NFC).
-_SIGNUP_NAME_RAW_MAX = 1601
-
-
 class SignUpRequest(APIModel):
-    name: str = Field(min_length=1, max_length=_SIGNUP_NAME_RAW_MAX)
+    name: str = Field(min_length=1, max_length=SIGNUP_NAME_RAW_MAX)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128, repr=False)
 

@@ -5,7 +5,12 @@ from enum import StrEnum
 
 from pydantic import EmailStr, Field, StrictBool, field_validator, model_validator
 
-from app.schemas.auth import PublicUser, normalize_email
+from app.schemas.auth import (
+    PERSON_NAME_MAX,
+    PERSON_NAME_RAW_MAX,
+    PublicUser,
+    normalize_email,
+)
 from app.schemas.base import APIModel
 
 
@@ -21,17 +26,13 @@ def reject_nul(value: str | None) -> str | None:
 # (y otras exclusiones de composición) se alarga (1→2), y NFD como
 # ``e\u0301`` se acorta. ``Field(max_length=80)`` sobre el crudo rechazaría
 # 41×``é`` (cabe) y dejaría pasar 80×U+0958 (160 NFC → 500 en Postgres).
-_PERSON_NAME_MAX = 80
-_PERSON_NAME_RAW_MAX = 800
-
-
 def _normalize_person_name(value: str, *, required_message: str | None) -> str:
     reject_nul(value)
     stripped = value.strip()
     if required_message is not None and not stripped:
         raise ValueError(required_message)
     normalized = unicodedata.normalize("NFC", stripped)
-    if len(normalized) > _PERSON_NAME_MAX:
+    if len(normalized) > PERSON_NAME_MAX:
         raise ValueError("too long")
     return normalized
 
@@ -56,8 +57,8 @@ class AdminUserView(PublicUser):
 class AdminUserIdentityUpdate(APIModel):
     """Edición de identidad. PUT parcial: al menos un campo."""
 
-    first_name: str | None = Field(default=None, max_length=_PERSON_NAME_RAW_MAX)
-    last_name: str | None = Field(default=None, max_length=_PERSON_NAME_RAW_MAX)
+    first_name: str | None = Field(default=None, max_length=PERSON_NAME_RAW_MAX)
+    last_name: str | None = Field(default=None, max_length=PERSON_NAME_RAW_MAX)
     email: EmailStr | None = None
 
     @field_validator("first_name")

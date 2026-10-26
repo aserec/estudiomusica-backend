@@ -20,7 +20,7 @@ from app.schemas.users import (
     reject_nul,
 )
 from app.services.users import (
-    _SEARCH_Q_RAW_MAX,
+    SEARCH_Q_RAW_MAX,
     list_admin_users,
     set_user_admin,
     set_user_suspended,
@@ -68,7 +68,7 @@ async def get_admin_users(
     query: Annotated[
         str | None,
         Query(
-            max_length=_SEARCH_Q_RAW_MAX,
+            max_length=SEARCH_Q_RAW_MAX,
             description=(
                 "Texto libre sobre nombre o email. Máximo 200 caracteres "
                 "tras NFC (tope crudo 2000 para no rechazar NFD que cabe)."
