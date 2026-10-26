@@ -1,3 +1,4 @@
+import unicodedata
 import uuid
 
 from pydantic import EmailStr, Field, field_validator
@@ -6,12 +7,27 @@ from app.models.user import SystemRole
 from app.schemas.base import APIModel
 
 
+def _is_unicode_noncharacter(code: int) -> bool:
+    return 0xFDD0 <= code <= 0xFDEF or (code & 0xFFFE) == 0xFFFE
+
+
+def reject_disallowed_text(value: object) -> object:
+    """Rechaza controles (Cc, incluido NUL) y no-caracteres Unicode."""
+
+    if not isinstance(value, str):
+        return value
+    for char in value:
+        if unicodedata.category(char) == "Cc":
+            raise ValueError("control characters not allowed")
+        if _is_unicode_noncharacter(ord(char)):
+            raise ValueError("noncharacter not allowed")
+    return value
+
+
 def reject_nul(value: object) -> object:
     """Postgres rechaza ``\\u0000`` en texto (UTF8 0x00 → 500)."""
 
-    if isinstance(value, str) and "\x00" in value:
-        raise ValueError("nul not allowed")
-    return value
+    return reject_disallowed_text(value)
 
 
 def normalize_email(value: object) -> object:
