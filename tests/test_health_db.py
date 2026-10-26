@@ -2173,10 +2173,12 @@ def test_sslrootcert_and_pgsslrootcert_accept_ca_without_keyusage(
             assert ctx.verify_flags & partial == 0
         _tls_handshake(ctx, server_ctx, "localhost")
     _asyncpg_connect_with_pgsslrootcert(monkeypatch, cafile, server_ctx)
+    bad_ca = _write_unrelated_ca(Path(str(tmp_path)) / "other-ca.pem")
+    with pytest.raises(ssl_mod.SSLCertVerificationError):
+        _asyncpg_connect_with_pgsslrootcert(monkeypatch, bad_ca, server_ctx)
 
     with pytest.raises(ssl_mod.SSLError):
         _tls_handshake(query_ctx, server_ctx, "wrong.example")
-    bad_ca = _write_unrelated_ca(Path(str(tmp_path)) / "other-ca.pem")
     bad_ctx = ssl_context_from_rootcert(str(bad_ca), "verify-full")
     with pytest.raises(ssl_mod.SSLError):
         _tls_handshake(bad_ctx, server_ctx, "localhost")
@@ -2473,7 +2475,12 @@ def _asyncpg_connect_with_pgsslrootcert(
     cafile: Any,
     server_ctx: Any,
 ) -> None:
-    """Handshake TLS con asyncpg + ``PGSSLROOTCERT`` (no se copia el SSLContext)."""
+    """Handshake TLS con asyncpg + ``PGSSLROOTCERT`` (no se copia el SSLContext).
+
+    El servidor falso habla el SSLRequest de Postgres (8 bytes + ``S``) y
+    después envuelve TLS. No se tragan errores: la CA buena exige que el
+    handshake complete; la ajena propaga ``SSLCertVerificationError``.
+    """
 
     import ssl as ssl_mod
 
@@ -2481,6 +2488,8 @@ def _asyncpg_connect_with_pgsslrootcert(
 
     port_box: list[int] = []
     ready = threading.Event()
+    handshake_ok = threading.Event()
+    server_errors: list[BaseException] = []
 
     def serve() -> None:
         listener = socket.socket()
@@ -2491,10 +2500,15 @@ def _asyncpg_connect_with_pgsslrootcert(
         ready.set()
         conn, _ = listener.accept()
         try:
+            header = conn.recv(8)
+            if len(header) != 8:
+                raise AssertionError(f"SSLRequest corto: {header!r}")
+            conn.sendall(b"S")
             wrapped = server_ctx.wrap_socket(conn, server_side=True)
+            handshake_ok.set()
             wrapped.close()
-        except OSError:
-            pass
+        except BaseException as exc:
+            server_errors.append(exc)
         finally:
             conn.close()
             listener.close()
@@ -2507,25 +2521,32 @@ def _asyncpg_connect_with_pgsslrootcert(
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
 
     async def _connect() -> None:
-        try:
-            await asyncpg.connect(
-                host="127.0.0.1",
-                port=port_box[0],
-                user="u",
-                password="p",
-                database="db",
-                ssl="verify-full",
-                timeout=3,
-            )
-        except Exception as exc:
-            text = f"{type(exc).__name__}: {exc}".lower()
-            if isinstance(exc, ssl_mod.SSLError) or "certificate verify" in text:
-                raise
+        await asyncpg.connect(
+            host="127.0.0.1",
+            port=port_box[0],
+            user="u",
+            password="p",
+            database="db",
+            ssl="verify-full",
+            timeout=3,
+        )
 
+    client_error: BaseException | None = None
     try:
-        asyncio.run(_connect())
+        try:
+            asyncio.run(_connect())
+        except BaseException as exc:
+            client_error = exc
     finally:
         thread.join(timeout=5)
+    if isinstance(client_error, ssl_mod.SSLCertVerificationError):
+        raise client_error
+    if not handshake_ok.is_set():
+        if client_error is not None:
+            raise client_error
+        if server_errors:
+            raise server_errors[0]
+        raise AssertionError("el handshake TLS no se completó")
 
 
 def _tls_handshake(client_ctx: Any, server_ctx: Any, hostname: str) -> None:
