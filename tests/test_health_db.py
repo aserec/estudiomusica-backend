@@ -781,7 +781,7 @@ def test_health_connect_kwargs_follow_app_dialect(
         )
         password_kwargs = health_service._connect_kwargs()
         assert password_kwargs["password"] == "from-query"
-        assert password_kwargs["ssl"] == "disable"
+        assert password_kwargs["ssl"] is False
         assert password_kwargs["command_timeout"] == get_settings().db_command_timeout
 
         socket_url = "postgresql+asyncpg://probe:secret@/probe_db?host=/tmp/pg.sock"
@@ -923,7 +923,7 @@ async def test_health_probe_passes_ssl_to_asyncpg(
     try:
         result = await health_service.check_database()
         assert result.db == "down"
-        assert captured.get("ssl") == "disable"
+        assert captured.get("ssl") is False
     finally:
         health_service.clear_health_probe()
         get_settings.cache_clear()
