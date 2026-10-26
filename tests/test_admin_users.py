@@ -1935,8 +1935,68 @@ async def test_teacher_merged_search_order(
         name_ids.append(str(row.id))
     found = await session_client.get("/api/v1/users/search", params={"q": query})
     assert found.status_code == 200
-    ids = [item["id"] for item in found.json()["items"]]
+    body = found.json()
+    assert body["total"] == 4
+    ids = [item["id"] for item in body["items"]]
     assert ids == [str(exact.id), *reversed(name_ids)]
+
+
+async def test_teacher_exact_also_matching_name_appears_once(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    marker = uuid.uuid4().hex[:8]
+    query = f"e11both-{marker}@example.com"
+    teacher = await _signup(session_client, email=unique_email("tea-e11"))
+    await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, teacher["id"], _COURSE, CourseRole.TEACHER)
+    exact = User(
+        first_name=query,
+        last_name="Both",
+        email=query,
+        password_hash="x",
+        system_role_id=SystemRole.ALUMNO,
+    )
+    other = User(
+        first_name=query,
+        last_name="NameOnly",
+        email=unique_email("e11-name"),
+        password_hash="x",
+        system_role_id=SystemRole.ALUMNO,
+    )
+    db_session.add_all([exact, other])
+    await db_session.flush()
+    found = await session_client.get("/api/v1/users/search", params={"q": query})
+    assert found.status_code == 200
+    body = found.json()
+    ids = [item["id"] for item in body["items"]]
+    assert ids.count(str(exact.id)) == 1
+    assert ids[0] == str(exact.id)
+    assert str(other.id) in ids
+    assert body["total"] == 2
+    assert len(body["items"]) == 2
+
+
+async def test_search_compatibility_local_part_matches_login(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    marker = uuid.uuid4().hex[:8]
+    typed = f"ﬁle-{marker}@example.com"
+    assert "\ufb01" in typed
+    created = await _signup(session_client, email=typed, name=f"Nfc3 {marker}")
+    stored = created["response"].json()["user"]["email"]
+    assert stored == typed
+    assert stored == _email_term(typed)
+    session_client.cookies.clear()
+
+    teacher = await _signup(session_client, email=unique_email("tea-nfc3"))
+    await _set_role(db_session, teacher["id"], SystemRole.PROFESOR)
+    await _enroll(db_session, teacher["id"], _COURSE, CourseRole.TEACHER)
+    found = await session_client.get("/api/v1/users/search", params={"q": typed})
+    assert found.status_code == 200
+    items = found.json()["items"]
+    assert len(items) == 1
+    assert items[0]["email"] == stored
+    assert items[0]["id"] == str(created["id"])
 
 
 async def test_deactivated_alumno_cannot_demote_admin(
