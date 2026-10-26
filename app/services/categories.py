@@ -367,10 +367,6 @@ async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
                 new_key = fold_of[candidate]
                 clash = taken.get((row.parent_id, new_key))
                 if clash is None or clash.id == row.id:
-                    old_key = row_fold[row.id]
-                    slot = (row.parent_id, old_key)
-                    if taken.get(slot) is row:
-                        del taken[slot]
                     row.name = candidate
                     taken[(row.parent_id, new_key)] = row
                     row_fold[row.id] = new_key

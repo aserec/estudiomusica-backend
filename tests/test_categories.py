@@ -1413,39 +1413,55 @@ async def test_fix_category_name_keys_renames_duplicates(
 
 
 async def test_fix_pop_only_if_taken_is_row(db_session: AsyncSession) -> None:
-    await db_session.execute(
-        text(
-            "INSERT INTO categories (name, name_key, sort_order) VALUES "
-            "('Y (dup 1)', 'y-dup-a', 0), "
-            "('y (DUP 1)', 'y-dup-b', 1), "
-            "('Y', 'y-root-a', 2), "
-            "('y', 'y-root-b', 3)"
-        )
+    """UUIDs fijos: el grupo (dup) primero y el grupo raíz primero."""
+
+    orders = (
+        (
+            ("00000000-0000-4000-8000-000000000001", "Y (dup 1)", "y-dup-a", 0),
+            ("00000000-0000-4000-8000-000000000002", "y (DUP 1)", "y-dup-b", 1),
+            ("00000000-0000-4000-8000-000000000003", "Y", "y-root-a", 2),
+            ("00000000-0000-4000-8000-000000000004", "y", "y-root-b", 3),
+        ),
+        (
+            ("00000000-0000-4000-8000-000000000011", "Y", "y-root-a", 0),
+            ("00000000-0000-4000-8000-000000000012", "y", "y-root-b", 1),
+            ("00000000-0000-4000-8000-000000000013", "Y (dup 1)", "y-dup-a", 2),
+            ("00000000-0000-4000-8000-000000000014", "y (DUP 1)", "y-dup-b", 3),
+        ),
     )
-    report = await fix_category_name_keys(db_session)
-    assert report.ok()
-    names = [
-        row.name
-        for row in (
+    for rows in orders:
+        await db_session.execute(text("DELETE FROM categories"))
+        db_session.expunge_all()
+        for row_id, name, key, sort in rows:
             await db_session.execute(
-                text("SELECT name FROM categories ORDER BY sort_order, id")
+                text(
+                    "INSERT INTO categories (id, name, name_key, sort_order) "
+                    "VALUES (CAST(:id AS uuid), :name, :key, :sort)"
+                ),
+                {"id": row_id, "name": name, "key": key, "sort": sort},
+            )
+        report = await fix_category_name_keys(db_session)
+        assert report.ok()
+        names = {
+            row.name
+            for row in (
+                await db_session.execute(text("SELECT name FROM categories"))
+            ).all()
+        }
+        assert len(names) == 4
+        keys = [
+            row.name_key
+            for row in (
+                await db_session.execute(text("SELECT name_key FROM categories"))
+            ).all()
+        ]
+        folded = (
+            await db_session.execute(
+                text("SELECT lower(u::citext) FROM unnest(CAST(:vals AS text[])) AS u"),
+                {"vals": keys},
             )
         ).all()
-    ]
-    assert len(names) == 4
-    keys = [
-        row.name_key
-        for row in (
-            await db_session.execute(text("SELECT name_key FROM categories"))
-        ).all()
-    ]
-    folded = (
-        await db_session.execute(
-            text("SELECT lower(u::citext) FROM unnest(CAST(:vals AS text[])) AS u"),
-            {"vals": keys},
-        )
-    ).all()
-    assert len({row[0] for row in folded}) == 4
+        assert len({row[0] for row in folded}) == 4
 
 
 async def test_fix_izmir_citext_without_integrity_error(
