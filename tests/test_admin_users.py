@@ -15,6 +15,7 @@ from app.exceptions import AccessDenied, LastAdmin
 from app.models import AuthSession, CourseMembership, SystemRoleRow, User
 from app.models.user import SystemRole
 from app.permissions.types import CourseRole
+from app.services.roles import assign_system_role
 from app.services.users import (
     _active_admin_clause,
     set_user_admin,
@@ -401,8 +402,25 @@ async def test_identity_put_ignores_privilege_escalation_fields(
 
 
 async def test_grant_and_revoke_admin_on_another_user(
-    session_client: Any, db_session: AsyncSession
+    session_client: Any,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    assigned: list[str] = []
+
+    async def _spy(
+        session: AsyncSession,
+        *,
+        actor: User,
+        target: User,
+        role_id: str,
+    ) -> User:
+        assigned.append(role_id)
+        return await assign_system_role(
+            session, actor=actor, target=target, role_id=role_id
+        )
+
+    monkeypatch.setattr("app.services.users.assign_system_role", _spy)
     admin = await _signup_role(
         session_client, db_session, SystemRole.ADMIN, prefix="grant-admin"
     )
@@ -415,7 +433,7 @@ async def test_grant_and_revoke_admin_on_another_user(
         f"/api/v1/admin/users/{target['id']}/admin",
         json={"isAdmin": True},
     )
-    assert granted.status_code == 200
+    assert granted.status_code == 200, granted.text
     assert granted.json()["systemRoleId"] == "admin"
     promoted = await db_session.get(User, target["id"])
     assert promoted is not None
@@ -425,12 +443,14 @@ async def test_grant_and_revoke_admin_on_another_user(
         f"/api/v1/admin/users/{target['id']}/admin",
         json={"isAdmin": False},
     )
-    assert revoked.status_code == 200
+    assert revoked.status_code == 200, revoked.text
     assert revoked.json()["systemRoleId"] == "alumno"
+    assert assigned == [SystemRole.ADMIN, SystemRole.ALUMNO]
     user = await db_session.get(User, target["id"])
     assert user is not None
     assert user.is_admin is False
     assert user.system_role_id == SystemRole.ALUMNO
+    assert user.is_admin == (user.system_role_id == SystemRole.ADMIN)
 
 
 async def test_suspend_existing_session_is_account_suspended(
