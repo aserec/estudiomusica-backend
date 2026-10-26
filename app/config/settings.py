@@ -363,9 +363,7 @@ def _validation_error_without_secrets(exc: ValidationError) -> ValidationError:
         loc = error.get("loc")
         dsn_field = _loc_is_dsn(loc)
         raw_input = error.get("input")
-        if _loc_has_field(loc, _AUTH_SECRET_FIELD_NAMES) and not isinstance(
-            raw_input, dict
-        ):
+        if _loc_has_field(loc, _AUTH_SECRET_FIELD_NAMES):
             redacted_input: object = "**********"
         else:
             redacted_input = _redact_error_input(raw_input, dsn_field=dsn_field)

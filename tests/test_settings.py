@@ -735,6 +735,39 @@ def test_validation_error_does_not_keep_secret_in_exception_context() -> None:
     assert leaked not in repr(exc)
 
 
+def test_validation_error_errors_and_json_redact_auth_secret_dict() -> None:
+    """Un dict en auth_secret no debe filtrar el secreto en json()/errors()."""
+
+    leaked = "S3CR3T-dict-must-never-appear-32ch"
+    cases: list[ValidationError] = []
+    with pytest.raises(ValidationError) as caught:
+        Settings(
+            app_env="development",
+            database_url=_DEFAULT_DEV_DSN,
+            auth_secret={"k": leaked},
+            _env_file=None,
+        )
+    cases.append(caught.value)
+    with pytest.raises(ValidationError) as caught:
+        Settings.model_validate(
+            {
+                "app_env": "production",
+                "database_url": "postgresql+asyncpg://app:s3cret@db.example:5432/app",
+                "auth_secret": {"k": leaked},
+            }
+        )
+    cases.append(caught.value)
+    for exc in cases:
+        dumped = exc.json()
+        assert leaked not in dumped
+        assert leaked not in str(exc)
+        assert leaked not in repr(exc)
+        for error in exc.errors():
+            assert error.get("input") == "**********"
+            assert leaked not in str(error.get("input"))
+            assert leaked not in repr(error.get("ctx"))
+
+
 def test_validation_error_errors_and_json_redact_auth_secret_type_error() -> None:
     """K2: un error de tipo no debe filtrar auth_secret en json()/errors()."""
 
