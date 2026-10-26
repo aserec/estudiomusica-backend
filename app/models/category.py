@@ -55,7 +55,7 @@ class Category(PersistentModel):
     name: Mapped[str] = mapped_column(CITEXT(), nullable=False)
     name_key: Mapped[str] = mapped_column(
         CITEXT(),
-        Computed("public.category_name_key(name)", persisted=True),
+        Computed("category_name_key(name)", persisted=True),
         nullable=False,
     )
     parent_id: Mapped[uuid.UUID | None] = mapped_column(

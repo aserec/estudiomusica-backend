@@ -85,7 +85,7 @@ def upgrade() -> None:
         sa.Column(
             "name_key",
             CITEXT(),
-            sa.Computed("public.category_name_key(name)", persisted=True),
+            sa.Computed("category_name_key(name)", persisted=True),
             nullable=False,
         ),
         sa.Column("parent_id", sa.Uuid(), nullable=True),
