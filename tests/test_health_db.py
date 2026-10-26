@@ -1450,6 +1450,8 @@ async def test_clear_health_probe_maps_external_cancel_to_down(
 
 @pytest.mark.db
 @pytest.mark.asyncio
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 async def test_frozen_close_returns_down_under_one_second(
     monkeypatch: pytest.MonkeyPatch,
     require_postgres: RedactedDsn,
@@ -1463,9 +1465,11 @@ async def test_frozen_close_returns_down_under_one_second(
     from app.db import clear_engine
 
     original = asyncpg.connect
+    held: dict[str, Any] = {}
 
     async def _connect_and_freeze_close(*args: object, **kwargs: object) -> object:
         connection = await original(*args, **kwargs)
+        held["c"] = connection
 
         async def _hung_close(*_a: object, **_k: object) -> None:
             await asyncio.Event().wait()
@@ -1488,7 +1492,13 @@ async def test_frozen_close_returns_down_under_one_second(
         assert result.db == "down"
         assert elapsed < 1.0
     finally:
+        connection = held.get("c")
+        if connection is not None:
+            terminate = getattr(connection, "terminate", None)
+            if callable(terminate):
+                terminate()
         health_service.clear_health_probe()
+        await asyncio.sleep(0)
         get_settings.cache_clear()
 
 
@@ -1509,10 +1519,23 @@ def test_frozen_connect_skip_helper_does_not_skip_connect_mode(
     import asyncpg
 
     monkeypatch.setattr(asyncpg, "connect", _boom)
-    _skip_if_hostssl_rejects_plain(
-        RedactedDsn("postgresql+asyncpg://u:p@127.0.0.1:1/db_test"),
-        freeze_on="connect",
-    )
+    try:
+        _skip_if_hostssl_rejects_plain(
+            RedactedDsn("postgresql+asyncpg://u:p@127.0.0.1:1/db_test"),
+            freeze_on="connect",
+        )
+    except pytest.skip.Exception as skipped:
+        raise AssertionError("freeze_on=connect no debe saltar") from skipped
+
+
+def test_require_freeze_tests_converts_skip_to_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K1: ``REQUIRE_FREEZE_TESTS=1`` convierte el skip de hostssl en fallo."""
+
+    monkeypatch.setenv("REQUIRE_FREEZE_TESTS", "1")
+    with pytest.raises(AssertionError, match="REQUIRE_FREEZE_TESTS"):
+        _maybe_skip_hostssl("el servidor rechaza ssl=disable (hostssl)")
 
 
 @pytest.fixture(scope="session")

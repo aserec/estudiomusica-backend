@@ -281,6 +281,14 @@ def _mount_probes(application: FastAPI) -> None:
         )
         return {"label": label}
 
+    @application.get("/api/v1/_test/session/{label}")
+    async def session_get(label: str, session: SessionDep) -> dict[str, str | None]:
+        found = await session.scalar(
+            text("SELECT label FROM session_probes WHERE label = :label"),
+            {"label": label},
+        )
+        return {"label": found}
+
 
 def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> Iterator[TestClient]:
     from app.config import get_settings
