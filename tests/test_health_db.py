@@ -1650,6 +1650,33 @@ def _reuse_tls_test_env() -> tuple[str, str] | None:
     raise AssertionError("unreachable")
 
 
+def _fail_or_skip_tls_docker_missing() -> None:
+    """T5: sin docker en PATH se salta, o falla si REQUIRE_TLS_TESTS."""
+
+    from tests.conftest import _skip_or_fail_tls
+
+    _skip_or_fail_tls(
+        "tests TLS: docker no está en PATH (o define TLS_TEST_DATABASE_URL "
+        "y TLS_TEST_CAFILE)"
+    )
+
+
+def _fail_or_skip_tls_docker_run(stderr: str) -> None:
+    """T6: ``docker run`` fallido se salta, o falla si REQUIRE_TLS_TESTS."""
+
+    from tests.conftest import _skip_or_fail_tls
+
+    _skip_or_fail_tls(f"no se pudo arrancar Postgres TLS: {stderr}")
+
+
+def _fail_or_skip_tls_docker_ping(last_error: str) -> None:
+    """T7: el contenedor no acepta conexiones; skip o fail según REQUIRE."""
+
+    from tests.conftest import _skip_or_fail_tls
+
+    _skip_or_fail_tls(f"Postgres TLS no aceptó conexiones: {last_error}")
+
+
 @pytest.fixture(scope="session")
 def tls_postgres(
     tmp_path_factory: pytest.TempPathFactory,
@@ -1673,12 +1700,7 @@ def tls_postgres(
         yield Path(env_ca), _write_unrelated_ca(tmp / "bad-ca.pem"), env_url
         return
     if shutil.which("docker") is None:
-        from tests.conftest import _skip_or_fail_tls
-
-        _skip_or_fail_tls(
-            "tests TLS: docker no está en PATH (o define TLS_TEST_DATABASE_URL "
-            "y TLS_TEST_CAFILE)"
-        )
+        _fail_or_skip_tls_docker_missing()
     cafile, bad_ca, dsn, cleanup = _start_ephemeral_tls_postgres(tmp)
     try:
         yield cafile, bad_ca, dsn
@@ -2541,9 +2563,7 @@ def _start_ephemeral_tls_postgres(
         check=False,
     )
     if started.returncode != 0:
-        from tests.conftest import _skip_or_fail_tls
-
-        _skip_or_fail_tls(f"no se pudo arrancar Postgres TLS: {started.stderr}")
+        _fail_or_skip_tls_docker_run(started.stderr)
     dsn = (
         f"postgresql+asyncpg://tlsprobe:tlsprobe-secret@127.0.0.1:{port}/tlsprobe_test"
     )
@@ -2575,7 +2595,5 @@ def _start_ephemeral_tls_postgres(
             time_mod.sleep(0.4)
     else:
         _cleanup()
-        from tests.conftest import _skip_or_fail_tls
-
-        _skip_or_fail_tls(f"Postgres TLS no aceptó conexiones: {last_error}")
+        _fail_or_skip_tls_docker_ping(last_error)
     return server_crt, bad_ca, dsn, _cleanup

@@ -197,8 +197,9 @@ def test_skip_or_fail_tls_fails_when_required(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
-    with pytest.raises(pytest.fail.Exception, match="no se pudo arrancar"):
+    with pytest.raises(BaseException, match="no se pudo arrancar") as caught:
         _skip_or_fail_tls("no se pudo arrancar Postgres TLS")
+    assert type(caught.value) is pytest.fail.Exception
 
 
 def test_skip_or_fail_tls_skips_when_optional(
@@ -217,8 +218,9 @@ def test_tls_cafile_missing_fails_when_required(
     monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
     monkeypatch.setenv("TLS_TEST_DATABASE_URL", "postgresql+asyncpg://u:p@h/db_test")
     monkeypatch.setenv("TLS_TEST_CAFILE", str(tmp_path / "missing-ca.pem"))
-    with pytest.raises(pytest.fail.Exception, match="TLS_TEST_CAFILE no existe"):
+    with pytest.raises(BaseException, match="TLS_TEST_CAFILE no existe") as caught:
         _reuse_tls_test_env()
+    assert type(caught.value) is pytest.fail.Exception
 
 
 def test_tls_cafile_missing_skips_when_optional(
@@ -244,6 +246,71 @@ def test_tls_cafile_reuses_existing_file(
     monkeypatch.setenv("TLS_TEST_DATABASE_URL", url)
     monkeypatch.setenv("TLS_TEST_CAFILE", str(cafile))
     assert _reuse_tls_test_env() == (url, str(cafile))
+
+
+def test_tls_docker_missing_fails_when_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_health_db import _fail_or_skip_tls_docker_missing
+
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
+    with pytest.raises(BaseException, match="docker no está en PATH") as caught:
+        _fail_or_skip_tls_docker_missing()
+    assert type(caught.value) is pytest.fail.Exception
+
+
+def test_tls_docker_missing_skips_when_optional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_health_db import _fail_or_skip_tls_docker_missing
+
+    monkeypatch.delenv("REQUIRE_TLS_TESTS", raising=False)
+    with pytest.raises(pytest.skip.Exception, match="docker no está en PATH"):
+        _fail_or_skip_tls_docker_missing()
+
+
+def test_tls_docker_run_fails_when_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_health_db import _fail_or_skip_tls_docker_run
+
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
+    with pytest.raises(BaseException, match="no se pudo arrancar") as caught:
+        _fail_or_skip_tls_docker_run("daemon not running")
+    assert type(caught.value) is pytest.fail.Exception
+    assert "daemon not running" in str(caught.value)
+
+
+def test_tls_docker_run_skips_when_optional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_health_db import _fail_or_skip_tls_docker_run
+
+    monkeypatch.delenv("REQUIRE_TLS_TESTS", raising=False)
+    with pytest.raises(pytest.skip.Exception, match="no se pudo arrancar"):
+        _fail_or_skip_tls_docker_run("daemon not running")
+
+
+def test_tls_docker_ping_fails_when_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_health_db import _fail_or_skip_tls_docker_ping
+
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
+    with pytest.raises(BaseException, match="no aceptó conexiones") as caught:
+        _fail_or_skip_tls_docker_ping("timeout")
+    assert type(caught.value) is pytest.fail.Exception
+    assert "timeout" in str(caught.value)
+
+
+def test_tls_docker_ping_skips_when_optional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_health_db import _fail_or_skip_tls_docker_ping
+
+    monkeypatch.delenv("REQUIRE_TLS_TESTS", raising=False)
+    with pytest.raises(pytest.skip.Exception, match="no aceptó conexiones"):
+        _fail_or_skip_tls_docker_ping("timeout")
 
 
 def test_tls_required_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
