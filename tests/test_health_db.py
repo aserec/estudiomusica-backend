@@ -556,19 +556,106 @@ async def test_health_db_alternating_freeze_does_not_accumulate_backends(
 async def test_abandon_probe_cancels_pending_task() -> None:
     """T7: sin ``task.cancel()`` la sonda pendiente sigue viva."""
 
-    async def hang() -> None:
+    async def hang() -> DatabaseHealthResponse:
         await asyncio.Event().wait()
+        return DatabaseHealthResponse(db="down")
 
     task = asyncio.create_task(hang())
+    health_service._probe_task = task
     try:
         health_service._abandon_probe(None, task)
         await asyncio.sleep(0)
         assert task.cancelled()
+        assert health_service._probe_task is None
     finally:
+        health_service._probe_task = None
         if not task.done():
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+
+
+@pytest.mark.asyncio
+async def test_request_after_timeout_does_not_join_cancelled_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tras un timeout, la siguiente petición no se une a la tarea cancelada."""
+
+    import asyncpg
+
+    async def _hang(*_args: object, **_kwargs: object) -> object:
+        await asyncio.Event().wait()
+        raise RuntimeError("unreachable")
+
+    _probe_settings(
+        monkeypatch, "postgresql+asyncpg://probe:secret@127.0.0.1:1/probe_db"
+    )
+    monkeypatch.setenv("DB_HEALTH_TIMEOUT", "0.15")
+    monkeypatch.setattr(asyncpg, "connect", _hang)
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    health_service.clear_health_probe()
+    try:
+        first = await health_service.check_database()
+        assert first.db == "down"
+        second = await health_service.check_database()
+        assert second.db == "down"
+        assert health_service._probe_task is None or health_service._probe_task.done()
+    finally:
+        health_service.clear_health_probe()
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_run_probe_dies_under_continuous_waiters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La sonda no vive más que ``DB_HEALTH_TIMEOUT`` si hay waiters."""
+
+    import asyncpg
+
+    from app.config import get_settings
+
+    async def _hang(*_args: object, **_kwargs: object) -> object:
+        await asyncio.Event().wait()
+        raise RuntimeError("unreachable")
+
+    finished: list[float] = []
+    original = health_service._run_probe
+
+    async def _tracked() -> DatabaseHealthResponse:
+        started = time.monotonic()
+        try:
+            return await original()
+        finally:
+            finished.append(time.monotonic() - started)
+
+    _probe_settings(
+        monkeypatch, "postgresql+asyncpg://probe:secret@127.0.0.1:1/probe_db"
+    )
+    monkeypatch.setenv("DB_HEALTH_TIMEOUT", "0.2")
+    monkeypatch.setenv("DB_COMMAND_TIMEOUT", "30")
+    monkeypatch.setattr(asyncpg, "connect", _hang)
+    monkeypatch.setattr(health_service, "_run_probe", _tracked)
+    get_settings.cache_clear()
+    health_service.clear_health_probe()
+    started = time.monotonic()
+
+    async def flood() -> None:
+        while time.monotonic() - started < 0.7:
+            await health_service.check_database()
+
+    try:
+        with suppress(TimeoutError):
+            await asyncio.wait_for(
+                asyncio.gather(flood(), flood(), flood()), timeout=0.85
+            )
+        assert finished
+        assert all(elapsed < 0.5 for elapsed in finished)
+    finally:
+        health_service.clear_health_probe()
+        get_settings.cache_clear()
 
 
 def _probe_settings(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
@@ -618,11 +705,54 @@ def test_health_connect_kwargs_follow_app_dialect(
         _args, app_opts = engine.sync_engine.dialect.create_connect_args(engine.url)
         health_service.set_health_database_url(None)
         probe_opts = health_service._connect_kwargs()
-        skip = {"timeout", "command_timeout", "server_settings", "sslmode"}
+        skip = {
+            "timeout",
+            "command_timeout",
+            "server_settings",
+            "sslmode",
+            "prepared_statement_cache_size",
+        }
         for key, value in app_opts.items():
             if key in skip:
                 continue
             assert probe_opts[key] == value
+
+        cache_url = _dsn_with_query(
+            base, password="x", prepared_statement_cache_size="0"
+        )
+        health_service.set_health_database_url(cache_url)
+        cache_kwargs = health_service._connect_kwargs()
+        assert "prepared_statement_cache_size" not in cache_kwargs
+        allowed = set(health_service._asyncpg_connect_params())
+        assert set(cache_kwargs) <= allowed
+    finally:
+        health_service.clear_health_probe()
+        get_settings.cache_clear()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_health_pgbouncer_cache_size_query_is_up(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """``?prepared_statement_cache_size=0`` no tumba la sonda (pgbouncer)."""
+
+    from app.config import get_settings
+    from app.db import clear_engine
+
+    url = _dsn_with_query(require_postgres.secret(), prepared_statement_cache_size="0")
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("DB_HEALTH_CACHE_TTL", "0")
+    get_settings.cache_clear()
+    clear_engine()
+    health_service.clear_health_probe()
+    health_service.set_health_database_url(url)
+    try:
+        result = await health_service.check_database()
+        assert result.db == "ok"
+        assert "prepared_statement_cache_size" not in health_service._connect_kwargs()
     finally:
         health_service.clear_health_probe()
         get_settings.cache_clear()
@@ -899,6 +1029,105 @@ async def test_health_cache_ttl_reuses_result(
         second = await health_service.check_database()
         assert first.db == second.db == "ok"
         assert connects["n"] == 1
+        cached = health_service._cached(
+            asyncio.get_running_loop().time(), get_settings().db_health_cache_ttl
+        )
+        assert cached is not None
+        assert cached.db == "ok"
+    finally:
+        health_service.clear_health_probe()
+        get_settings.cache_clear()
+
+
+def test_health_cache_ttl_helpers() -> None:
+    """P11/P12/SF2/SF14/SF15/SF16: caduca en el TTL, 0 no cachea."""
+
+    ok = DatabaseHealthResponse(db="ok")
+    down = DatabaseHealthResponse(db="down")
+    health_service._cache = (100.0, ok)
+    try:
+        assert health_service._cached(100.4, 1.0) is ok
+        assert health_service._cached(101.0, 1.0) is None
+        assert health_service._cached(101.5, 1.0) is None
+        assert health_service._cached(100.4, 0.0) is None
+        health_service._cache = (100.0, down)
+        cached_down = health_service._cached(100.4, 1.0)
+        assert cached_down is down
+        assert cached_down.db == "down"
+    finally:
+        health_service._cache = None
+
+
+@pytest.mark.asyncio
+async def test_health_cache_expires_and_failure_stays_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SF2/SF3: tras el TTL se vuelve a abrir; un fallo no se cachea como ok."""
+
+    import asyncpg
+
+    from app.config import get_settings
+    from app.db import clear_engine
+
+    connects = {"n": 0}
+
+    async def _fail(*_args: object, **_kwargs: object) -> object:
+        connects["n"] += 1
+        raise OSError("probe-down")
+
+    _probe_settings(
+        monkeypatch, "postgresql+asyncpg://probe:secret@127.0.0.1:1/probe_db"
+    )
+    monkeypatch.setenv("DB_HEALTH_CACHE_TTL", "30")
+    monkeypatch.setattr(asyncpg, "connect", _fail)
+    get_settings.cache_clear()
+    clear_engine()
+    health_service.clear_health_probe()
+    try:
+        first = await health_service.check_database()
+        second = await health_service.check_database()
+        assert first.db == second.db == "down"
+        assert connects["n"] == 1
+        loop = asyncio.get_running_loop()
+        stamped, cached = health_service._cache or (0.0, first)
+        assert cached.db == "down"
+        assert health_service._cached(stamped + 30.0, 30.0) is None
+        assert health_service._cached(loop.time() + 31.0, 30.0) is None
+    finally:
+        health_service.clear_health_probe()
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_health_cache_ttl_zero_does_not_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P11: TTL 0 abre una conexión por petición."""
+
+    import asyncpg
+
+    from app.config import get_settings
+    from app.db import clear_engine
+
+    connects = {"n": 0}
+
+    async def _fail(*_args: object, **_kwargs: object) -> object:
+        connects["n"] += 1
+        raise OSError("probe-down")
+
+    _probe_settings(
+        monkeypatch, "postgresql+asyncpg://probe:secret@127.0.0.1:1/probe_db"
+    )
+    monkeypatch.setenv("DB_HEALTH_CACHE_TTL", "0")
+    monkeypatch.setattr(asyncpg, "connect", _fail)
+    get_settings.cache_clear()
+    clear_engine()
+    health_service.clear_health_probe()
+    try:
+        first = await health_service.check_database()
+        second = await health_service.check_database()
+        assert first.db == second.db == "down"
+        assert connects["n"] == 2
     finally:
         health_service.clear_health_probe()
         get_settings.cache_clear()
