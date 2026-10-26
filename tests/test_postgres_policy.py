@@ -105,6 +105,21 @@ def test_postgres_required_unknown_value_aborts(
         _postgres_required()
 
 
+def test_skip_or_fail_suppresses_cause_from_require_postgres(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U3: ``from None`` en el skip/fail de require_postgres."""
+
+    monkeypatch.setenv("REQUIRE_POSTGRES", "1")
+    try:
+        raise ConnectionError("refused")
+    except ConnectionError:
+        with pytest.raises(pytest.fail.Exception) as caught:
+            _skip_or_fail_postgres("Postgres de test no está disponible")
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+
+
 def test_skip_or_fail_fails_when_required_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
