@@ -1263,6 +1263,84 @@ async def test_audit_does_not_collide_strasse_and_strasse_upper(
     assert category_name_key("Straße").lower() != category_name_key("STRASSE").lower()
 
 
+async def _citext_equal(session: AsyncSession, left: str, right: str) -> bool:
+    value = await session.scalar(
+        text("SELECT lower(CAST(:a AS citext)) = lower(CAST(:b AS citext))"),
+        {"a": left, "b": right},
+    )
+    return bool(value)
+
+
+async def test_audit_groups_with_citext_not_python_lower(
+    db_session: AsyncSession,
+) -> None:
+    pairs = (("ΟΔΟΣ", "Οδος"), ("Ñandú", "ñandú"), ("İzmir", "izmir"))
+    for index, (left, right) in enumerate(pairs):
+        await db_session.execute(
+            text(
+                "INSERT INTO categories (name, name_key, sort_order) VALUES "
+                "(:left, :k1, :o1), (:right, :k2, :o2)"
+            ),
+            {
+                "left": left,
+                "right": right,
+                "k1": f"{index}-a",
+                "k2": f"{index}-b",
+                "o1": index * 2,
+                "o2": index * 2 + 1,
+            },
+        )
+    report = await audit_category_name_keys(db_session)
+    collided = {item.key for item in report.collisions}
+    for left, right in pairs:
+        pg_same = await _citext_equal(
+            db_session, category_name_key(left), category_name_key(right)
+        )
+        python_same = (
+            category_name_key(left).lower() == category_name_key(right).lower()
+        )
+        fold_left = await db_session.scalar(
+            text("SELECT lower(CAST(:v AS citext))"), {"v": category_name_key(left)}
+        )
+        fold_right = await db_session.scalar(
+            text("SELECT lower(CAST(:v AS citext))"), {"v": category_name_key(right)}
+        )
+        if pg_same:
+            assert fold_left in collided
+            assert fold_right in collided
+        else:
+            assert fold_left not in collided
+            assert fold_right not in collided
+        if python_same != pg_same:
+            assert (fold_left in collided) == pg_same
+
+
+async def test_fix_odos_nandu_follow_citext_not_python(
+    db_session: AsyncSession,
+) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('ΟΔΟΣ', 'odos-a', 0), "
+            "('Οδος', 'odos-b', 1), "
+            "('Ñandú', 'nandu-a', 2), "
+            "('ñandú', 'nandu-b', 3)"
+        )
+    )
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    names = {
+        row.name
+        for row in (await db_session.execute(text("SELECT name FROM categories"))).all()
+    }
+    if not await _citext_equal(db_session, "ΟΔΟΣ", "Οδος"):
+        assert "ΟΔΟΣ" in names
+        assert "Οδος" in names
+    if not await _citext_equal(db_session, "Ñandú", "ñandú"):
+        assert "Ñandú" in names
+        assert "ñandú" in names
+
+
 async def test_fix_category_name_keys_renames_duplicates(
     db_session: AsyncSession,
 ) -> None:

@@ -275,7 +275,7 @@ async def audit_category_name_keys(session: AsyncSession) -> NameKeyAudit:
 
     rows = list(await session.scalars(select(Category)))
     mismatches: list[NameKeyMismatch] = []
-    groups: dict[tuple[UUID | None, str], list[UUID]] = {}
+    live: list[Category] = []
     for row in rows:
         expected = category_name_key(row.name)
         if row.name_key != expected:
@@ -288,7 +288,11 @@ async def audit_category_name_keys(session: AsyncSession) -> NameKeyAudit:
                 )
             )
         if row.deleted_at is None:
-            groups.setdefault((row.parent_id, expected.lower()), []).append(row.id)
+            live.append(row)
+    folded = await _citext_fold(session, [category_name_key(row.name) for row in live])
+    groups: dict[tuple[UUID | None, str], list[UUID]] = {}
+    for row, key in zip(live, folded, strict=True):
+        groups.setdefault((row.parent_id, key), []).append(row.id)
     collisions = tuple(
         NameKeyCollision(key=key, parent_id=parent_id, ids=tuple(ids))
         for (parent_id, key), ids in groups.items()
