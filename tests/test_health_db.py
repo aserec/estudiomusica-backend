@@ -1900,6 +1900,8 @@ def test_ssl_disable_with_sslrootcert_skips_context(tmp_path: Any) -> None:
 
     cafile = _write_unrelated_ca(Path(str(tmp_path)) / "unit-ca.pem")
     assert asyncpg_ssl_connect_arg("disable", str(cafile)) is False
+    assert asyncpg_ssl_connect_arg("DISABLE", str(cafile)) is False
+    assert asyncpg_ssl_connect_arg("Disable", str(cafile)) is False
     assert asyncpg_ssl_connect_arg("false", str(cafile)) is False
     assert asyncpg_ssl_connect_arg(False, str(cafile)) is False
     probe = prepare_asyncpg_connect_kwargs(
@@ -1913,6 +1915,18 @@ def test_ssl_disable_with_sslrootcert_skips_context(tmp_path: Any) -> None:
     assert engine_args.get("ssl") is False
     assert not isinstance(probe.get("ssl"), ssl_mod.SSLContext)
     assert not isinstance(engine_args.get("ssl"), ssl_mod.SSLContext)
+    for mixed in ("DISABLE", "Disable"):
+        upper_probe = prepare_asyncpg_connect_kwargs(
+            {"host": "127.0.0.1", "ssl": mixed, "sslrootcert": str(cafile)}
+        )
+        _upper_url, upper_args = asyncpg_url_and_connect_args(
+            "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test"
+            f"?ssl={mixed}&sslrootcert={cafile}"
+        )
+        assert upper_probe.get("ssl") is False
+        assert upper_args.get("ssl") is False
+        assert not isinstance(upper_probe.get("ssl"), ssl_mod.SSLContext)
+        assert not isinstance(upper_args.get("ssl"), ssl_mod.SSLContext)
 
 
 def test_asyncpg_url_translates_sslmode(tmp_path: Any) -> None:
