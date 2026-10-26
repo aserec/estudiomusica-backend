@@ -1685,34 +1685,66 @@ def test_health_sslrootcert_good_ca_up_bad_ca_down(
 ) -> None:
     """B-2: ``?sslrootcert=`` con CA buena da 200 y con CA mala 503."""
 
-    from alembic import command
-    from sqlalchemy import text
+    from sqlalchemy import Table, text
 
-    from app.db import clear_engine
-    from tests.conftest import _build_client, _create_async_engine, alembic_config
+    from tests.conftest import _create_async_engine
+    from tests.test_db import SessionProbe
 
     cafile, bad_ca, dsn = tls_postgres
     good = _dsn_with_query(dsn, ssl="verify-full", sslrootcert=str(cafile))
     bad = _dsn_with_query(dsn, ssl="verify-full", sslrootcert=str(bad_ca))
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
 
-    async def _ensure_session_probes() -> None:
+    async def _session_probes(*, create: bool) -> None:
         engine = _create_async_engine(good, pool_pre_ping=True)
         try:
             async with engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        "CREATE TABLE IF NOT EXISTS session_probes ("
-                        "id uuid PRIMARY KEY,"
-                        "label varchar(64) NOT NULL,"
-                        "created_at timestamptz NOT NULL,"
-                        "updated_at timestamptz NOT NULL,"
-                        "deleted_at timestamptz)"
+                if create:
+                    await connection.execute(
+                        text(
+                            "CREATE OR REPLACE FUNCTION set_updated_at() "
+                            "RETURNS trigger LANGUAGE plpgsql AS $$ "
+                            "BEGIN NEW.updated_at = clock_timestamp(); "
+                            "RETURN NEW; END; $$;"
+                        )
                     )
-                )
+                    await connection.run_sync(
+                        lambda sync_conn: probe_table.drop(
+                            sync_conn, checkfirst=True
+                        )
+                    )
+                    await connection.run_sync(
+                        lambda sync_conn: probe_table.create(
+                            sync_conn, checkfirst=True
+                        )
+                    )
+                else:
+                    await connection.run_sync(
+                        lambda sync_conn: probe_table.drop(
+                            sync_conn, checkfirst=True
+                        )
+                    )
         finally:
             await engine.dispose()
 
-    asyncio.run(_ensure_session_probes())
+    asyncio.run(_session_probes(create=True))
+    try:
+        _run_sslrootcert_clients(monkeypatch, good, bad)
+    finally:
+        asyncio.run(_session_probes(create=False))
+
+
+def _run_sslrootcert_clients(
+    monkeypatch: pytest.MonkeyPatch,
+    good: str,
+    bad: str,
+) -> None:
+    from alembic import command
+
+    from app.db import clear_engine
+    from tests.conftest import _build_client, alembic_config
+
     good_iter = _build_client(
         monkeypatch,
         APP_ENV="development",
@@ -1769,8 +1801,7 @@ def test_health_verify_ca_rejects_unrelated_ca(
 
     from tests.conftest import _build_client
 
-    _ = require_postgres
-    _ = migrated_test_database
+    del require_postgres, migrated_test_database
     cafile, bad_ca, dsn = tls_postgres
     good = _dsn_with_query(dsn, ssl="verify-ca", sslrootcert=str(cafile))
     bad = _dsn_with_query(dsn, ssl="verify-ca", sslrootcert=str(bad_ca))
