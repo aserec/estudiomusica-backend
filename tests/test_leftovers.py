@@ -529,6 +529,191 @@ def test_orphan_objects_in_other_test_db_do_not_fail_production(
         drop_database_if_exists(other)
 
 
+_NON_TEST_PROBE_DATABASES = frozenset(
+    {"orphan_owner_probe", "orphan_nontest_objects_probe"}
+)
+
+
+def _maintenance_engine(admin: RedactedDsn):
+    parsed = make_url(admin.secret())
+    return _create_async_engine(
+        parsed.set(database="postgres").render_as_string(hide_password=False),
+        isolation_level="AUTOCOMMIT",
+    )
+
+
+def _create_probe_database(
+    admin: RedactedDsn, name: str, *, owner: str | None = None
+) -> None:
+    if name not in _NON_TEST_PROBE_DATABASES:
+        raise RuntimeError(f"base sonda no permitida: {name}")
+
+    async def create() -> None:
+        engine = _maintenance_engine(admin)
+        try:
+            async with engine.connect() as connection:
+                exists = await connection.scalar(
+                    text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                    {"name": name},
+                )
+                if exists is not None:
+                    return
+                owner_sql = f" OWNER {_pg_ident(owner)}" if owner else ""
+                await connection.execute(
+                    text(f"CREATE DATABASE {_pg_ident(name)}{owner_sql}")
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(create())
+
+
+def _drop_probe_database(admin: RedactedDsn, name: str) -> None:
+    if name not in _NON_TEST_PROBE_DATABASES:
+        raise RuntimeError(f"base sonda no permitida: {name}")
+
+    async def drop() -> None:
+        engine = _maintenance_engine(admin)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = :name AND pid <> pg_backend_pid()"
+                    ),
+                    {"name": name},
+                )
+                await connection.execute(
+                    text(f"DROP DATABASE IF EXISTS {_pg_ident(name)}")
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(drop())
+
+
+@pytest.mark.db
+def test_orphan_owning_database_does_not_abort_sweep(
+    require_postgres: RedactedDsn,
+    tmp_path: Path,
+) -> None:
+    """L8: un huérfano dueño de una base no aborta la transacción del barrido."""
+
+    orphan = _orphan_role_name()
+    dbname = "orphan_owner_probe"
+    role = _pg_ident(orphan)
+    try:
+
+        async def plant_role() -> None:
+            engine = _admin_engine(require_postgres)
+            try:
+                async with engine.connect() as connection:
+                    await connection.execute(
+                        text(
+                            f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                            f"PASSWORD {_pg_literal('orphan-owner-secret')}"
+                        )
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(plant_role())
+        _create_probe_database(require_postgres, dbname, owner=orphan)
+        result = _run_leftover_probe(tmp_path, require_postgres, _CHILD_ORPHAN_SETUP)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert asyncio.run(_database_exists(require_postgres, dbname)) == 1
+    finally:
+        _drop_probe_database(require_postgres, dbname)
+        _cleanup_named_roles(require_postgres, [orphan])
+
+
+@pytest.mark.db
+def test_orphan_objects_in_non_test_db_are_not_dropped(
+    require_postgres: RedactedDsn,
+    tmp_path: Path,
+) -> None:
+    """L11: DROP OWNED no corre en bases que no terminan en _test."""
+
+    orphan = _orphan_role_name()
+    dbname = "orphan_nontest_objects_probe"
+    parsed = make_url(require_postgres.secret())
+    other = RedactedDsn(
+        parsed.set(database=dbname).render_as_string(hide_password=False)
+    )
+    role = _pg_ident(orphan)
+    try:
+
+        async def plant_role() -> None:
+            engine = _admin_engine(require_postgres)
+            try:
+                async with engine.connect() as connection:
+                    await connection.execute(
+                        text(
+                            f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                            f"PASSWORD {_pg_literal('orphan-nontest-secret')}"
+                        )
+                    )
+            finally:
+                await engine.dispose()
+
+        async def plant_table() -> None:
+            engine = _admin_engine(require_postgres)
+            try:
+                async with engine.connect() as connection:
+                    await connection.execute(
+                        text(f"GRANT CONNECT ON DATABASE {_pg_ident(dbname)} TO {role}")
+                    )
+            finally:
+                await engine.dispose()
+            other_engine = _admin_engine(other)
+            try:
+                async with other_engine.connect() as connection:
+                    await connection.execute(
+                        text("CREATE TABLE orphan_nontest_owned (id int)")
+                    )
+                    await connection.execute(
+                        text(f"ALTER TABLE orphan_nontest_owned OWNER TO {role}")
+                    )
+            finally:
+                await other_engine.dispose()
+
+        asyncio.run(plant_role())
+        _create_probe_database(require_postgres, dbname)
+        asyncio.run(plant_table())
+        result = _run_leftover_probe(tmp_path, require_postgres, _CHILD_ORPHAN_SETUP)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert asyncio.run(_database_exists(require_postgres, dbname)) == 1
+
+        async def table_exists() -> object:
+            engine = _create_async_engine(other.secret())
+            try:
+                async with engine.connect() as connection:
+                    return await connection.scalar(
+                        text("SELECT to_regclass('public.orphan_nontest_owned')")
+                    )
+            finally:
+                await engine.dispose()
+
+        assert asyncio.run(table_exists()) is not None
+    finally:
+
+        if asyncio.run(_database_exists(require_postgres, dbname)) is not None:
+
+            async def cleanup_table() -> None:
+                engine = _admin_engine(other)
+                try:
+                    async with engine.connect() as connection:
+                        await connection.execute(
+                            text("DROP TABLE IF EXISTS orphan_nontest_owned")
+                        )
+                finally:
+                    await engine.dispose()
+
+            asyncio.run(cleanup_table())
+        _drop_probe_database(require_postgres, dbname)
+        _cleanup_named_roles(require_postgres, [orphan])
+
+
 @pytest.mark.db
 def test_orphan_with_held_life_lock_is_not_dropped(
     require_postgres: RedactedDsn,

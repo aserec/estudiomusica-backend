@@ -675,6 +675,24 @@ async def _other_owned_databases(connection: Any, name: str) -> list[str]:
     return seen
 
 
+async def _databases_owned_by_role(connection: Any, name: str) -> list[str]:
+    """Bases cuyo dueño es el rol (pg_shdepend.dbid = 0; DROP OWNED no las toca)."""
+
+    rows = (
+        await connection.execute(
+            text(
+                "SELECT d.datname "
+                "FROM pg_catalog.pg_database d "
+                "JOIN pg_catalog.pg_roles r ON r.oid = d.datdba "
+                "WHERE r.rolname = :name "
+                "ORDER BY 1"
+            ),
+            {"name": name},
+        )
+    ).all()
+    return [datname for (datname,) in rows]
+
+
 async def _drop_owned_in_database(admin: RedactedDsn, database: str, name: str) -> None:
     parsed = make_url(admin.secret())
     other = RedactedDsn(
@@ -705,6 +723,14 @@ async def _drop_named_production_test_role(
     )
     if exists is None:
         return
+    for database in await _databases_owned_by_role(connection, name):
+        _log.warning(
+            "el rol huérfano %s es dueño de la base %s "
+            "(dbid=0; DROP OWNED no borra bases; "
+            "no se tocan las que no acaban en _test)",
+            name,
+            database,
+        )
     if admin is not None:
         for database in await _other_owned_databases(connection, name):
             if database.endswith("_test"):
@@ -756,9 +782,10 @@ async def _drop_production_test_role(admin: RedactedDsn) -> None:
                 elif not await _should_drop_orphan(connection, name):
                     continue
                 try:
-                    await _drop_named_production_test_role(
-                        connection, name, admin=admin
-                    )
+                    async with connection.begin_nested():
+                        await _drop_named_production_test_role(
+                            connection, name, admin=admin
+                        )
                 except Exception as exc:
                     if name == PRODUCTION_TEST_USER:
                         raise
