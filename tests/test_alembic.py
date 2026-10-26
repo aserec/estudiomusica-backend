@@ -375,19 +375,10 @@ def test_0002_downgrade_keeps_preinstalled_citext(
 
 
 def test_0004_does_not_import_app_schemas() -> None:
-    from app.schemas.categories import _CF_STRIP_CHARS
-
     path = ROOT / "app/migrations/versions/0004_course_categories.py"
     source = path.read_text(encoding="utf-8")
     assert "app.schemas" not in source
-    tree = ast.parse(source)
-    found: str | None = None
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "_CF_STRIP_CHARS":
-                    found = ast.literal_eval(node.value)
-    assert found == _CF_STRIP_CHARS
+    assert "CREATE FUNCTION" not in source
 
 
 def test_alembic_revision_chain_is_linear() -> None:

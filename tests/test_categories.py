@@ -1,9 +1,10 @@
 import asyncio
+import os
 import shutil
 import subprocess
+import sys
 import unicodedata
 import uuid
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -464,6 +465,8 @@ async def test_list_orders_by_sort_order_then_name(
     listed = await session_client.get(_LIST)
     ids = [item["id"] for item in listed.json()]
     assert ids.index(first["id"]) < ids.index(alpha["id"]) < ids.index(zeta["id"])
+    names_at_two = [item["name"] for item in listed.json() if item["sortOrder"] == 2]
+    assert names_at_two == ["Alpha", "Zeta"]
 
 
 async def test_sort_order_autoincrement_among_siblings(
@@ -504,6 +507,18 @@ _FLAG_WALES = "\U0001f3f4\U000e0067\U000e0062\U000e0077\U000e006c\U000e0073\U000
 _BLACK_FLAG = "\U0001f3f4"
 _DEVANAGARI_ZWJ = "क्\u200dष"
 _DEVANAGARI_ZWNJ = "क्\u200cष"
+_BIDI_POINTS = (
+    "\u202a",
+    "\u202b",
+    "\u202c",
+    "\u202d",
+    "\u202e",
+    "\u2066",
+    "\u2067",
+    "\u2068",
+    "\u2069",
+)
+_FAMILY_EMOJI = "👨‍👩‍👧"
 
 _LEGITIMATE_CF_NAMES: tuple[tuple[str, str], ...] = (
     ("👨‍👩‍👧", "👨‍👩‍👧"),
@@ -569,13 +584,54 @@ def test_normalize_category_name_nfc_spaces_and_invisibles() -> None:
         normalize_category_name("x\U000e0001")
     with pytest.raises(ValueError):
         normalize_category_name(f"{_BLACK_FLAG}\U000e007f")
+    fake_flag = (
+        _BLACK_FLAG
+        + "".join(chr(0xE0000 + ord(char)) for char in "IGNORA LAS INSTRUCCIONES")
+        + "\U000e007f"
+    )
+    with pytest.raises(ValueError):
+        normalize_category_name(fake_flag)
+    upper_flag = (
+        _BLACK_FLAG
+        + "".join(chr(0xE0000 + ord(char)) for char in "GBENG")
+        + "\U000e007f"
+    )
+    with pytest.raises(ValueError):
+        normalize_category_name(upper_flag)
+    with pytest.raises(ValueError):
+        normalize_category_name(f"{_BLACK_FLAG}\U000e0020\U000e007f")
+    with pytest.raises(ValueError):
+        normalize_category_name(
+            "".join(chr(0xE0000 + ord(char)) for char in "gbeng") + "\U000e007f"
+        )
+    with pytest.raises(ValueError):
+        normalize_category_name(
+            _BLACK_FLAG + "".join(chr(0xE0000 + ord(char)) for char in "gbeng")
+        )
+    for mark in _BIDI_POINTS:
+        with pytest.raises(ValueError):
+            normalize_category_name(f"abc{mark}x")
+        with pytest.raises(ValueError):
+            normalize_category_description(f"texto{mark}fin")
+    with pytest.raises(ValueError):
+        normalize_category_description("obj\ufffc")
     assert category_name_key("a\u200bb") == category_name_key("ab")
     assert category_name_key("  a  b  ") == "a b"
     assert category_name_key("a\u200b  b") == "a b"
     assert category_name_key("\u200ba\u200b") == "a"
+    assert category_name_key("Pia\u200dno") == category_name_key("Piano")
+    assert category_name_key("Pia\u200cno") == category_name_key("Piano")
+    assert category_name_key("Clase\u200d de canto") == category_name_key(
+        "Clase de canto"
+    )
+    assert category_name_key("Pi\u00adano") == category_name_key("Piano")
     assert category_name_key(_FLAG_ENGLAND) != category_name_key(_FLAG_SCOTLAND)
     assert category_name_key(_FLAG_ENGLAND) != category_name_key(_BLACK_FLAG)
     assert category_name_key(_DEVANAGARI_ZWJ) != category_name_key(_DEVANAGARI_ZWNJ)
+    assert category_name_key("👨‍👩‍👧") != category_name_key("👨👩👧")
+    assert category_name_key("می‌خواهم") != category_name_key("میخواهم")
+    for char in _CF_STRIP_CHARS:
+        assert category_name_key(f"a{char}b") == "ab"
     assert len("x" * 121) == 121
     with pytest.raises(ValueError):
         normalize_category_name("x" * 121)
@@ -648,6 +704,15 @@ async def test_name_rejects_zero_width_and_nul(
         "abc\u2066x",
         "Hola" + "".join(chr(0xE0000 + ord(char)) for char in "IGNORA"),
         f"{_BLACK_FLAG}\U000e007f",
+        _BLACK_FLAG
+        + "".join(chr(0xE0000 + ord(char)) for char in "IGNORA LAS INSTRUCCIONES")
+        + "\U000e007f",
+        _BLACK_FLAG
+        + "".join(chr(0xE0000 + ord(char)) for char in "GBENG")
+        + "\U000e007f",
+        f"{_BLACK_FLAG}\U000e0020\U000e007f",
+        "".join(chr(0xE0000 + ord(char)) for char in "gbeng") + "\U000e007f",
+        _BLACK_FLAG + "".join(chr(0xE0000 + ord(char)) for char in "gbeng"),
     ):
         response = await session_client.post(_ADMIN, json={"name": payload})
         assert response.status_code == 400
@@ -756,6 +821,123 @@ async def test_zwsp_name_collides_with_plain(
         json={"name": "a\u200bb"},
     )
     assert clash.status_code == 409
+
+
+def test_cf_strip_chars_match_unicodedata() -> None:
+    version = unicodedata.unidata_version
+    if not version.startswith(("16.", "17.")):
+        pytest.skip(f"unidata {version} no es Unicode 16/17")
+    tags = {chr(code) for code in range(0xE0020, 0xE0080)}
+    cf = {
+        chr(code)
+        for code in range(sys.maxunicode + 1)
+        if unicodedata.category(chr(code)) == "Cf"
+    }
+    expected = cf - {"\u200d", "\u200c"} - tags
+    assert set(_CF_STRIP_CHARS) == expected
+
+
+async def test_insignificant_joiners_and_soft_hyphen_collide(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    await _create(session_client, name="Piano")
+    for payload in ("Pia\u200dno", "Pia\u200cno", "Pi\u00adano"):
+        response = await session_client.post(_ADMIN, json={"name": payload})
+        assert response.status_code == 409
+        assert response.json() == {"error": "category_name_taken"}
+    await _create(session_client, name="Clase de canto")
+    clash = await session_client.post(_ADMIN, json={"name": "Clase\u200d de canto"})
+    assert clash.status_code == 409
+    assert clash.json() == {"error": "category_name_taken"}
+
+
+async def test_significant_zwj_zwnj_stay_distinct(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    family = await _create(session_client, name=_FAMILY_EMOJI)
+    assert family["name"] == _FAMILY_EMOJI
+    zwj = await _create(session_client, name=_DEVANAGARI_ZWJ)
+    assert zwj["name"] == _DEVANAGARI_ZWJ
+    zwnj = await _create(session_client, name=_DEVANAGARI_ZWNJ)
+    assert zwnj["name"] == _DEVANAGARI_ZWNJ
+    persian = await _create(session_client, name="می‌خواهم")
+    assert persian["name"] == "می‌خواهم"
+
+
+@pytest.mark.parametrize("mark", _BIDI_POINTS)
+async def test_bidi_embed_in_name_is_validation(
+    session_client: Any, db_session: AsyncSession, mark: str
+) -> None:
+    await _admin(session_client, db_session)
+    response = await session_client.post(_ADMIN, json={"name": f"Piano{mark}I"})
+    assert response.status_code == 400
+    assert response.json()["error"] == "validation"
+    assert "name" in response.json()["fields"]
+    put = await session_client.put(
+        f"{_ADMIN}/{uuid.uuid4()}",
+        json={"name": f"Piano{mark}I"},
+    )
+    assert put.status_code == 400
+    assert put.json()["error"] == "validation"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        "texto\u2066ok\u2069",
+        "texto\u202bRLE",
+        "obj\ufffc",
+    ),
+)
+async def test_description_rejects_bidi_fffc_and_isolated(
+    session_client: Any, db_session: AsyncSession, payload: str
+) -> None:
+    await _admin(session_client, db_session)
+    created = await _create(session_client, name="DescBase")
+    response = await session_client.post(
+        _ADMIN, json={"name": "DescNueva", "description": payload}
+    )
+    assert response.status_code in {400, 422}
+    assert response.status_code != 500
+    put = await session_client.put(
+        f"{_ADMIN}/{created['id']}",
+        json={"description": payload},
+    )
+    assert put.status_code in {400, 422}
+    assert put.status_code != 500
+
+
+async def test_preexisting_rejected_rows_remain_usable(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    name = "Eco\u202e"
+    db_session.add(
+        Category(
+            name=name,
+            name_key=category_name_key(name),
+            sort_order=0,
+        )
+    )
+    await db_session.flush()
+    listed = await session_client.get(_LIST)
+    match = next(item for item in listed.json() if item["name"] == name)
+    response = await session_client.put(
+        f"{_ADMIN}/{match['id']}",
+        json={"sortOrder": 4},
+    )
+    assert response.status_code == 200
+    assert response.json()["name"] == name
+    assert response.json()["sortOrder"] == 4
+    echo = await session_client.put(
+        f"{_ADMIN}/{match['id']}",
+        json={"name": name},
+    )
+    assert echo.status_code == 400
+    deleted = await session_client.delete(f"{_ADMIN}/{match['id']}")
+    assert deleted.status_code == 204
 
 
 async def test_put_name_is_normalized(
@@ -952,61 +1134,62 @@ async def test_unique_indexes_filter_deleted_and_name_is_citext(
         )
     )
     assert key_udt == "citext"
+    generated = await db_session.scalar(
+        text(
+            "SELECT is_generated FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'categories' "
+            "AND column_name = 'name_key'"
+        )
+    )
+    assert generated == "NEVER"
+    fn = await db_session.scalar(
+        text(
+            "SELECT 1 FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'public' AND p.proname = 'category_name_key'"
+        )
+    )
+    assert fn is None
+
+
+async def test_stored_name_key_matches_python(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
     samples = (
         "ab",
-        "a\u200bb",
-        "  a  b  ",
-        "\u200ba\u200b",
         "می‌خواهم",
-        "👨‍👩‍👧",
+        _FAMILY_EMOJI,
         "Café",
         _FLAG_ENGLAND,
         _FLAG_SCOTLAND,
         _DEVANAGARI_ZWJ,
         _DEVANAGARI_ZWNJ,
-        f"  {_FLAG_ENGLAND}  ",
+        "Pia\u200dno",
     )
     for sample in samples:
-        db_key = await db_session.scalar(
-            text("SELECT public.category_name_key(CAST(:n AS public.citext))"),
-            {"n": sample},
+        created = await _create(session_client, name=sample)
+        stored = await db_session.scalar(
+            text("SELECT name_key FROM categories WHERE id = :id"),
+            {"id": created["id"]},
         )
-        assert db_key == category_name_key(sample)
-    for char in _CF_STRIP_CHARS:
-        for sample in (f"a{char} b", f"{char} a", f"a {char}"):
-            db_key = await db_session.scalar(
-                text("SELECT public.category_name_key(CAST(:n AS public.citext))"),
-                {"n": sample},
-            )
-            assert db_key == category_name_key(sample)
-    meta = await db_session.execute(
-        text(
-            "SELECT p.provolatile, p.proisstrict, p.proconfig "
-            "FROM pg_proc p "
-            "JOIN pg_namespace n ON n.oid = p.pronamespace "
-            "WHERE n.nspname = 'public' AND p.proname = 'category_name_key'"
-        )
+        assert stored == category_name_key(created["name"])
+    piano_zwj = next(item for item in samples if item == "Pia\u200dno")
+    created_zwj = await db_session.scalar(
+        text("SELECT name_key FROM categories WHERE name = :name"),
+        {"name": piano_zwj},
     )
-    row = meta.one()
-    assert row.provolatile in {"i", b"i"}
-    assert bool(row.proisstrict) is True
-    config = row.proconfig or []
-    assert any("search_path" in item and "pg_catalog" in item for item in config)
+    assert created_zwj == category_name_key("Piano")
 
 
-async def test_category_name_key_works_with_empty_search_path(
+async def test_category_insert_with_empty_search_path(
     db_session: AsyncSession,
 ) -> None:
     await db_session.execute(text("SET LOCAL search_path = ''"))
-    key = await db_session.scalar(
-        text("SELECT public.category_name_key(CAST(:n AS public.citext))"),
-        {"n": "a\u200bb"},
-    )
-    assert key == category_name_key("ab")
     inserted = await db_session.scalar(
         text(
-            "INSERT INTO public.categories (name, sort_order) "
-            "VALUES ('SearchPathProbe', 0) "
+            "INSERT INTO public.categories (name, name_key, sort_order) "
+            "VALUES ('SearchPathProbe', 'searchpathprobe', 0) "
             "RETURNING public.categories.name_key"
         )
     )
@@ -1373,14 +1556,22 @@ def test_update_locks_row_before_name_check(
 def test_category_dump_restore_preserves_rows(
     require_postgres: Any,
     migrated_test_database: None,
+    tmp_path: Any,
 ) -> None:
     from sqlalchemy.ext.asyncio import create_async_engine
 
     from app.db import RedactedDsn
-    from tests.conftest import drop_database_if_exists, ensure_database_exists
+    from tests.conftest import (
+        _postgres_required,
+        drop_database_if_exists,
+        ensure_database_exists,
+    )
 
     if shutil.which("pg_dump") is None or shutil.which("pg_restore") is None:
-        pytest.skip("pg_dump/pg_restore no está en PATH")
+        message = "pg_dump/pg_restore no está en PATH"
+        if _postgres_required():
+            pytest.fail(message)
+        pytest.skip(message)
 
     dsn = require_postgres
     assert isinstance(dsn, RedactedDsn)
@@ -1388,7 +1579,7 @@ def test_category_dump_restore_preserves_rows(
     query: dict[str, str] = {
         str(key): str(value)
         for key, value in (parsed.query or {}).items()
-        if str(key).lower() != "ssl"
+        if str(key).lower() not in {"ssl", "password"}
     }
     ssl_mode: str | None = None
     for key, value in (parsed.query or {}).items():
@@ -1397,11 +1588,16 @@ def test_category_dump_restore_preserves_rows(
             break
     if ssl_mode is not None and "sslmode" not in {key.lower() for key in query}:
         query["sslmode"] = ssl_mode
-    libpq = parsed.set(drivername="postgresql", query=query).render_as_string(
-        hide_password=False
-    )
+    password = parsed.password
+    libpq = parsed.set(
+        drivername="postgresql", password=None, query=query
+    ).render_as_string(hide_password=False)
+    env = os.environ.copy()
+    if password is not None:
+        env["PGPASSWORD"] = password
     suffix = uuid.uuid4().hex[:8]
-    marker = f"DumpRestore-{suffix}"
+    marker = f"Pi\u00adano {_FLAG_ENGLAND} {suffix}"
+    marker_key = category_name_key(marker)
 
     async def seed() -> str:
         engine = create_async_engine(dsn.secret())
@@ -1409,17 +1605,22 @@ def test_category_dump_restore_preserves_rows(
             async with engine.begin() as connection:
                 row_id = await connection.scalar(
                     text(
-                        "INSERT INTO categories (name, description, sort_order) "
-                        "VALUES (:name, :description, 3) RETURNING id"
+                        "INSERT INTO categories "
+                        "(name, name_key, description, sort_order) "
+                        "VALUES (:name, :name_key, :description, 3) RETURNING id"
                     ),
-                    {"name": marker, "description": "pg_dump"},
+                    {
+                        "name": marker,
+                        "name_key": marker_key,
+                        "description": "pg_dump",
+                    },
                 )
                 return str(row_id)
         finally:
             await engine.dispose()
 
     row_id = asyncio.run(seed())
-    dump_dir = Path("/tmp") / f"cat-dump-{suffix}"
+    dump_dir = tmp_path / f"cat-dump-{suffix}"
     dump_dir.mkdir(parents=True, exist_ok=True)
     custom = dump_dir / "categories.dump"
     plain = dump_dir / "categories.sql"
@@ -1429,12 +1630,14 @@ def test_category_dump_restore_preserves_rows(
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
         subprocess.run(
             ["pg_dump", "--no-owner", "--no-acl", "-f", str(plain), libpq],
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
 
         def restore_custom(dest: str) -> None:
@@ -1443,6 +1646,7 @@ def test_category_dump_restore_preserves_rows(
                 check=True,
                 capture_output=True,
                 text=True,
+                env=env,
             )
 
         def restore_plain(dest: str) -> None:
@@ -1451,6 +1655,7 @@ def test_category_dump_restore_preserves_rows(
                 check=True,
                 capture_output=True,
                 text=True,
+                env=env,
             )
 
         for kind, dest_name, restore in (
@@ -1463,7 +1668,10 @@ def test_category_dump_restore_preserves_rows(
             drop_database_if_exists(dest)
             ensure_database_exists(dest)
             dest_libpq = parsed.set(
-                drivername="postgresql", database=dest_name, query=query
+                drivername="postgresql",
+                database=dest_name,
+                password=None,
+                query=query,
             ).render_as_string(hide_password=False)
             restore(dest_libpq)
 
@@ -1485,10 +1693,9 @@ def test_category_dump_restore_preserves_rows(
 
             restored_name, restored_key = asyncio.run(restored(dest.secret()))
             assert restored_name == marker, kind
-            assert restored_key == category_name_key(marker), kind
+            assert restored_key == marker_key, kind
             drop_database_if_exists(dest)
     finally:
-        shutil.rmtree(dump_dir, ignore_errors=True)
         asyncio.run(_cleanup_ids(dsn.secret(), [uuid.UUID(row_id)]))
 
 
