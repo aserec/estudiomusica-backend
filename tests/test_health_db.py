@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import RedactedDsn
+from app.schemas.health import DatabaseHealthResponse
 from app.services import health as health_service
 
 SECRET_PASSWORD = "supersecret-password-do-not-leak"
@@ -202,73 +203,166 @@ def test_health_db_ok_body_has_only_db_key(
     assert response.json()["db"] == "ok"
 
 
-@pytest.mark.db
-@pytest.mark.asyncio
-async def test_health_db_frozen_after_login_returns_503_quickly(
+def _frozen_url(require_postgres: RedactedDsn, port: int) -> str:
+    from sqlalchemy.engine.url import make_url
+
+    parsed = make_url(require_postgres.secret())
+    return parsed.set(host="127.0.0.1", port=port).render_as_string(hide_password=False)
+
+
+async def _run_frozen_health(
     monkeypatch: pytest.MonkeyPatch,
     require_postgres: RedactedDsn,
-    migrated_test_database: None,
-) -> None:
-    """Proxy que autentica y congela: 503, no 500, dentro del timeout.
-
-    Sin terminate el execute cancelado espera command_timeout (~4 s).
-    Sin invalidate la conexión queda checked-out. Abandon vacío cuelga.
-    """
-
-    from sqlalchemy.engine.url import make_url
+    *,
+    freeze_on: str,
+    health_timeout: float = 0.6,
+    command_timeout: float = 8.0,
+    warmup: bool = False,
+) -> tuple[float, DatabaseHealthResponse, int, int]:
+    """Devuelve (elapsed, result, abandon_calls, checkedout)."""
 
     from app.config import get_settings
     from app.db import clear_engine, dispose_engine, get_engine
-    from tests.conftest import _build_client
+    from app.services.health import HEALTH_TIMEOUT_MARGIN_SECONDS
     from tests.pg_freeze_proxy import FreezeAfterLoginProxy
 
-    parsed = make_url(require_postgres.secret())
-    proxy = FreezeAfterLoginProxy(parsed.host or "127.0.0.1", parsed.port or 5432)
-    await proxy.start()
-    frozen_url = parsed.set(host="127.0.0.1", port=proxy.port).render_as_string(
-        hide_password=False
+    parsed_host = require_postgres.secret()
+    from sqlalchemy.engine.url import make_url
+
+    parsed = make_url(parsed_host)
+    proxy = FreezeAfterLoginProxy(
+        parsed.host or "127.0.0.1",
+        parsed.port or 5432,
+        freeze_on=freeze_on,  # type: ignore[arg-type]
     )
+    await proxy.start()
+    frozen_url = _frozen_url(require_postgres, proxy.port)
     monkeypatch.setenv("DATABASE_URL", frozen_url)
-    monkeypatch.setenv("DB_HEALTH_TIMEOUT", "0.6")
-    monkeypatch.setenv("DB_COMMAND_TIMEOUT", "8")
+    monkeypatch.setenv("DB_HEALTH_TIMEOUT", str(health_timeout))
+    monkeypatch.setenv("DB_COMMAND_TIMEOUT", str(command_timeout))
     get_settings.cache_clear()
     clear_engine()
+    abandons = {"n": 0}
+    original = health_service._abandon_health_connection
+
+    def _spy(connection: object) -> None:
+        abandons["n"] += 1
+        original(connection)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(health_service, "_abandon_health_connection", _spy)
+    budget = health_timeout + HEALTH_TIMEOUT_MARGIN_SECONDS + 0.35
     try:
+        if warmup:
+            warm = await health_service.check_database()
+            assert warm.db == "ok"
         started = time.monotonic()
         result = await health_service.check_database()
         elapsed = time.monotonic() - started
-        assert result.db == "down"
-        assert elapsed < 2.0
-
         engine = get_engine()
-        assert engine.sync_engine.pool.checkedout() == 0  # type: ignore[attr-defined]
-
-        client_iter = _build_client(
-            monkeypatch,
-            APP_ENV="development",
-            EXPOSE_ERRORS="false",
-            ENABLE_EXAMPLE_ROUTES="true",
-            DB_HEALTH_TIMEOUT="0.6",
-            DB_COMMAND_TIMEOUT="8",
-            DATABASE_URL=frozen_url,
+        checkedout = engine.sync_engine.pool.checkedout()  # type: ignore[attr-defined]
+        print(
+            f"health freeze[{freeze_on}] elapsed={elapsed:.3f}s "
+            f"timeout={health_timeout} command={command_timeout} "
+            f"abandons={abandons['n']} checkedout={checkedout}",
+            flush=True,
         )
-        client = next(client_iter)
-        try:
-            started = time.monotonic()
-            response = client.get("/api/v1/health/db")
-            elapsed = time.monotonic() - started
-            assert response.status_code == 503
-            assert response.json() == {"db": "down"}
-            assert elapsed < 2.0
-        finally:
-            close = getattr(client_iter, "close", None)
-            if callable(close):
-                close()
+        assert elapsed < budget, (
+            f"elapsed={elapsed:.3f}s budget={budget:.3f}s freeze_on={freeze_on}"
+        )
+        return elapsed, result, abandons["n"], int(checkedout)
     finally:
         await dispose_engine()
         get_settings.cache_clear()
         with suppress(Exception):
             await asyncio.wait_for(proxy.aclose(), timeout=2)
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_health_db_frozen_select_1_returns_503_quickly(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """Congela SELECT 1 tras inicializar el dialecto. Mata T1/T2/T4/T5."""
+
+    from tests.conftest import _build_client
+
+    elapsed, result, abandons, checkedout = await _run_frozen_health(
+        monkeypatch, require_postgres, freeze_on="select_1"
+    )
+    assert result.db == "down"
+    assert abandons >= 1
+    assert checkedout == 0
+
+    parsed = require_postgres.secret()
+    from sqlalchemy.engine.url import make_url
+
+    from app.config import get_settings
+    from app.db import clear_engine
+    from tests.pg_freeze_proxy import FreezeAfterLoginProxy
+
+    url = make_url(parsed)
+    proxy = FreezeAfterLoginProxy(url.host or "127.0.0.1", url.port or 5432)
+    await proxy.start()
+    frozen_url = _frozen_url(require_postgres, proxy.port)
+    get_settings.cache_clear()
+    clear_engine()
+    client_iter = _build_client(
+        monkeypatch,
+        APP_ENV="development",
+        EXPOSE_ERRORS="false",
+        ENABLE_EXAMPLE_ROUTES="true",
+        DB_HEALTH_TIMEOUT="0.6",
+        DB_COMMAND_TIMEOUT="8",
+        DATABASE_URL=frozen_url,
+    )
+    client = next(client_iter)
+    try:
+        started = time.monotonic()
+        response = client.get("/api/v1/health/db")
+        http_elapsed = time.monotonic() - started
+        assert response.status_code == 503
+        assert response.json() == {"db": "down"}
+        assert http_elapsed < 1.4
+    finally:
+        close = getattr(client_iter, "close", None)
+        if callable(close):
+            close()
+        with suppress(Exception):
+            await asyncio.wait_for(proxy.aclose(), timeout=2)
+    assert elapsed < 1.4
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_health_db_frozen_pre_ping_returns_503_quickly(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    elapsed, result, _abandons, checkedout = await _run_frozen_health(
+        monkeypatch, require_postgres, freeze_on="pre_ping", warmup=True
+    )
+    assert result.db == "down"
+    assert checkedout == 0
+    assert elapsed < 1.4
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_health_db_frozen_rollback_returns_503_quickly(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    elapsed, result, abandons, checkedout = await _run_frozen_health(
+        monkeypatch, require_postgres, freeze_on="rollback"
+    )
+    assert result.db == "down"
+    assert abandons >= 1
+    assert checkedout == 0
+    assert elapsed < 1.4
 
 
 @pytest.mark.db
