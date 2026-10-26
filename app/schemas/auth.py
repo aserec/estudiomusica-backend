@@ -4,7 +4,8 @@ from typing import overload
 
 from pydantic import EmailStr, Field, field_validator
 
-from app.models.user import PERSON_NAME_MAX, SystemRole
+from app.models.user import PERSON_NAME_MAX as PERSON_NAME_MAX
+from app.models.user import SystemRole
 from app.schemas.base import APIModel
 
 PERSON_NAME_RAW_MAX = PERSON_NAME_MAX * 10
