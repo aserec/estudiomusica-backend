@@ -33,6 +33,7 @@ from app.services.categories import (
     audit_category_name_keys,
     create_category,
     delete_category,
+    fix_category_name_keys,
     update_category,
 )
 from tests.test_auth import unique_email
@@ -1104,6 +1105,97 @@ async def test_audit_category_name_keys_reports_diff_and_collision(
     assert stored["Pia\u200dno"] == "piajoiner"
     keys = {item.key for item in report.collisions}
     assert "piano" in keys
+
+
+async def test_fix_category_name_keys_renames_duplicates(
+    db_session: AsyncSession,
+) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('Piano', 'piano', 0), "
+            "('Pia\u200dno', 'other', 1)"
+        )
+    )
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    rows = list(
+        (
+            await db_session.execute(
+                text("SELECT name, name_key FROM categories ORDER BY sort_order")
+            )
+        ).all()
+    )
+    names = {row.name for row in rows}
+    assert "Piano" in names
+    assert "Pia\u200dno (dup 1)" in names
+    assert rows[0].name_key == category_name_key(rows[0].name)
+    assert rows[1].name_key == category_name_key(rows[1].name)
+    assert rows[0].name_key != rows[1].name_key
+
+
+def test_verify_script_exits_zero_and_fix(
+    require_postgres: Any,
+    migrated_test_database: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import get_settings
+    from tests.conftest import ROOT
+
+    dsn = require_postgres.secret()
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    get_settings.cache_clear()
+    ids: list[uuid.UUID] = []
+
+    async def seed() -> None:
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        engine = create_async_engine(dsn)
+        try:
+            async with engine.begin() as connection:
+                result = await connection.execute(
+                    text(
+                        "INSERT INTO categories (name, name_key, sort_order) VALUES "
+                        "('Piano', 'wrong', 0), "
+                        "('Pia\u200dno', 'also', 1) RETURNING id"
+                    )
+                )
+                ids.extend(row[0] for row in result)
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(seed())
+        dirty = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/verify_category_name_keys.py")],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert dirty.returncode == 1
+        fixed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/verify_category_name_keys.py"),
+                "--fix",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert fixed.returncode == 0
+        assert "name_key: ok" in fixed.stdout
+        clean = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/verify_category_name_keys.py")],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert clean.returncode == 0
+        assert "name_key: ok" in clean.stdout
+    finally:
+        asyncio.run(_cleanup_ids(dsn, ids))
+        get_settings.cache_clear()
 
 
 @pytest.mark.parametrize("mark", _BIDI_POINTS)

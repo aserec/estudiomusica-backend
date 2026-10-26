@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """Recalcula name_key de categories y avisa diferencias o colisiones.
 
-Uso: uv run python scripts/verify_category_name_keys.py
-Lee DATABASE_URL (pydantic-settings).
+Uso:
+  uv run python scripts/verify_category_name_keys.py
+  uv run python scripts/verify_category_name_keys.py --fix
+
+``--fix`` renombra duplicados con el sufijo `` (dup N)`` y recalcula las
+claves en una sola transacción. Lee DATABASE_URL (pydantic-settings).
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import sys
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
-async def _run() -> int:
+async def _run(*, fix: bool) -> int:
     from app.config import get_settings
-    from app.services.categories import audit_category_name_keys
+    from app.services.categories import audit_category_name_keys, fix_category_name_keys
 
     settings = get_settings()
     engine = create_async_engine(settings.resolved_database_url())
@@ -23,7 +28,11 @@ async def _run() -> int:
     try:
         async with factory() as session:
             assert isinstance(session, AsyncSession)
-            report = await audit_category_name_keys(session)
+            if fix:
+                async with session.begin():
+                    report = await fix_category_name_keys(session)
+            else:
+                report = await audit_category_name_keys(session)
     finally:
         await engine.dispose()
     for item in report.mismatches:
@@ -44,7 +53,14 @@ async def _run() -> int:
 
 
 def main() -> None:
-    sys.exit(asyncio.run(_run()))
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help='Renombra duplicados con " (dup N)" y recalcula name_key',
+    )
+    args = parser.parse_args()
+    sys.exit(asyncio.run(_run(fix=args.fix)))
 
 
 if __name__ == "__main__":

@@ -293,3 +293,51 @@ async def audit_category_name_keys(session: AsyncSession) -> NameKeyAudit:
         if len(ids) > 1
     )
     return NameKeyAudit(mismatches=tuple(mismatches), collisions=collisions)
+
+
+def _dup_name(name: str, number: int) -> str:
+    suffix = f" (dup {number})"
+    if len(name) + len(suffix) <= 120:
+        return name + suffix
+    return name[: 120 - len(suffix)] + suffix
+
+
+async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
+    """Renombra duplicados con `` (dup N)`` y recalcula name_key.
+
+    Una sola transacción: el caller hace commit (el script usa ``begin()``).
+    """
+
+    rows = list(await session.scalars(select(Category).order_by(Category.id)))
+    live = [row for row in rows if row.deleted_at is None]
+    groups: dict[tuple[UUID | None, str], list[Category]] = {}
+    for row in live:
+        expected = category_name_key(row.name)
+        groups.setdefault((row.parent_id, expected.casefold()), []).append(row)
+    taken: dict[tuple[UUID | None, str], Category] = {}
+    for row in live:
+        taken[(row.parent_id, category_name_key(row.name).casefold())] = row
+    for (_parent, _key), members in groups.items():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda item: (item.sort_order, item.id))
+        for number, row in enumerate(members[1:], start=1):
+            suffix = number
+            while True:
+                candidate = _dup_name(row.name, suffix)
+                new_key = category_name_key(candidate).casefold()
+                clash = taken.get((row.parent_id, new_key))
+                if clash is None or clash.id == row.id:
+                    old_key = category_name_key(row.name).casefold()
+                    taken.pop((row.parent_id, old_key), None)
+                    row.name = candidate
+                    taken[(row.parent_id, new_key)] = row
+                    break
+                suffix += 1
+    for row in rows:
+        row.name_key = str(row.id)
+    await session.flush()
+    for row in rows:
+        row.name_key = category_name_key(row.name)
+    await session.flush()
+    return await audit_category_name_keys(session)
