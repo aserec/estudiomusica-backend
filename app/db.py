@@ -1,7 +1,12 @@
 """Motor async de SQLAlchemy 2 y fábrica de sesiones."""
 
-from collections.abc import AsyncIterator
+from __future__ import annotations
 
+import ssl
+from collections.abc import AsyncIterator, Mapping
+from typing import Annotated, Any
+
+from fastapi import Depends
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -16,6 +21,15 @@ HEALTH_APPLICATION_NAME = "estudiomusica-health"
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+
+_ADAPTER_INT_KEYS = frozenset({"prepared_statement_cache_size"})
+_ADAPTER_CALLABLE_KEYS = frozenset(
+    {
+        "prepared_statement_name_func",
+        "async_creator_fn",
+    }
+)
+_SSLROOTCERT_KEYS = frozenset({"sslrootcert"})
 
 
 _QUERY_SECRET_KEYS = frozenset({"password", "sslpassword"})
@@ -63,23 +77,106 @@ class RedactedDsn:
         return f"RedactedDsn({str(self)!r})"
 
 
+def _query_scalar(query: Mapping[Any, Any], *keys: str) -> str | None:
+    lowered = {str(key).lower(): value for key, value in query.items()}
+    for key in keys:
+        value = lowered.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            return str(value[0]) if value else None
+        return str(value)
+    return None
+
+
+def ssl_context_from_rootcert(cafile: str, ssl_value: object = None) -> ssl.SSLContext:
+    """``sslrootcert`` → ``SSLContext`` con ``cafile`` (asyncpg no tiene ese kwarg)."""
+
+    ctx = ssl.create_default_context(cafile=cafile)
+    mode = str(ssl_value).lower() if isinstance(ssl_value, str) else ""
+    if mode == "verify-ca":
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        return ctx
+    ctx.check_hostname = mode not in {"disable", "allow"}
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    return ctx
+
+
+def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
+    """Kwargs de ``create_connect_args`` listos para ``asyncpg.connect``.
+
+    Quita ``prepared_statement_cache_size`` (solo el adaptador). Quita
+    ``async_creator_fn`` / ``prepared_statement_name_func`` solo si son
+    callable; un str de la query se deja para que tumbe igual que la app.
+    ``sslmode`` pasa a ``ssl``. ``sslrootcert`` pasa a un ``SSLContext``.
+    """
+
+    kwargs: dict[str, Any] = {}
+    sslmode = None
+    sslrootcert = None
+    for key, value in dict(opts).items():
+        lowered = str(key).lower()
+        if key in _ADAPTER_INT_KEYS or lowered in _ADAPTER_INT_KEYS:
+            continue
+        if (
+            key in _ADAPTER_CALLABLE_KEYS or lowered in _ADAPTER_CALLABLE_KEYS
+        ) and callable(value):
+            continue
+        if lowered == "sslmode":
+            sslmode = value
+            continue
+        if lowered in _SSLROOTCERT_KEYS:
+            if isinstance(value, (list, tuple)):
+                sslrootcert = str(value[0]) if value else None
+            else:
+                sslrootcert = str(value) if value else None
+            continue
+        kwargs[key] = value
+    if sslmode is not None and "ssl" not in kwargs:
+        kwargs["ssl"] = sslmode
+    if sslrootcert and kwargs.get("ssl") not in {False, "disable"}:
+        kwargs["ssl"] = ssl_context_from_rootcert(sslrootcert, kwargs.get("ssl"))
+    return kwargs
+
+
+def _engine_url_and_connect_args() -> tuple[str, dict[str, Any]]:
+    settings = get_settings()
+    raw = settings.resolved_database_url()
+    parsed = make_url(raw)
+    query = dict(parsed.query or {})
+    cafile = _query_scalar(query, "sslrootcert")
+    ssl_value = _query_scalar(query, "ssl")
+    connect_args: dict[str, Any] = {
+        "timeout": settings.db_connect_timeout,
+        "command_timeout": settings.db_command_timeout,
+    }
+    if cafile:
+        query = {
+            key: value
+            for key, value in query.items()
+            if str(key).lower() not in _SSLROOTCERT_KEYS
+        }
+        raw = parsed.set(query=query).render_as_string(hide_password=False)
+        connect_args["ssl"] = ssl_context_from_rootcert(cafile, ssl_value)
+    return raw, connect_args
+
+
 def get_engine() -> AsyncEngine:
     """Devuelve el motor async, creándolo la primera vez que se pide."""
 
     global _engine
     if _engine is None:
         settings = get_settings()
+        url, connect_args = _engine_url_and_connect_args()
         _engine = create_async_engine(
-            settings.resolved_database_url(),
+            url,
             pool_pre_ping=True,
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
             pool_timeout=settings.db_pool_timeout,
             pool_recycle=settings.db_pool_recycle,
-            connect_args={
-                "timeout": settings.db_connect_timeout,
-                "command_timeout": settings.db_command_timeout,
-            },
+            connect_args=connect_args,
         )
     return _engine
 
@@ -101,7 +198,14 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
-    """Dependencia FastAPI: una sesión por petición, con commit o rollback."""
+    """Sesión por petición: commit al salir del yield, rollback si falla.
+
+    FastAPI 0.162 ejecuta el código posterior al ``yield`` *después* de
+    enviar la respuesta si el ``Depends`` usa el scope por defecto
+    (``request``). ``SessionDep`` fija ``scope="function"`` para que el
+    commit ocurra antes de responder: un POST no puede devolver 2xx
+    si el commit falla o si la fila aún no es visible.
+    """
 
     factory = get_session_factory()
     async with factory() as session:
@@ -111,6 +215,9 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         except Exception:
             await session.rollback()
             raise
+
+
+SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
 
 
 def clear_engine() -> None:

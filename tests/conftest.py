@@ -4,19 +4,19 @@ import os
 import socket
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from app.db import RedactedDsn, get_session, redact_database_url
+from app.db import RedactedDsn, SessionDep, get_session, redact_database_url
 from app.exceptions import Validation
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -262,11 +262,24 @@ def _mount_probes(application: FastAPI) -> None:
         return FileResponse(_PROBE_FILE, media_type="application/octet-stream")
 
     @application.get("/api/v1/_test/session")
-    async def session_probe(
-        session: Annotated[AsyncSession, Depends(get_session)],
-    ) -> dict[str, str]:
+    async def session_probe(session: SessionDep) -> dict[str, str]:
         await session.execute(text("SELECT 1"))
         return {"session": "ok"}
+
+    @application.post("/api/v1/_test/session/{label}", status_code=201)
+    async def session_create(label: str, session: SessionDep) -> dict[str, str]:
+        await session.execute(
+            text(
+                "INSERT INTO session_probes "
+                "(id, label, created_at, updated_at) "
+                "VALUES ("
+                "gen_random_uuid(), :label, "
+                "clock_timestamp(), clock_timestamp()"
+                ")"
+            ),
+            {"label": label},
+        )
+        return {"label": label}
 
 
 def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> Iterator[TestClient]:
@@ -485,21 +498,41 @@ def _as_redacted_dsn(database_url: str | RedactedDsn) -> RedactedDsn:
 def _dsn_secret_values(dsn: RedactedDsn) -> tuple[str, ...]:
     """Contraseñas del netloc y de ``password`` / ``sslpassword`` en la query."""
 
+    from urllib.parse import parse_qs, urlparse
+
+    values: list[str] = []
     try:
         parsed = make_url(dsn.secret())
     except Exception:
-        return ()
-    values: list[str] = []
-    if parsed.password:
-        values.append(parsed.password)
-    for key, raw in (parsed.query or {}).items():
-        if str(key).lower() not in {"password", "sslpassword"}:
+        parsed = None
+    if parsed is not None:
+        if parsed.password:
+            values.append(parsed.password)
+        for key, raw in (parsed.query or {}).items():
+            if str(key).lower() not in {"password", "sslpassword"}:
+                continue
+            if isinstance(raw, (list, tuple)):
+                values.extend(str(item) for item in raw if item)
+                continue
+            if raw:
+                values.append(str(raw))
+    try:
+        raw_query = urlparse(dsn.secret()).query
+    except Exception:
+        raw_query = ""
+    if raw_query:
+        for key, items in parse_qs(raw_query, keep_blank_values=True).items():
+            if key.lower() not in {"password", "sslpassword"}:
+                continue
+            values.extend(item for item in items if item)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if item in seen:
             continue
-        if isinstance(raw, (list, tuple)):
-            raw = raw[0] if raw else ""
-        if raw:
-            values.append(str(raw))
-    return tuple(values)
+        seen.add(item)
+        unique.append(item)
+    return tuple(unique)
 
 
 def _redacted_exception_detail(exc: BaseException, dsn: RedactedDsn) -> str:

@@ -8,7 +8,13 @@ from sqlalchemy import String, Table, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db import RedactedDsn, clear_engine, get_session, get_session_factory
+from app.db import (
+    RedactedDsn,
+    SessionDep,
+    clear_engine,
+    get_session,
+    get_session_factory,
+)
 from app.models import PersistentModel
 
 
@@ -311,6 +317,179 @@ async def test_db_session_next_test_does_not_see_previous_commit(
         {"label": _DB_SESSION_LEAK_LABEL},
     )
     assert leftover is None
+
+
+def test_session_dep_commits_before_response() -> None:
+    """FastAPI 0.162: scope=function sale del yield antes de enviar."""
+
+    from typing import get_args
+
+    from fastapi.params import Depends as DependsParam
+
+    args = get_args(SessionDep)
+    assert args[0] is AsyncSession
+    dep = args[1]
+    assert isinstance(dep, DependsParam)
+    assert dep.dependency is get_session
+    assert dep.scope == "function"
+
+
+async def _create_probe_table(engine: Any, probe_table: Table) -> None:
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
+        )
+        await connection.execute(text("DELETE FROM session_probes"))
+
+
+async def _drop_probe_table(engine: Any, probe_table: Table) -> None:
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
+        )
+
+
+@pytest.mark.db
+def test_http_posts_are_visible_from_another_session_before_response(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """400 POST 201: al enviar la respuesta la fila ya es visible."""
+
+    import asyncio
+
+    import asyncpg  # type: ignore[import-untyped]
+    from fastapi.testclient import TestClient
+    from sqlalchemy.dialects.postgresql.asyncpg import PGDialect_asyncpg
+    from sqlalchemy.engine.url import make_url
+
+    from app.config import get_settings
+    from app.db import dispose_engine, get_engine
+    from app.main import create_app
+    from tests.conftest import _mount_probes
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    get_settings.cache_clear()
+    clear_engine()
+    engine = get_engine()
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
+    dialect = PGDialect_asyncpg()  # type: ignore[no-untyped-call]
+    _args, opts = dialect.create_connect_args(  # type: ignore[no-untyped-call]
+        make_url(require_postgres.secret())
+    )
+    login = {
+        key: opts[key]
+        for key in ("host", "port", "user", "password", "database", "ssl")
+        if key in opts and opts[key] is not None
+    }
+    if "port" not in login:
+        login["port"] = 5432
+    seen: list[str | None] = []
+    reader: dict[str, Any] = {}
+
+    async def _read_label(label: str) -> str | None:
+        connection = reader.get("c")
+        if connection is None or connection.is_closed():
+            connection = await asyncpg.connect(**login, timeout=2)
+            reader["c"] = connection
+        value: str | None = await connection.fetchval(
+            "SELECT label FROM session_probes WHERE label = $1", label
+        )
+        return value
+
+    asyncio.run(_create_probe_table(engine, probe_table))
+    application = create_app()
+    _mount_probes(application)
+
+    async def wrapped(scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") == "lifespan":
+            await application(scope, receive, send)
+            held = reader.get("c")
+            if held is not None and not held.is_closed():
+                await held.close()
+            return
+
+        async def send_wrapper(message: Any) -> None:
+            if (
+                scope.get("method") == "POST"
+                and message.get("type") == "http.response.start"
+            ):
+                path = str(scope.get("path") or "")
+                prefix = "/api/v1/_test/session/"
+                if path.startswith(prefix):
+                    label = path[len(prefix) :]
+                    seen.append(await _read_label(label))
+            await send(message)
+
+        await application(scope, receive, send_wrapper)
+
+    try:
+        with TestClient(wrapped) as client:
+            for index in range(400):
+                label = f"vis-{index:03d}"
+                response = client.post(f"/api/v1/_test/session/{label}")
+                assert response.status_code == 201, response.text
+                assert response.json() == {"label": label}
+                assert seen[-1] == label
+        assert len(seen) == 400
+        assert all(item is not None for item in seen)
+    finally:
+        asyncio.run(_drop_probe_table(engine, probe_table))
+        asyncio.run(dispose_engine())
+        get_settings.cache_clear()
+
+
+@pytest.mark.db
+def test_http_session_commit_error_is_not_2xx(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """Un fallo de commit no puede devolver 2xx (scope=function)."""
+
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import AsyncSession as SAAsyncSession
+
+    from app.config import get_settings
+    from app.db import dispose_engine, get_engine
+    from tests.conftest import _build_client
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    get_settings.cache_clear()
+    clear_engine()
+    engine = get_engine()
+    probe_table = SessionProbe.__table__
+    assert isinstance(probe_table, Table)
+    asyncio.run(_create_probe_table(engine, probe_table))
+
+    async def _boom(self: SAAsyncSession) -> None:
+        raise RuntimeError("commit-failed")
+
+    monkeypatch.setattr(SAAsyncSession, "commit", _boom)
+    try:
+        client_iter = _build_client(
+            monkeypatch,
+            APP_ENV="development",
+            EXPOSE_ERRORS="false",
+            ENABLE_EXAMPLE_ROUTES="true",
+            DATABASE_URL=require_postgres.secret(),
+        )
+        client = next(client_iter)
+        try:
+            response = client.post("/api/v1/_test/session/commit-boom")
+            assert not (200 <= response.status_code < 300)
+            assert response.status_code >= 400
+        finally:
+            close = getattr(client_iter, "close", None)
+            if callable(close):
+                close()
+    finally:
+        asyncio.run(_drop_probe_table(engine, probe_table))
+        asyncio.run(dispose_engine())
+        get_settings.cache_clear()
 
 
 def test_clear_engine_disposes_sync_engine(monkeypatch: pytest.MonkeyPatch) -> None:
