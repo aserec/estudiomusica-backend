@@ -21,7 +21,6 @@ _held_raw: asyncpg.Connection | None = None
 _probe_task: asyncio.Task[DatabaseHealthResponse] | None = None
 _waiters = 0
 _cache: tuple[float, DatabaseHealthResponse] | None = None
-_lock: asyncio.Lock | None = None
 
 
 def check_health() -> HealthResponse:
@@ -86,12 +85,14 @@ def _abandon_probe(
     connection: object | None,
     task: asyncio.Task[Any],
 ) -> None:
-    global _held_raw
+    global _held_raw, _probe_task
     if connection is not None:
         _abandon_health_connection(connection)
     if _raw_is_open(_held_raw) and _held_raw is not connection:
         _abandon_health_connection(_held_raw)
     _held_raw = None
+    if _probe_task is task:
+        _probe_task = None
     if task.done():
         with contextlib.suppress(Exception, asyncio.CancelledError):
             task.exception()
@@ -101,17 +102,14 @@ def _abandon_probe(
 
 
 def _connect_kwargs() -> dict[str, Any]:
-    """Parámetros de asyncpg: los del dialecto de la app más tope de la sonda."""
+    """Parámetros del dialecto menos las claves que solo consume SQLAlchemy."""
 
-    from app.db import get_engine
+    from app.db import get_engine, prepare_asyncpg_connect_kwargs
 
     settings = get_settings()
     url = make_url(_health_dsn())
     _args, opts = get_engine().sync_engine.dialect.create_connect_args(url)
-    kwargs = dict(opts)
-    sslmode = kwargs.pop("sslmode", None)
-    if sslmode is not None and "ssl" not in kwargs:
-        kwargs["ssl"] = sslmode
+    kwargs = prepare_asyncpg_connect_kwargs(opts)
     kwargs["timeout"] = settings.db_connect_timeout
     kwargs["command_timeout"] = settings.db_command_timeout
     server_settings = dict(kwargs.get("server_settings") or {})
@@ -123,7 +121,7 @@ def _connect_kwargs() -> dict[str, Any]:
 def clear_health_probe() -> None:
     """Cierra la sonda residual (síncrono). Lo llama ``clear_engine``."""
 
-    global _held_raw, _health_url_override, _probe_task, _waiters, _cache, _lock
+    global _held_raw, _health_url_override, _probe_task, _cache
     if _raw_is_open(_held_raw):
         with contextlib.suppress(Exception, asyncio.CancelledError):
             _terminate_driver_object(_held_raw)
@@ -133,9 +131,7 @@ def clear_health_probe() -> None:
     _held_raw = None
     _health_url_override = None
     _probe_task = None
-    _waiters = 0
     _cache = None
-    _lock = None
 
 
 async def dispose_health_probe() -> None:
@@ -156,18 +152,22 @@ def _cached(now: float, ttl: float) -> DatabaseHealthResponse | None:
 async def _run_probe() -> DatabaseHealthResponse:
     global _held_raw, _cache
     raw: asyncpg.Connection | None = None
+    settings = get_settings()
     try:
-        raw = await asyncpg.connect(**_connect_kwargs())
-        _held_raw = raw
-        await raw.execute("SELECT 1")
-        try:
-            await asyncio.wait_for(raw.close(), timeout=HEALTH_TIMEOUT_MARGIN_SECONDS)
-        except Exception:
-            _abandon_health_connection(raw)
-            raise
-        result = DatabaseHealthResponse(db="ok")
-        _cache = (asyncio.get_running_loop().time(), result)
-        return result
+        async with asyncio.timeout(settings.db_health_timeout):
+            raw = await asyncpg.connect(**_connect_kwargs())
+            _held_raw = raw
+            await raw.execute("SELECT 1")
+            try:
+                await asyncio.wait_for(
+                    raw.close(), timeout=HEALTH_TIMEOUT_MARGIN_SECONDS
+                )
+            except Exception:
+                _abandon_health_connection(raw)
+                raise
+            result = DatabaseHealthResponse(db="ok")
+            _cache = (asyncio.get_running_loop().time(), result)
+            return result
     except Exception as exc:
         logger.warning("database health check failed: %s", type(exc).__name__)
         result = DatabaseHealthResponse(db="down")
@@ -186,24 +186,23 @@ async def _run_probe() -> DatabaseHealthResponse:
 async def check_database() -> DatabaseHealthResponse:
     """Una sonda asyncpg a la vez; las peticiones concurrentes esperan.
 
-    El DSN se traduce con el dialecto de la app. El resultado se cachea
+    El DSN se traduce con el dialecto de la app (sin claves propias
+    del adaptador). El resultado se cachea
     ``db_health_cache_ttl`` segundos. Cada waiter tiene su propio
     ``db_health_timeout`` sobre ``asyncio.shield`` de la tarea compartida.
+    La sonda en sí también vive como máximo ``db_health_timeout``.
     """
 
-    global _probe_task, _waiters, _lock
+    global _probe_task, _waiters
     settings = get_settings()
     loop = asyncio.get_running_loop()
-    if _lock is None:
-        _lock = asyncio.Lock()
-    async with _lock:
-        cached = _cached(loop.time(), settings.db_health_cache_ttl)
-        if cached is not None:
-            return cached
-        if _probe_task is None or _probe_task.done():
-            _probe_task = asyncio.create_task(_run_probe())
-        task = _probe_task
-        _waiters += 1
+    cached = _cached(loop.time(), settings.db_health_cache_ttl)
+    if cached is not None:
+        return cached
+    if _probe_task is None or _probe_task.done():
+        _probe_task = asyncio.create_task(_run_probe())
+    task = _probe_task
+    _waiters += 1
     try:
         try:
             return await asyncio.wait_for(
@@ -212,6 +211,12 @@ async def check_database() -> DatabaseHealthResponse:
         except TimeoutError:
             logger.warning("database health check failed: %s", "TimeoutError")
             return DatabaseHealthResponse(db="down")
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is None or current.cancelling() == 0:
+                logger.warning("database health check failed: %s", "CancelledError")
+                return DatabaseHealthResponse(db="down")
+            raise
     finally:
         _waiters -= 1
         if _waiters == 0 and not task.done():
