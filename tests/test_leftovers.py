@@ -22,6 +22,7 @@ from tests.conftest import (
     _drop_leftover_test_databases,
     _drop_leftover_test_tables,
     _drop_named_production_test_role,
+    _hold_production_role_life_lock,
     _orphan_production_test_role,
     _pg_ident,
     _pg_literal,
@@ -30,6 +31,7 @@ from tests.conftest import (
     drop_database_if_exists,
     drop_production_test_role,
     ensure_database_exists,
+    ensure_production_test_role,
 )
 
 
@@ -972,6 +974,63 @@ def test_orphan_production_test_role_captures_overflow(
 
     monkeypatch.setattr(os, "kill", boom)
     assert _orphan_production_test_role("em_prod_tests_99999999999") is False
+
+
+@pytest.mark.db
+def test_lock_start_is_false_when_already_held(
+    require_postgres: RedactedDsn,
+) -> None:
+    """L5: acquired no puede ser True si pg_try_advisory_lock no lo dio."""
+
+    name = "em_prod_tests_1_l5_busy"
+    holder = _SessionAdvisoryLock(require_postgres, name)
+    other = _SessionAdvisoryLock(require_postgres, name)
+    assert holder.start() is True
+    try:
+        assert other.start() is False
+        assert other.acquired is False
+    finally:
+        holder.stop()
+        other.stop()
+
+
+@pytest.mark.db
+def test_hold_raises_when_life_lock_is_busy(
+    require_postgres: RedactedDsn,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L19: si start() es False, ensure/hold debe fallar."""
+
+    name = "em_prod_tests_1_l19_busy"
+    monkeypatch.setattr("tests.conftest.PRODUCTION_TEST_USER", name)
+    monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", None)
+    holder = _SessionAdvisoryLock(require_postgres, name)
+    assert holder.start() is True
+    try:
+        with pytest.raises(RuntimeError, match="no se pudo marcar la vida"):
+            _hold_production_role_life_lock(require_postgres)
+    finally:
+        holder.stop()
+        monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", None)
+
+
+@pytest.mark.db
+def test_ensure_takes_life_lock_before_creating_role(
+    require_postgres: RedactedDsn,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L20: ensure no crea el rol si no marca la vida."""
+
+    called: list[str] = []
+
+    def fake_hold(_admin: RedactedDsn) -> None:
+        called.append("hold")
+        raise RuntimeError("no se pudo marcar la vida del rol de production-tests")
+
+    monkeypatch.setattr("tests.conftest._hold_production_role_life_lock", fake_hold)
+    with pytest.raises(RuntimeError, match="no se pudo marcar la vida"):
+        ensure_production_test_role(require_postgres)
+    assert called == ["hold"]
 
 
 @pytest.mark.db

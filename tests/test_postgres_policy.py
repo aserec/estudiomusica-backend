@@ -260,6 +260,37 @@ def test_tls_url_without_cafile_skips_when_optional(
         _reuse_tls_test_env()
 
 
+def test_tls_cafile_without_url_fails_when_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R3t: TLS_TEST_CAFILE sin URL debe fallar si REQUIRE_TLS_TESTS."""
+
+    from tests.test_health_db import _reuse_tls_test_env
+
+    cafile = tmp_path / "only-ca.pem"
+    cafile.write_text("dummy-ca\n", encoding="utf-8")
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
+    monkeypatch.delenv("TLS_TEST_DATABASE_URL", raising=False)
+    monkeypatch.setenv("TLS_TEST_CAFILE", str(cafile))
+    with pytest.raises(BaseException, match="sin TLS_TEST_DATABASE_URL") as caught:
+        _reuse_tls_test_env()
+    assert type(caught.value) is pytest.fail.Exception
+
+
+def test_tls_cafile_without_url_skips_when_optional(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.test_health_db import _reuse_tls_test_env
+
+    cafile = tmp_path / "only-ca.pem"
+    cafile.write_text("dummy-ca\n", encoding="utf-8")
+    monkeypatch.delenv("REQUIRE_TLS_TESTS", raising=False)
+    monkeypatch.delenv("TLS_TEST_DATABASE_URL", raising=False)
+    monkeypatch.setenv("TLS_TEST_CAFILE", str(cafile))
+    with pytest.raises(pytest.skip.Exception, match="sin TLS_TEST_DATABASE_URL"):
+        _reuse_tls_test_env()
+
+
 def test_tls_cafile_reuses_existing_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -336,6 +367,85 @@ def test_tls_docker_ping_skips_when_optional(
     monkeypatch.delenv("REQUIRE_TLS_TESTS", raising=False)
     with pytest.raises(pytest.skip.Exception, match="no aceptó conexiones"):
         _fail_or_skip_tls_docker_ping("timeout")
+
+
+def test_tls_postgres_call_site_fails_when_docker_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """T5c: el punto de llamada de tls_postgres, no solo el helper."""
+
+    from tests.test_health_db import tls_postgres
+
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
+    monkeypatch.delenv("TLS_TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("TLS_TEST_CAFILE", raising=False)
+    monkeypatch.setattr("shutil.which", lambda *_args, **_kwargs: None)
+    dummy = RedactedDsn("postgresql+asyncpg://u:p@127.0.0.1/db_test")
+    with pytest.raises(BaseException, match="docker no está en PATH") as caught:
+        next(tls_postgres.__wrapped__(tmp_path_factory, dummy))
+    assert type(caught.value) is pytest.fail.Exception
+
+
+def test_start_tls_postgres_run_call_site_fails_when_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T6c: docker run fallido en _start_ephemeral_tls_postgres."""
+
+    import subprocess as subprocess_mod
+
+    from tests.test_health_db import _start_ephemeral_tls_postgres
+
+    real_run = subprocess_mod.run
+
+    def fake_run(cmd: object, *args: object, **kwargs: object) -> object:
+        argv = list(cmd) if isinstance(cmd, (list, tuple)) else []
+        if argv and argv[0] == "docker" and "run" in argv:
+            return subprocess_mod.CompletedProcess(
+                argv, 1, stdout="", stderr="daemon not running"
+            )
+        if argv and argv[0] == "docker":
+            return subprocess_mod.CompletedProcess(argv, 0, stdout="", stderr="")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
+    monkeypatch.setattr(subprocess_mod, "run", fake_run)
+    with pytest.raises(BaseException, match="no se pudo arrancar") as caught:
+        _start_ephemeral_tls_postgres(tmp_path)
+    assert type(caught.value) is pytest.fail.Exception
+    assert "daemon not running" in str(caught.value)
+
+
+def test_start_tls_postgres_ping_call_site_fails_when_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T7c: el ping fallido en _start_ephemeral_tls_postgres."""
+
+    import subprocess as subprocess_mod
+    import time as time_mod
+
+    from tests.test_health_db import _start_ephemeral_tls_postgres
+
+    real_run = subprocess_mod.run
+
+    def fake_run(cmd: object, *args: object, **kwargs: object) -> object:
+        argv = list(cmd) if isinstance(cmd, (list, tuple)) else []
+        if argv and argv[0] == "docker":
+            return subprocess_mod.CompletedProcess(argv, 0, stdout="cid\n", stderr="")
+        return real_run(cmd, *args, **kwargs)
+
+    clock = {"t": 0.0}
+
+    def fake_monotonic() -> float:
+        clock["t"] += 50.0
+        return clock["t"]
+
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
+    monkeypatch.setattr(subprocess_mod, "run", fake_run)
+    monkeypatch.setattr(time_mod, "monotonic", fake_monotonic)
+    with pytest.raises(BaseException, match="no aceptó conexiones") as caught:
+        _start_ephemeral_tls_postgres(tmp_path)
+    assert type(caught.value) is pytest.fail.Exception
 
 
 def test_tls_required_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
