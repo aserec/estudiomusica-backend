@@ -344,6 +344,17 @@ def _iter_dependants(dependant: Any) -> Any:
         yield from _iter_dependants(child)
 
 
+def _iter_mounted_routes(route: Any) -> Any:
+    """FastAPI 0.162 guarda los include_router en ``_IncludedRouter``."""
+
+    yield route
+    original = getattr(route, "original_router", None)
+    if original is None:
+        return
+    for child in getattr(original, "routes", None) or ():
+        yield from _iter_mounted_routes(child)
+
+
 def test_session_route_deps_use_function_scope() -> None:
     """Ninguna ruta puede inyectar la sesión con el scope por defecto."""
 
@@ -359,19 +370,25 @@ def test_session_route_deps_use_function_scope() -> None:
     _mount_probes(application)
     seen_session = False
     seen_streaming = False
-    for route in application.routes:
-        dependant = getattr(route, "dependant", None)
-        if dependant is None:
-            continue
-        for item in _iter_dependants(dependant):
-            call = getattr(item, "call", None)
-            if call is _get_session:
-                seen_session = True
-                assert item.scope == "function", route
-            elif call is _get_streaming_session:
-                seen_streaming = True
-                assert item.scope == "request", route
+    seen_auth_signup = False
+    for mounted in application.routes:
+        for route in _iter_mounted_routes(mounted):
+            dependant = getattr(route, "dependant", None)
+            if dependant is None:
+                continue
+            for item in _iter_dependants(dependant):
+                call = getattr(item, "call", None)
+                if call is _get_session:
+                    seen_session = True
+                    assert item.scope == "function", route
+                    path = getattr(route, "path", "")
+                    if str(path).endswith("/auth/signup"):
+                        seen_auth_signup = True
+                elif call is _get_streaming_session:
+                    seen_streaming = True
+                    assert item.scope == "request", route
     assert seen_session
+    assert seen_auth_signup
     assert seen_streaming
     streaming_args = get_args(SessionStreamingDep)
     streaming_dep = streaming_args[1]
