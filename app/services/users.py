@@ -2,7 +2,7 @@
 
 import unicodedata
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from pydantic import EmailStr, TypeAdapter, ValidationError
@@ -95,7 +95,10 @@ def _name_match(term: str) -> ColumnElement[bool]:
 
     pattern = f"%{_escape_like(term)}%"
     display_name = func.concat(User.first_name, " ", User.last_name)
-    return _nfc_text(display_name).ilike(pattern, escape="\\")
+    return cast(
+        ColumnElement[bool],
+        _nfc_text(display_name).ilike(pattern, escape="\\"),
+    )
 
 
 def _email_term(term: str) -> str:
