@@ -7,7 +7,10 @@ Create Date: 2026-10-25
 Crea ``system_roles`` (id slug), siembra alumno/profesor/profesor_adjunto/
 admin con ``INSERT ... ON CONFLICT DO NOTHING``, añade
 ``users.system_role_id`` y ``course_memberships``. No toca 0001 ni 0002.
-Monta ``set_updated_at()`` con ``op_create_updated_at_trigger``.
+Monta ``set_updated_at()`` con ``op_create_updated_at_trigger``
+(0001 solo crea la función; el SQL del trigger va quoted por el
+preparer). ``CHECK (is_admin = (system_role_id = 'admin'))`` mantiene
+el espejo ``is_admin`` alineado con el rol.
 """
 
 from collections.abc import Sequence
@@ -99,6 +102,11 @@ def upgrade() -> None:
         ["system_role_id"],
         unique=False,
     )
+    op.create_check_constraint(
+        "is_admin_matches_system_role",
+        "users",
+        "is_admin = (system_role_id = 'admin')",
+    )
     op.create_table(
         "course_memberships",
         sa.Column(
@@ -173,6 +181,10 @@ def downgrade() -> None:
         if_exists=True,
     )
     op.drop_table("course_memberships")
+    op.execute(
+        "ALTER TABLE users DROP CONSTRAINT IF EXISTS "
+        "ck_users_is_admin_matches_system_role"
+    )
     op.drop_constraint(
         "fk_users_system_role_id_system_roles",
         "users",
