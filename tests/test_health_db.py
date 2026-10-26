@@ -1539,6 +1539,7 @@ def tls_postgres(
 
 
 @pytest.mark.db
+@pytest.mark.timeout(60)
 def test_health_sslrootcert_good_ca_up_bad_ca_down(
     monkeypatch: pytest.MonkeyPatch,
     require_postgres: RedactedDsn,
@@ -1697,13 +1698,16 @@ def _start_ephemeral_tls_postgres(
             "-v",
             f"{certs}:/certs:ro",
             "postgres:17-alpine",
-            "postgres",
+            "sh",
             "-c",
-            "ssl=on",
-            "-c",
-            "ssl_cert_file=/certs/server.crt",
-            "-c",
-            "ssl_key_file=/certs/server.key",
+            "cp /certs/server.crt /tmp/server.crt "
+            "&& cp /certs/server.key /tmp/server.key "
+            "&& chown postgres /tmp/server.crt /tmp/server.key "
+            "&& chmod 600 /tmp/server.key "
+            "&& exec docker-entrypoint.sh postgres "
+            "-c ssl=on "
+            "-c ssl_cert_file=/tmp/server.crt "
+            "-c ssl_key_file=/tmp/server.key",
         ],
         capture_output=True,
         text=True,

@@ -365,14 +365,14 @@ def test_http_posts_are_visible_from_another_session_before_response(
     from sqlalchemy.engine.url import make_url
 
     from app.config import get_settings
-    from app.db import dispose_engine, get_engine
+    from app.db import dispose_engine
     from app.main import create_app
     from tests.conftest import _mount_probes
 
     monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    engine = get_engine()
+    setup_engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     dialect = PGDialect_asyncpg()  # type: ignore[no-untyped-call]
@@ -399,7 +399,9 @@ def test_http_posts_are_visible_from_another_session_before_response(
         )
         return value
 
-    asyncio.run(_create_probe_table(engine, probe_table))
+    asyncio.run(_create_probe_table(setup_engine, probe_table))
+    asyncio.run(setup_engine.dispose())
+    clear_engine()
     application = create_app()
     _mount_probes(application)
 
@@ -436,9 +438,12 @@ def test_http_posts_are_visible_from_another_session_before_response(
         assert len(seen) == 400
         assert all(item is not None for item in seen)
     finally:
-        asyncio.run(_drop_probe_table(engine, probe_table))
+        teardown = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+        asyncio.run(_drop_probe_table(teardown, probe_table))
+        asyncio.run(teardown.dispose())
         asyncio.run(dispose_engine())
         get_settings.cache_clear()
+        clear_engine()
 
 
 @pytest.mark.db
