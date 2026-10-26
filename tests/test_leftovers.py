@@ -355,8 +355,9 @@ def test_setup_drops_orphan_production_test_role(
     require_postgres: RedactedDsn,
     tmp_path: Path,
 ) -> None:
-    """Tras kill -9 queda em_prod_tests_<pid> muerto; el setup lo borra."""
+    """Tras kill -9 queda em_prod_tests_<pid> muerto; DROP OWNED borra su objeto."""
 
+    assert "orphan_drop_owned_probe" not in _LEFTOVER_TEST_TABLES
     dead_pid = _unused_pid()
     orphan = f"em_prod_tests_{dead_pid}"
     assert _orphan_production_test_role(orphan) is True
@@ -374,10 +375,10 @@ def test_setup_drops_orphan_production_test_role(
                     )
                 )
                 await connection.execute(
-                    text("CREATE TABLE IF NOT EXISTS orphan_owned_by_dead_pid (id int)")
+                    text("CREATE TABLE IF NOT EXISTS orphan_drop_owned_probe (id int)")
                 )
                 await connection.execute(
-                    text(f"ALTER TABLE orphan_owned_by_dead_pid OWNER TO {role}")
+                    text(f"ALTER TABLE orphan_drop_owned_probe OWNER TO {role}")
                 )
         finally:
             await engine.dispose()
@@ -390,7 +391,7 @@ def test_setup_drops_orphan_production_test_role(
         assert asyncio.run(_role_exists(require_postgres, orphan)) is None
         assert (
             asyncio.run(
-                _table_exists_named(require_postgres, "orphan_owned_by_dead_pid")
+                _table_exists_named(require_postgres, "orphan_drop_owned_probe")
             )
             is None
         )
@@ -402,7 +403,7 @@ def test_setup_drops_orphan_production_test_role(
                 async with engine.connect() as connection:
                     await _drop_named_production_test_role(connection, orphan)
                     await connection.execute(
-                        text("DROP TABLE IF EXISTS orphan_owned_by_dead_pid")
+                        text("DROP TABLE IF EXISTS orphan_drop_owned_probe")
                     )
             finally:
                 await engine.dispose()

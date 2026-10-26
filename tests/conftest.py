@@ -1319,7 +1319,6 @@ _LEFTOVER_TEST_TABLES = (
     "ListaCanciones",
     "order",
     "schema_trigger_probes",
-    "orphan_owned_by_dead_pid",
 )
 _LEFTOVER_TEST_DATABASES = (
     "autogen_sa_probe_test",
