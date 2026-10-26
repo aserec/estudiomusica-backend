@@ -2709,7 +2709,7 @@ async def test_category_insert_with_empty_search_path(
     assert inserted == key
 
 
-def test_tree_lock_is_transactional_not_session(
+def test_fix_exclusive_lock_released_after_commit(
     require_postgres: Any,
     migrated_test_database: None,
 ) -> None:
@@ -2884,7 +2884,7 @@ def test_duplicate_update_maps_integrity_error(
         asyncio.run(_cleanup_ids(dsn.secret(), tracked))
 
 
-def test_delete_takes_tree_lock_before_row(
+def test_delete_waits_on_row_for_update(
     require_postgres: Any,
     migrated_test_database: None,
 ) -> None:

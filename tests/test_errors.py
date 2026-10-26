@@ -2,6 +2,9 @@ import logging
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import DBAPIError
+
+from app.exceptions import pg_sqlstate
 
 
 def test_pydantic_validation_returns_400_validation_fields(
@@ -122,6 +125,20 @@ def test_domain_validation_stays_400_not_422(probe_client: TestClient) -> None:
     assert response.status_code == 400
     assert response.status_code != 422
     assert response.json() == {"error": "validation", "fields": ["email"]}
+
+
+def test_pg_sqlstate_reads_orig_not_cause() -> None:
+    class _PgError(Exception):
+        sqlstate = "40P01"
+
+    class _Cause(Exception):
+        sqlstate = "40001"
+
+    wrapped = DBAPIError("SELECT 1", {}, _PgError())
+    assert pg_sqlstate(wrapped) == "40P01"
+    orphan = Exception("plain")
+    orphan.__cause__ = _Cause()
+    assert pg_sqlstate(orphan) == ""
 
 
 def test_pg_deadlock_and_serialization_are_503_not_500(

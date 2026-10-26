@@ -212,19 +212,23 @@ def _mount_probes(application: FastAPI) -> None:
     def raise_pg_deadlock() -> None:
         from sqlalchemy.exc import DBAPIError
 
+        from app.services.categories import _raise_from_db
+
         class _PgError(Exception):
             sqlstate = "40P01"
 
-        raise DBAPIError("SELECT 1", {}, _PgError())
+        _raise_from_db(DBAPIError("SELECT 1", {}, _PgError()))
 
     @application.get("/api/v1/_test/pg-serialization")
     def raise_pg_serialization() -> None:
         from sqlalchemy.exc import DBAPIError
 
+        from app.services.categories import _raise_from_db
+
         class _PgError(Exception):
             sqlstate = "40001"
 
-        raise DBAPIError("SELECT 1", {}, _PgError())
+        _raise_from_db(DBAPIError("SELECT 1", {}, _PgError()))
 
     @application.get("/api/v1/_test/pg-transient-retry")
     async def retry_transient_then_ok() -> dict[str, int]:

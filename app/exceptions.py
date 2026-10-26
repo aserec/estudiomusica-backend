@@ -127,21 +127,15 @@ class TransientDbConflict(DomainError):
 
 
 def pg_sqlstate(exc: BaseException) -> str:
-    """Lee ``sqlstate``/``pgcode`` de asyncpg o de la cadena de causas."""
+    """Lee ``sqlstate``/``pgcode`` de asyncpg en el error o en ``orig``."""
 
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
+    for current in (exc, getattr(exc, "orig", None)):
+        if current is None:
+            continue
         for attr in ("sqlstate", "pgcode"):
             value = getattr(current, attr, None)
             if isinstance(value, str) and value:
                 return value
-        orig = getattr(current, "orig", None)
-        if isinstance(orig, BaseException):
-            current = orig
-            continue
-        current = current.__cause__ or current.__context__
     return ""
 
 
