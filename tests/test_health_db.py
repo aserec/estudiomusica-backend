@@ -2260,15 +2260,21 @@ def test_sslmode_verify_full_without_rootcert_rejects_untrusted(
 
 
 @contextmanager
-def _sslrequest_n_server() -> Iterator[int]:
-    """Servidor falso: responde ``N`` al SSLRequest de Postgres (8 bytes)."""
+def _sslrequest_n_server() -> Iterator[dict[str, int]]:
+    """Responde ``N`` al SSLRequest y registra un startup en claro si llega."""
 
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
     listener.listen(16)
-    port = int(listener.getsockname()[1])
+    state = {
+        "port": int(listener.getsockname()[1]),
+        "accepted": 0,
+        "ssl_requests": 0,
+        "cleartext_startups": 0,
+    }
     stop = threading.Event()
+    ssl_request_code = 80877103
 
     def serve() -> None:
         listener.settimeout(0.2)
@@ -2278,11 +2284,21 @@ def _sslrequest_n_server() -> Iterator[int]:
                     conn, _addr = listener.accept()
                 except TimeoutError:
                     continue
+                state["accepted"] += 1
                 try:
-                    conn.settimeout(2)
+                    conn.settimeout(0.5)
                     header = conn.recv(8)
                     if len(header) == 8:
-                        conn.sendall(b"N")
+                        code = int.from_bytes(header[4:8], "big")
+                        if code == ssl_request_code:
+                            state["ssl_requests"] += 1
+                            conn.sendall(b"N")
+                            more = conn.recv(1024)
+                            if more:
+                                state["cleartext_startups"] += 1
+                            continue
+                    if header:
+                        state["cleartext_startups"] += 1
                 except OSError:
                     pass
                 finally:
@@ -2293,39 +2309,19 @@ def _sslrequest_n_server() -> Iterator[int]:
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
-        yield port
+        yield state
     finally:
         stop.set()
         thread.join(timeout=5)
 
 
-def _patch_asyncpg_url_spy(
-    monkeypatch: pytest.MonkeyPatch,
-    seen: list[dict[str, Any]],
-) -> None:
-    """Espía el dict de ``connect_args`` que ve Alembic (env.py)."""
-
-    import sys
-
-    from app.db import asyncpg_url_and_connect_args as original
-
-    def spy(raw: str) -> tuple[str, dict[str, Any]]:
-        url, args = original(raw)
-        seen.append(args)
-        return url, args
-
-    monkeypatch.setattr("app.db.asyncpg_url_and_connect_args", spy)
-    for name in ("app.migrations.env", "env"):
-        module = sys.modules.get(name)
-        if module is not None:
-            monkeypatch.setattr(module, "asyncpg_url_and_connect_args", spy)
-
-
+@pytest.mark.parametrize("path", ["get_engine", "alembic-env", "health"])
 def test_sslmode_require_fails_when_server_refuses_ssl(
+    path: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    """ALTA require: SSLRequest ``N`` tumba las 3 rutas (mata ALTA-env-quita-str)."""
+    """require no manda startup en claro (get_engine, env.py, sonda)."""
 
     from pathlib import Path
 
@@ -2333,9 +2329,8 @@ def test_sslmode_require_fails_when_server_refuses_ssl(
     from sqlalchemy import text
 
     from app.config import get_settings
-    from app.db import asyncpg_url_and_connect_args
+    from app.db import clear_engine, dispose_engine, get_engine
     from app.migrations.config import make_alembic_config
-    from tests.conftest import _create_async_engine
 
     home = Path(str(tmp_path)) / "empty-home"
     home.mkdir()
@@ -2346,52 +2341,42 @@ def test_sslmode_require_fails_when_server_refuses_ssl(
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
 
-    ssl_tokens = ("ssl", "certificate", "certificat", "verify", "encryption")
-    with _sslrequest_n_server() as port:
-        raw = f"postgresql+asyncpg://u:p@127.0.0.1:{port}/db_test?sslmode=require"
-        url, args = asyncpg_url_and_connect_args(raw)
-        assert "sslmode=" not in url.lower()
-        assert args.get("ssl") == "require"
-
+    with _sslrequest_n_server() as server:
+        raw = (
+            "postgresql+asyncpg://u:p@127.0.0.1:"
+            f"{server['port']}/db_test?sslmode=require"
+        )
         monkeypatch.setenv("DATABASE_URL", raw)
         get_settings.cache_clear()
-        env_url, env_args = asyncpg_url_and_connect_args(
-            get_settings().resolved_database_url()
-        )
-        assert env_args.get("ssl") == "require"
-        del env_url
+        clear_engine()
+        health_service.clear_health_probe()
+        try:
+            if path == "get_engine":
 
-        seen: list[dict[str, Any]] = []
-        _patch_asyncpg_url_spy(monkeypatch, seen)
+                async def _connect() -> None:
+                    engine = get_engine()
+                    async with engine.connect() as connection:
+                        await connection.execute(text("SELECT 1"))
 
-        with pytest.raises(Exception) as alembic_exc:
-            command.current(make_alembic_config(raw))
-        alembic_text = str(alembic_exc.value).lower()
-        assert any(token in alembic_text for token in ssl_tokens), alembic_exc.value
-        assert seen and seen[-1].get("ssl") == "require"
+                with suppress(Exception):
+                    asyncio.run(_connect())
+            elif path == "alembic-env":
+                with suppress(Exception):
+                    command.current(make_alembic_config())
+            else:
 
-        get_settings.cache_clear()
-        with pytest.raises(Exception) as env_exc:
-            command.current(make_alembic_config())
-        env_text = str(env_exc.value).lower()
-        assert any(token in env_text for token in ssl_tokens), env_exc.value
-        assert seen and seen[-1].get("ssl") == "require"
+                async def _probe() -> DatabaseHealthResponse:
+                    return await health_service.check_database()
 
-        engine = _create_async_engine(raw, pool_pre_ping=True)
-
-        async def _connect() -> None:
-            try:
-                async with engine.connect() as connection:
-                    await connection.execute(text("SELECT 1"))
-            finally:
-                await engine.dispose()
-
-        with pytest.raises(Exception) as engine_exc:
-            asyncio.run(_connect())
-        engine_text = str(engine_exc.value).lower()
-        assert any(token in engine_text for token in ssl_tokens), engine_exc.value
-        assert args.get("ssl") == "require"
-    get_settings.cache_clear()
+                result = asyncio.run(_probe())
+                assert result.db == "down"
+        finally:
+            health_service.clear_health_probe()
+            with suppress(Exception):
+                asyncio.run(dispose_engine())
+            get_settings.cache_clear()
+        assert server["ssl_requests"] >= 1
+        assert server["cleartext_startups"] == 0
 
 
 def test_asyncpg_url_normalizes_uppercase_ssl_key() -> None:
