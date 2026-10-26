@@ -159,13 +159,9 @@ async def _has_active_children(session: AsyncSession, category_id: UUID) -> bool
 async def _assert_parent_is_root(
     session: AsyncSession,
     parent_id: UUID,
-    *,
-    category_id: UUID | None = None,
 ) -> Category:
-    """Un solo nivel: el padre tiene que ser una raíz vigente, no uno mismo."""
+    """Un solo nivel: el padre tiene que ser una raíz vigente."""
 
-    if category_id is not None and parent_id == category_id:
-        raise Validation(fields=["parentId"])
     try:
         with session.no_autoflush:
             parent = await session.scalar(
@@ -175,13 +171,15 @@ async def _assert_parent_is_root(
             )
     except DBAPIError as exc:
         _raise_from_db(exc)
+    return _parent_is_root(parent)
+
+
+def _parent_is_root(
+    parent: Category | None, category_id: UUID | None = None
+) -> Category:
     if parent is None or parent.parent_id is not None:
         raise Validation(fields=["parentId"])
-    return parent
-
-
-def _parent_is_root(parent: Category | None, category_id: UUID) -> Category:
-    if parent is None or parent.parent_id is not None or parent.id == category_id:
+    if category_id is not None and parent.id == category_id:
         raise Validation(fields=["parentId"])
     return parent
 
@@ -250,12 +248,7 @@ async def update_category(
         if body.parent_id is not None:
             if await _has_active_children(session, category_id):
                 raise Validation(fields=["parentId"])
-            if (
-                parent is None
-                or parent.parent_id is not None
-                or parent.id == category_id
-            ):
-                raise Validation(fields=["parentId"])
+            _parent_is_root(parent, category_id)
         next_parent = body.parent_id
     if await _name_taken(session, next_name, next_parent, exclude_id=category_id):
         raise CategoryNameTaken()
