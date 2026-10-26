@@ -15,7 +15,12 @@ from app.exceptions import AccessDenied, LastAdmin
 from app.models import AuthSession, CourseMembership, SystemRoleRow, User
 from app.models.user import SystemRole
 from app.permissions.types import CourseRole
-from app.services.users import set_user_admin, set_user_suspended, soft_delete_user
+from app.services.users import (
+    _active_admin_clause,
+    set_user_admin,
+    set_user_suspended,
+    soft_delete_user,
+)
 from tests.conftest import resolve_test_database_url
 from tests.test_auth import PASSWORD, unique_email
 from tests.test_roles import (
@@ -965,6 +970,15 @@ async def test_suspended_admin_does_not_count_as_active(
     still = await db_session.get(User, target["id"])
     assert still is not None
     assert still.is_admin is True
+    active_ids = set(
+        await db_session.scalars(
+            select(User.id).where(
+                _active_admin_clause(),
+                User.id.in_((target["id"], suspended["id"])),
+            )
+        )
+    )
+    assert active_ids == {target["id"]}
 
 
 async def test_self_suspend_is_cannot_modify_self_even_with_other_admins(

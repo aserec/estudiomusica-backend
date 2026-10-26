@@ -100,12 +100,15 @@ def _status_filters(status: AdminUserStatus | None) -> list[ColumnElement[bool]]
     return [User.deleted_at.is_not(None)]
 
 
-def _active_admin_clause() -> ColumnElement[bool]:
+def _admin_identity_clause() -> ColumnElement[bool]:
     return and_(
         or_(User.is_admin.is_(True), User.system_role_id == SystemRole.ADMIN),
         User.deleted_at.is_(None),
-        User.suspended_at.is_(None),
     )
+
+
+def _active_admin_clause() -> ColumnElement[bool]:
+    return and_(_admin_identity_clause(), User.suspended_at.is_(None))
 
 
 def _is_active_admin(user: User) -> bool:
@@ -172,6 +175,10 @@ async def _lock_actor_target_and_active_admins(
                     User.id == actor_id,
                     User.id == target_id,
                     _active_admin_clause(),
+                    and_(
+                        _admin_identity_clause(),
+                        User.suspended_at.is_not(None),
+                    ),
                 )
             )
             .order_by(User.id)
@@ -185,8 +192,7 @@ async def _lock_actor_target_and_active_admins(
         raise AccessDenied()
     if target is None or target.deleted_at is not None:
         raise NotFound()
-    admins = [user for user in rows if _is_active_admin(user)]
-    return actor, target, admins
+    return actor, target, rows
 
 
 async def _revoke_user_sessions(session: AsyncSession, user_id: UUID) -> None:
