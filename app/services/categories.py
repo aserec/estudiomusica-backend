@@ -169,6 +169,7 @@ async def create_category(session: AsyncSession, body: CategoryCreate) -> Catego
     )
     row = Category(
         name=body.name,
+        name_key=category_name_key(body.name),
         parent_id=body.parent_id,
         description=body.description,
         sort_order=sort_order,
@@ -215,6 +216,7 @@ async def update_category(
         raise CategoryNameTaken()
     if "name" in fields:
         row.name = next_name
+        row.name_key = category_name_key(next_name)
     if changing_parent:
         row.parent_id = next_parent
     if "description" in fields:

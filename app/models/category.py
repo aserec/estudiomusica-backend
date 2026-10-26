@@ -4,7 +4,6 @@ import uuid
 
 from sqlalchemy import (
     CheckConstraint,
-    Computed,
     ForeignKey,
     Index,
     Integer,
@@ -53,11 +52,7 @@ class Category(PersistentModel):
     )
 
     name: Mapped[str] = mapped_column(CITEXT(), nullable=False)
-    name_key: Mapped[str] = mapped_column(
-        CITEXT(),
-        Computed("category_name_key(name)", persisted=True),
-        nullable=False,
-    )
+    name_key: Mapped[str] = mapped_column(CITEXT(), nullable=False)
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("categories.id", ondelete="RESTRICT"),
         nullable=True,
