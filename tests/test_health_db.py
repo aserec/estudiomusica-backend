@@ -1679,6 +1679,85 @@ def test_prepare_asyncpg_kwargs_translates_sslrootcert(
     assert isinstance(kwargs["ssl"], ssl_mod.SSLContext)
 
 
+def test_ssl_disable_with_sslrootcert_skips_context(tmp_path: Any) -> None:
+    """T9: ``ssl=disable`` + ``sslrootcert`` no fuerza TLS (engine y sonda)."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import asyncpg_ssl_connect_arg, asyncpg_url_and_connect_args
+    from app.db import prepare_asyncpg_connect_kwargs
+
+    cafile = _write_unrelated_ca(Path(str(tmp_path)) / "unit-ca.pem")
+    assert asyncpg_ssl_connect_arg("disable", str(cafile)) is False
+    assert asyncpg_ssl_connect_arg("false", str(cafile)) is False
+    assert asyncpg_ssl_connect_arg(False, str(cafile)) is False
+    probe = prepare_asyncpg_connect_kwargs(
+        {"host": "127.0.0.1", "ssl": "disable", "sslrootcert": str(cafile)}
+    )
+    _url, engine_args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test"
+        f"?ssl=disable&sslrootcert={cafile}"
+    )
+    assert probe.get("ssl") is False
+    assert engine_args.get("ssl") is False
+    assert not isinstance(probe.get("ssl"), ssl_mod.SSLContext)
+    assert not isinstance(engine_args.get("ssl"), ssl_mod.SSLContext)
+
+
+@pytest.mark.db
+def test_ssl_disable_sslrootcert_engine_matches_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+    tmp_path: Any,
+) -> None:
+    """T9: health y engine en claro si ``ssl=disable`` aunque haya CA."""
+
+    from pathlib import Path
+
+    from sqlalchemy import text
+
+    from app.config import get_settings
+    from app.db import clear_engine, get_engine
+    from tests.conftest import _build_client
+
+    _skip_if_hostssl_rejects_plain(require_postgres)
+    cafile = _write_unrelated_ca(Path(str(tmp_path)) / "t9-ca.pem")
+    dsn = _dsn_with_query(
+        require_postgres.secret(), ssl="disable", sslrootcert=str(cafile)
+    )
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    get_settings.cache_clear()
+    clear_engine()
+    client_iter = _build_client(
+        monkeypatch,
+        APP_ENV="development",
+        EXPOSE_ERRORS="false",
+        ENABLE_EXAMPLE_ROUTES="true",
+        DB_HEALTH_CACHE_TTL="0",
+        DATABASE_URL=dsn,
+    )
+    client = next(client_iter)
+    try:
+        response = client.get("/api/v1/health/db")
+        assert response.status_code == 200
+        assert response.json() == {"db": "ok"}
+    finally:
+        close = getattr(client_iter, "close", None)
+        if callable(close):
+            close()
+
+    async def _engine_select() -> None:
+        engine = get_engine()
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT 1")) == 1
+
+    asyncio.run(_engine_select())
+    clear_engine()
+    get_settings.cache_clear()
+
+
 def _write_unrelated_ca(path: Any) -> Any:
     import subprocess
 

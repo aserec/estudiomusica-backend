@@ -105,13 +105,30 @@ def ssl_context_from_rootcert(cafile: str, ssl_value: object = None) -> ssl.SSLC
     return ctx
 
 
+def _ssl_is_disabled(ssl_value: object) -> bool:
+    if ssl_value is False:
+        return True
+    return isinstance(ssl_value, str) and ssl_value.lower() in {"disable", "false"}
+
+
+def asyncpg_ssl_connect_arg(ssl_value: object, cafile: str | None) -> object:
+    """SSL del engine y de la sonda. Sin ``SSLContext`` si ssl es disable/false."""
+
+    if _ssl_is_disabled(ssl_value):
+        return False
+    if cafile:
+        return ssl_context_from_rootcert(cafile, ssl_value)
+    return ssl_value
+
+
 def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
     """Kwargs de ``create_connect_args`` listos para ``asyncpg.connect``.
 
     Quita ``prepared_statement_cache_size`` (solo el adaptador). Quita
     ``async_creator_fn`` / ``prepared_statement_name_func`` solo si son
     callable; un str de la query se deja para que tumbe igual que la app.
-    ``sslmode`` pasa a ``ssl``. ``sslrootcert`` pasa a un ``SSLContext``.
+    ``sslmode`` pasa a ``ssl``. ``sslrootcert`` pasa a un ``SSLContext``
+    salvo si ``ssl`` es ``disable`` / ``false`` (misma regla que el engine).
     """
 
     kwargs: dict[str, Any] = {}
@@ -137,27 +154,28 @@ def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
         kwargs[key] = value
     if sslmode is not None and "ssl" not in kwargs:
         kwargs["ssl"] = sslmode
-    if sslrootcert and kwargs.get("ssl") not in {False, "disable"}:
-        kwargs["ssl"] = ssl_context_from_rootcert(sslrootcert, kwargs.get("ssl"))
+    if sslrootcert or "ssl" in kwargs:
+        kwargs["ssl"] = asyncpg_ssl_connect_arg(kwargs.get("ssl"), sslrootcert)
     return kwargs
 
 
 def asyncpg_url_and_connect_args(raw: str) -> tuple[str, dict[str, Any]]:
-    """Quita ``sslrootcert`` de la URL y lo pasa como ``SSLContext``."""
+    """Quita ``sslrootcert`` de la URL; el SSL lo decide ``asyncpg_ssl_connect_arg``."""
 
     parsed = make_url(raw)
     query = dict(parsed.query or {})
-    cafile = _query_scalar(query, "sslrootcert")
-    ssl_value = _query_scalar(query, "ssl")
+    prepared = prepare_asyncpg_connect_kwargs(query)
     connect_args: dict[str, Any] = {}
-    if cafile:
+    if _query_scalar(query, "sslrootcert"):
         query = {
             key: value
             for key, value in query.items()
             if str(key).lower() not in _SSLROOTCERT_KEYS
         }
         raw = parsed.set(query=query).render_as_string(hide_password=False)
-        connect_args["ssl"] = ssl_context_from_rootcert(cafile, ssl_value)
+        ssl_value = prepared.get("ssl")
+        if ssl_value is not None:
+            connect_args["ssl"] = ssl_value
     return raw, connect_args
 
 
