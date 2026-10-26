@@ -29,6 +29,7 @@ from app.services.categories import (
     _CATEGORY_TREE_LOCK_KEY,
     _integrity_name,
     _raise_from_integrity,
+    audit_category_name_keys,
     create_category,
     delete_category,
     update_category,
@@ -519,6 +520,54 @@ _BIDI_POINTS = (
     "\u2069",
 )
 _FAMILY_EMOJI = "👨‍👩‍👧"
+_HEART_FIRE = "❤️‍🔥"
+_HEART_FIRE_PLAIN = "❤️🔥"
+_SPAIN = "🇪🇸"
+_NKO_ZWNJ = "ߓ\u200cߒ"
+_MONGOL_ZWNJ = "ᠠ\u200cᠯ"
+_SYRIAC_ALAPH = "ܒ\u200cܐ"
+_ADLAM_ZWNJ = "𞤢\u200c𞤣"
+_ARABIC_EXT_B = "ب\u200c\u08c8"
+_MANDAIC_ZWNJ = "ࡁ\u200cࡊ"
+_BEH_FATHA_ZWNJ = "ب\u064e\u200cب"
+
+# (entrada, clave esperada). La versión sin ZWJ/ZWNJ se compara en el test.
+_NAME_KEY_CASES: tuple[tuple[str, str], ...] = (
+    ("Piano", "Piano"),
+    ("Pia\u200dno", "Piano"),
+    ("Pia\u200cno", "Piano"),
+    ("Clase\u200d de canto", "Clase de canto"),
+    ("Pi\u00adano", "Piano"),
+    ("क्ष", "क्ष"),
+    (_DEVANAGARI_ZWJ, _DEVANAGARI_ZWJ),
+    (_DEVANAGARI_ZWNJ, _DEVANAGARI_ZWNJ),
+    ("क्\u00ad\u200dष", _DEVANAGARI_ZWJ),
+    ("😀‍x", "😀x"),
+    (_HEART_FIRE, _HEART_FIRE),
+    (_HEART_FIRE_PLAIN, _HEART_FIRE_PLAIN),
+    ("اب", "اب"),
+    ("ا\u200cب", "اب"),
+    ("دب", "دب"),
+    ("د\u200cب", "دب"),
+    ("وا", "وا"),
+    ("و\u200cا", "وا"),
+    ("بء", "بء"),
+    ("ب\u200cء", "بء"),
+    ("©®", "©®"),
+    ("©\u200d®", "©®"),
+    (_SPAIN, _SPAIN),
+    ("🇪\u200d🇸", _SPAIN),
+    ("ب\u200cب", "ب\u200cب"),
+    (_BEH_FATHA_ZWNJ, _BEH_FATHA_ZWNJ),
+    (_NKO_ZWNJ, _NKO_ZWNJ),
+    (_MONGOL_ZWNJ, _MONGOL_ZWNJ),
+    (_SYRIAC_ALAPH, _SYRIAC_ALAPH),
+    (_ADLAM_ZWNJ, _ADLAM_ZWNJ),
+    (_ARABIC_EXT_B, _ARABIC_EXT_B),
+    (_MANDAIC_ZWNJ, _MANDAIC_ZWNJ),
+    (_FAMILY_EMOJI, _FAMILY_EMOJI),
+    ("می‌خواهم", "می‌خواهم"),
+)
 
 _LEGITIMATE_CF_NAMES: tuple[tuple[str, str], ...] = (
     ("👨‍👩‍👧", "👨‍👩‍👧"),
@@ -632,10 +681,30 @@ def test_normalize_category_name_nfc_spaces_and_invisibles() -> None:
     assert category_name_key("می‌خواهم") != category_name_key("میخواهم")
     for char in _CF_STRIP_CHARS:
         assert category_name_key(f"a{char}b") == "ab"
+    with pytest.raises(ValueError, match="unassigned"):
+        normalize_category_name("a\u0378b")
+    with pytest.raises(ValueError, match="unassigned"):
+        normalize_category_description("a\u0378b")
+    if unicodedata.unidata_version.startswith("16."):
+        with pytest.raises(ValueError, match="unassigned"):
+            normalize_category_name("a\u1acfb")
     assert len("x" * 121) == 121
     with pytest.raises(ValueError):
         normalize_category_name("x" * 121)
     assert normalize_category_name("x" * 120) == "x" * 120
+
+
+@pytest.mark.parametrize(("raw", "expected"), _NAME_KEY_CASES)
+def test_name_key_table_matches_and_plain_joiner_variant(
+    raw: str, expected: str
+) -> None:
+    assert category_name_key(raw) == expected
+    plain = raw.replace("\u200d", "").replace("\u200c", "")
+    if raw != plain:
+        if expected == category_name_key(plain):
+            assert category_name_key(raw) == category_name_key(plain)
+        else:
+            assert category_name_key(raw) != category_name_key(plain)
 
 
 async def test_name_nfc_nfd_and_double_space_collide(
@@ -665,7 +734,7 @@ async def test_name_rejects_zero_width_and_nul(
     assert "name" in zwsp.json()["fields"]
 
     nul = await session_client.post(_ADMIN, json={"name": "a\x00b"})
-    assert nul.status_code in {400, 422}
+    assert nul.status_code == 400
     assert nul.status_code != 500
     if nul.status_code == 400:
         assert nul.json()["error"] == "validation"
@@ -713,6 +782,20 @@ async def test_name_rejects_zero_width_and_nul(
         f"{_BLACK_FLAG}\U000e0020\U000e007f",
         "".join(chr(0xE0000 + ord(char)) for char in "gbeng") + "\U000e007f",
         _BLACK_FLAG + "".join(chr(0xE0000 + ord(char)) for char in "gbeng"),
+        _BLACK_FLAG
+        + "".join(chr(0xE0000 + ord(char)) for char in "zzz")
+        + "\U000e007f",
+        _BLACK_FLAG
+        + "".join(chr(0xE0000 + ord(char)) for char in "ignor")
+        + "\U000e007f",
+        _BLACK_FLAG + "".join(chr(0xE0000 + ord(char)) for char in "gb") + "\U000e007f",
+        _BLACK_FLAG
+        + "".join(chr(0xE0000 + ord(char)) for char in "gbengx")
+        + "\U000e007f",
+        _BLACK_FLAG
+        + "".join(chr(0xE0000 + ord(char)) for char in "gb1")
+        + "\U000e007f",
+        "a" + "".join(chr(0xE0000 + ord(char)) for char in "gbeng") + "\U000e007f",
     ):
         response = await session_client.post(_ADMIN, json={"name": payload})
         assert response.status_code == 400
@@ -738,14 +821,14 @@ async def test_nfd_length_and_nfc_expansion(
 
     nfd_over = unicodedata.normalize("NFD", "é" * 121)
     too_nfd = await session_client.post(_ADMIN, json={"name": nfd_over})
-    assert too_nfd.status_code in {400, 422}
+    assert too_nfd.status_code == 400
     assert too_nfd.status_code != 500
 
     huge = await session_client.post(
         _ADMIN,
         json={"name": "Ok", "description": "\u0344" * 2000},
     )
-    assert huge.status_code in {400, 422}
+    assert huge.status_code == 400
     assert huge.status_code != 500
 
     desc_nfd = unicodedata.normalize("NFD", "é" * 2000)
@@ -754,7 +837,7 @@ async def test_nfd_length_and_nfc_expansion(
     assert with_desc["description"] == "é" * 2000
 
     too_long = await session_client.post(_ADMIN, json={"name": "n" * 121})
-    assert too_long.status_code in {400, 422}
+    assert too_long.status_code == 400
     assert too_long.status_code != 500
     created_max = await _create(session_client, name="n" * 120)
     assert created_max["name"] == "n" * 120
@@ -771,21 +854,21 @@ async def test_surrogates_are_validation_not_500(
         content='{"name":"Con surrogate","description":"a\\udc00"}',
         headers=headers,
     )
-    assert desc.status_code in {400, 422}
+    assert desc.status_code == 400
     assert desc.status_code != 500
     put_desc = await session_client.put(
         f"{_ADMIN}/{created['id']}",
         content='{"description":"b\\udc00"}',
         headers=headers,
     )
-    assert put_desc.status_code in {400, 422}
+    assert put_desc.status_code == 400
     assert put_desc.status_code != 500
     put_name = await session_client.put(
         f"{_ADMIN}/{created['id']}",
         content='{"name":"c\\udc00"}',
         headers=headers,
     )
-    assert put_name.status_code in {400, 422}
+    assert put_name.status_code == 400
     assert put_name.status_code != 500
 
 
@@ -797,7 +880,7 @@ async def test_nul_description_is_validation(
         _ADMIN,
         json={"name": "Nulo", "description": "ok\x00no"},
     )
-    assert response.status_code in {400, 422}
+    assert response.status_code == 400
     assert response.status_code != 500
 
 
@@ -864,6 +947,112 @@ async def test_significant_zwj_zwnj_stay_distinct(
     assert zwnj["name"] == _DEVANAGARI_ZWNJ
     persian = await _create(session_client, name="می‌خواهم")
     assert persian["name"] == "می‌خواهم"
+    for payload in (
+        _NKO_ZWNJ,
+        _MONGOL_ZWNJ,
+        _SYRIAC_ALAPH,
+        _ADLAM_ZWNJ,
+        _ARABIC_EXT_B,
+        _MANDAIC_ZWNJ,
+        _HEART_FIRE,
+    ):
+        created = await _create(session_client, name=payload)
+        assert created["name"] == payload
+        again = await session_client.post(_ADMIN, json={"name": payload})
+        assert again.status_code == 409
+
+
+async def test_contextj_spoof_collides_with_plain(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    pairs = (
+        ("اب", "ا\u200cب"),
+        ("دب", "د\u200cب"),
+        ("وا", "و\u200cا"),
+        ("بء", "ب\u200cء"),
+        ("©®", "©\u200d®"),
+        (_SPAIN, "🇪\u200d🇸"),
+    )
+    for plain, spoofed in pairs:
+        created = await _create(session_client, name=plain)
+        clash = await session_client.post(_ADMIN, json={"name": spoofed})
+        assert clash.status_code == 409, spoofed
+        assert clash.json() == {"error": "category_name_taken"}
+        listed = await session_client.delete(f"{_ADMIN}/{created['id']}")
+        assert listed.status_code == 204
+
+
+async def test_root_and_child_may_share_name(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    root = await _create(session_client, name="Compartido")
+    child = await _create(session_client, name="Compartido", parent_id=root["id"])
+    assert child["parentId"] == root["id"]
+    assert child["name"] == root["name"]
+
+
+async def test_put_sort_order_repairs_desynced_name_key(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    row_id = await db_session.scalar(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) "
+            "VALUES ('Laud', 'viola', 0) RETURNING id"
+        )
+    )
+    blocked = await session_client.post(_ADMIN, json={"name": "Viola"})
+    assert blocked.status_code == 409
+    response = await session_client.put(
+        f"{_ADMIN}/{row_id}",
+        json={"sortOrder": 7},
+    )
+    assert response.status_code == 200
+    assert response.json()["sortOrder"] == 7
+    stored = await db_session.scalar(
+        text("SELECT name_key FROM categories WHERE id = :id"),
+        {"id": row_id},
+    )
+    assert stored == category_name_key("Laud")
+    viola = await _create(session_client, name="Viola")
+    assert viola["name"] == "Viola"
+    clash = await session_client.post(_ADMIN, json={"name": "Laud"})
+    assert clash.status_code == 409
+
+
+async def test_unassigned_code_point_is_validation(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    response = await session_client.post(_ADMIN, json={"name": "a\u0378b"})
+    assert response.status_code == 400
+    assert response.json()["error"] == "validation"
+    desc = await session_client.post(
+        _ADMIN, json={"name": "CnDesc", "description": "a\u0378b"}
+    )
+    assert desc.status_code == 400
+
+
+async def test_audit_category_name_keys_reports_diff_and_collision(
+    db_session: AsyncSession,
+) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('Laud', 'viola', 0), "
+            "('Piano', 'piano', 1), "
+            "('Pia\u200dno', 'piajoiner', 2)"
+        )
+    )
+    report = await audit_category_name_keys(db_session)
+    assert not report.ok()
+    stored = {item.name: item.stored for item in report.mismatches}
+    assert stored["Laud"] == "viola"
+    assert stored["Pia\u200dno"] == "piajoiner"
+    keys = {item.key for item in report.collisions}
+    assert "piano" in keys
 
 
 @pytest.mark.parametrize("mark", _BIDI_POINTS)
@@ -899,13 +1088,13 @@ async def test_description_rejects_bidi_fffc_and_isolated(
     response = await session_client.post(
         _ADMIN, json={"name": "DescNueva", "description": payload}
     )
-    assert response.status_code in {400, 422}
+    assert response.status_code == 400
     assert response.status_code != 500
     put = await session_client.put(
         f"{_ADMIN}/{created['id']}",
         json={"description": payload},
     )
-    assert put.status_code in {400, 422}
+    assert put.status_code == 400
     assert put.status_code != 500
 
 
@@ -978,7 +1167,7 @@ async def test_put_null_name_is_validation(
         f"{_ADMIN}/{created['id']}",
         json={"name": None},
     )
-    assert response.status_code in {400, 422}
+    assert response.status_code == 400
     assert response.status_code != 500
     if response.status_code == 400:
         assert response.json()["error"] == "validation"
@@ -997,7 +1186,7 @@ async def test_put_null_sort_order_is_validation(
         f"{_ADMIN}/{created['id']}",
         json={"sortOrder": None},
     )
-    assert response.status_code in {400, 422}
+    assert response.status_code == 400
     assert response.status_code != 500
     if response.status_code == 400:
         assert response.json()["error"] == "validation"
@@ -1016,13 +1205,13 @@ async def test_put_null_payload_is_validated_before_lookup(
         f"{_ADMIN}/{missing}",
         json={"sortOrder": None},
     )
-    assert sort_null.status_code in {400, 422}
+    assert sort_null.status_code == 400
     assert sort_null.status_code != 404
     name_null = await session_client.put(
         f"{_ADMIN}/{missing}",
         json={"name": None},
     )
-    assert name_null.status_code in {400, 422}
+    assert name_null.status_code == 400
     assert name_null.status_code != 404
 
 
@@ -1142,6 +1331,22 @@ async def test_unique_indexes_filter_deleted_and_name_is_citext(
         )
     )
     assert generated == "NEVER"
+    nullable = await db_session.scalar(
+        text(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'categories' "
+            "AND column_name = 'name_key'"
+        )
+    )
+    default = await db_session.scalar(
+        text(
+            "SELECT column_default FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'categories' "
+            "AND column_name = 'name_key'"
+        )
+    )
+    assert nullable == "NO"
+    assert default is None
     fn = await db_session.scalar(
         text(
             "SELECT 1 FROM pg_proc p "

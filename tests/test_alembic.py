@@ -379,6 +379,57 @@ def test_0004_does_not_import_app_schemas() -> None:
     source = path.read_text(encoding="utf-8")
     assert "app.schemas" not in source
     assert "CREATE FUNCTION" not in source
+    assert "DROP FUNCTION IF EXISTS public.category_name_key(public.citext)" in source
+    assert "78b08eaf" in source
+    assert "8924e0a0" in source
+    assert "510acf77" in source
+
+
+def test_downgrade_0004_drops_legacy_name_key_function(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = alembic_config(dsn)
+    command.upgrade(config, "head")
+
+    async def install_legacy() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "CREATE FUNCTION public.category_name_key(value public.citext) "
+                        "RETURNS public.citext LANGUAGE sql IMMUTABLE AS $$ "
+                        "SELECT value $$"
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(install_legacy())
+    assert (
+        _scalar(
+            dsn,
+            "SELECT 1 FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'public' AND p.proname = 'category_name_key'",
+        )
+        == 1
+    )
+    command.downgrade(config, "0003_system_roles")
+    assert (
+        _scalar(
+            dsn,
+            "SELECT 1 FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'public' AND p.proname = 'category_name_key'",
+        )
+        is None
+    )
 
 
 def test_alembic_revision_chain_is_linear() -> None:

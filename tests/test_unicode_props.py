@@ -1,0 +1,36 @@
+import runpy
+from pathlib import Path
+
+from app.schemas.unicode_props import (
+    EMOJI_PRESENTATION,
+    EXTENDED_PICTOGRAPHIC,
+    JOINING_D,
+    JOINING_L,
+    JOINING_R,
+    JOINING_T,
+    REGIONAL_INDICATOR,
+    UCD_VERSION,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_generated_unicode_tables_match_vendored_ucd() -> None:
+    generated = runpy.run_path(str(ROOT / "scripts" / "generate_unicode_tables.py"))
+    assert generated["UCD_VERSION"] == UCD_VERSION == "16.0.0"
+    tables = generated["parse_tables"](generated["UCD_DIR"])
+    assert tables["JOINING_L"] == JOINING_L
+    assert tables["JOINING_D"] == JOINING_D
+    assert tables["JOINING_R"] == JOINING_R
+    assert tables["JOINING_T"] == JOINING_T
+    assert tables["EXTENDED_PICTOGRAPHIC"] == EXTENDED_PICTOGRAPHIC
+    assert tables["EMOJI_PRESENTATION"] == EMOJI_PRESENTATION
+    assert tables["REGIONAL_INDICATOR"] == REGIONAL_INDICATOR
+    assert any(start <= 0x0710 <= end for start, end in JOINING_R)
+    assert any(start <= 0x07CA <= end for start, end in JOINING_D)
+    assert any(start <= 0x1820 <= end for start, end in JOINING_D)
+    assert any(start <= 0x1E922 <= end for start, end in JOINING_D)
+    assert any(start <= 0x0841 <= end for start, end in JOINING_D)
+    assert any(start <= 0x08C8 <= end for start, end in JOINING_D)
+    assert any(start <= 0x2600 <= end for start, end in EXTENDED_PICTOGRAPHIC)
+    assert any(start <= 0x2764 <= end for start, end in EXTENDED_PICTOGRAPHIC)
