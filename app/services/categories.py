@@ -7,10 +7,17 @@ from typing import NoReturn
 from uuid import UUID
 
 from sqlalchemy import func, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.exceptions import CategoryNameTaken, CategoryNotEmpty, NotFound, Validation
+from app.exceptions import (
+    CategoryNameTaken,
+    CategoryNotEmpty,
+    NotFound,
+    Validation,
+    conflict_from_sqlstate,
+    pg_sqlstate,
+)
 from app.models import Category
 from app.schemas.categories import (
     CategoryCreate,
@@ -20,8 +27,6 @@ from app.schemas.categories import (
     clip_to_grapheme_limit,
 )
 
-# Un solo candado transaccional para todo el árbol (ticket #400).
-_CATEGORY_TREE_LOCK_KEY = (400, 1)
 _NAME_CONSTRAINTS = (
     "uq_categories_root_name_active",
     "uq_categories_parent_id_name_key",
@@ -62,14 +67,15 @@ def _raise_from_integrity(exc: IntegrityError) -> NoReturn:
     raise exc
 
 
-async def _lock_category_tree(session: AsyncSession) -> None:
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(:classid, :objid)"),
-        {
-            "classid": _CATEGORY_TREE_LOCK_KEY[0],
-            "objid": _CATEGORY_TREE_LOCK_KEY[1],
-        },
-    )
+def _raise_from_db(exc: DBAPIError) -> NoReturn:
+    """40P01/40001 → 409 snake_case; el resto de IntegrityError como siempre."""
+
+    mapped = conflict_from_sqlstate(pg_sqlstate(exc))
+    if mapped is not None:
+        raise mapped from exc
+    if isinstance(exc, IntegrityError):
+        _raise_from_integrity(exc)
+    raise exc
 
 
 async def _lock_category(session: AsyncSession, category_id: UUID) -> Category | None:
@@ -160,7 +166,6 @@ async def list_categories(session: AsyncSession) -> list[Category]:
 
 
 async def create_category(session: AsyncSession, body: CategoryCreate) -> Category:
-    await _lock_category_tree(session)
     if body.parent_id is not None:
         await _assert_parent_is_root(session, body.parent_id)
     if await _name_taken(session, body.name, body.parent_id):
@@ -181,8 +186,8 @@ async def create_category(session: AsyncSession, body: CategoryCreate) -> Catego
         async with session.begin_nested():
             session.add(row)
             await session.flush()
-    except IntegrityError as exc:
-        _raise_from_integrity(exc)
+    except DBAPIError as exc:
+        _raise_from_db(exc)
     await session.refresh(row)
     return row
 
@@ -200,7 +205,6 @@ async def update_category(
             raise Validation(fields=["sortOrder"])
         next_sort = body.sort_order
     changing_parent = "parent_id" in fields
-    await _lock_category_tree(session)
     row = await _lock_category(session, category_id)
     if row is None:
         raise NotFound()
@@ -228,21 +232,23 @@ async def update_category(
     try:
         async with session.begin_nested():
             await session.flush()
-    except IntegrityError as exc:
-        _raise_from_integrity(exc)
+    except DBAPIError as exc:
+        _raise_from_db(exc)
     await session.refresh(row)
     return row
 
 
 async def delete_category(session: AsyncSession, category_id: UUID) -> None:
-    await _lock_category_tree(session)
     row = await _lock_category(session, category_id)
     if row is None:
         raise NotFound()
     if await _has_active_children(session, category_id):
         raise CategoryNotEmpty()
     row.deleted_at = datetime.now(UTC)
-    await session.flush()
+    try:
+        await session.flush()
+    except DBAPIError as exc:
+        _raise_from_db(exc)
 
 
 @dataclass(frozen=True)
@@ -332,7 +338,6 @@ async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
     """
 
     await session.execute(text("LOCK TABLE categories IN EXCLUSIVE MODE"))
-    await _lock_category_tree(session)
     rows = list(await session.scalars(select(Category).order_by(Category.id)))
     live = [row for row in rows if row.deleted_at is None]
     folded = await _citext_fold(session, [category_name_key(row.name) for row in live])
@@ -384,10 +389,13 @@ async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
         if row.name_key != expected:
             changing.append((row, expected))
     if changing:
-        for row, _expected in changing:
-            row.name_key = str(row.id)
-        await session.flush()
-        for row, expected in changing:
-            row.name_key = expected
-        await session.flush()
+        try:
+            for row, _expected in changing:
+                row.name_key = str(row.id)
+            await session.flush()
+            for row, expected in changing:
+                row.name_key = expected
+            await session.flush()
+        except DBAPIError as exc:
+            _raise_from_db(exc)
     return await audit_category_name_keys(session)

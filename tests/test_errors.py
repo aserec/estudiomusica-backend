@@ -124,6 +124,17 @@ def test_domain_validation_stays_400_not_422(probe_client: TestClient) -> None:
     assert response.json() == {"error": "validation", "fields": ["email"]}
 
 
+def test_pg_deadlock_and_serialization_are_409_not_500(
+    probe_client: TestClient,
+) -> None:
+    deadlock = probe_client.get("/api/v1/_test/pg-deadlock")
+    assert deadlock.status_code == 409
+    assert deadlock.json() == {"error": "deadlock_detected"}
+    serial = probe_client.get("/api/v1/_test/pg-serialization")
+    assert serial.status_code == 409
+    assert serial.json() == {"error": "serialization_failure"}
+
+
 def test_unhandled_error_is_500_without_message(client: TestClient) -> None:
     response = client.get("/api/v1/_test/boom")
 

@@ -208,6 +208,24 @@ def _mount_probes(application: FastAPI) -> None:
     def raise_boom() -> None:
         raise RuntimeError("secret-leak")
 
+    @application.get("/api/v1/_test/pg-deadlock")
+    def raise_pg_deadlock() -> None:
+        from sqlalchemy.exc import DBAPIError
+
+        class _PgError(Exception):
+            sqlstate = "40P01"
+
+        raise DBAPIError("SELECT 1", {}, _PgError())
+
+    @application.get("/api/v1/_test/pg-serialization")
+    def raise_pg_serialization() -> None:
+        from sqlalchemy.exc import DBAPIError
+
+        class _PgError(Exception):
+            sqlstate = "40001"
+
+        raise DBAPIError("SELECT 1", {}, _PgError())
+
     @application.get("/api/v1/_test/validation")
     def raise_validation() -> None:
         raise Validation(fields=["email"])

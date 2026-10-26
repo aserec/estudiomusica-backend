@@ -117,3 +117,42 @@ class CategoryNameTaken(Conflict):
     """409 {error: category_name_taken}."""
 
     error = "category_name_taken"
+
+
+class DeadlockDetected(Conflict):
+    """409 {error: deadlock_detected}."""
+
+    error = "deadlock_detected"
+
+
+class SerializationFailure(Conflict):
+    """409 {error: serialization_failure}."""
+
+    error = "serialization_failure"
+
+
+def pg_sqlstate(exc: BaseException) -> str:
+    """Lee ``sqlstate``/``pgcode`` de asyncpg o de la cadena de causas."""
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        for attr in ("sqlstate", "pgcode"):
+            value = getattr(current, attr, None)
+            if isinstance(value, str) and value:
+                return value
+        orig = getattr(current, "orig", None)
+        if isinstance(orig, BaseException):
+            current = orig
+            continue
+        current = current.__cause__ or current.__context__
+    return ""
+
+
+def conflict_from_sqlstate(state: str) -> Conflict | None:
+    if state == "40P01":
+        return DeadlockDetected()
+    if state == "40001":
+        return SerializationFailure()
+    return None

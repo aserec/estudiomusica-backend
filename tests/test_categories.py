@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import os
 import shutil
 import subprocess
@@ -29,7 +28,6 @@ from app.schemas.categories import (
     normalize_category_name,
 )
 from app.services.categories import (
-    _CATEGORY_TREE_LOCK_KEY,
     NameKeyAudit,
     NameKeyCollision,
     _citext_fold,
@@ -1770,20 +1768,9 @@ async def test_citext_fold_more_than_32767_values(db_session: AsyncSession) -> N
     assert folded == [value.lower() for value in values]
 
 
-async def test_fix_takes_advisory_lock(db_session: AsyncSession) -> None:
+async def test_fix_takes_exclusive_table_lock(db_session: AsyncSession) -> None:
     report = await fix_category_name_keys(db_session)
     assert report.ok()
-    held = (
-        await db_session.execute(
-            text(
-                "SELECT classid, objid FROM pg_locks "
-                "WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted"
-            )
-        )
-    ).all()
-    assert (_CATEGORY_TREE_LOCK_KEY[0], _CATEGORY_TREE_LOCK_KEY[1]) in {
-        (row.classid, row.objid) for row in held
-    }
     modes = {
         row.mode
         for row in (
@@ -1797,15 +1784,188 @@ async def test_fix_takes_advisory_lock(db_session: AsyncSession) -> None:
         ).all()
     }
     assert "ExclusiveLock" in modes
+    advisory = await db_session.scalar(
+        text(
+            "SELECT count(*) FROM pg_locks "
+            "WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted"
+        )
+    )
+    assert int(advisory or 0) == 0
 
 
-def test_fix_locks_before_select() -> None:
-    source = inspect.getsource(fix_category_name_keys)
-    lock_at = source.index("LOCK TABLE categories IN EXCLUSIVE MODE")
-    advisory_at = source.index("_lock_category_tree")
-    select_at = source.index("select(Category)")
-    assert lock_at < select_at
-    assert advisory_at < select_at
+def test_fix_and_api_have_no_deadlock_e_and_h(
+    require_postgres: Any,
+    migrated_test_database: None,
+) -> None:
+    """Escenarios E y H de conc2.py: 0 deadlocks, 0 errores, sin pisar ediciones."""
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    tracked: list[uuid.UUID] = []
+
+    async def deadlocks(session: Any) -> int:
+        query = text(
+            "SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()"
+        )
+        return int(await session.scalar(query) or 0)
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret(), pool_size=12, max_overflow=0)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as setup:
+                await setup.execute(text("DELETE FROM categories"))
+                await setup.execute(
+                    text(
+                        "INSERT INTO categories (name, name_key, sort_order) VALUES "
+                        "('E1', 'e1', 0), ('e1', 'e2', 1)"
+                    )
+                )
+                await setup.commit()
+
+            before = 0
+            async with factory() as count:
+                before = await deadlocks(count)
+
+            async with factory() as writer:
+                created = await create_category(
+                    writer, CategoryCreate.model_validate({"name": "Nueva raíz"})
+                )
+                tracked.append(created.id)
+                pending = asyncio.create_task(_run_fix(factory))
+                await asyncio.sleep(0.4)
+                assert pending.done() is False
+                await writer.commit()
+                report = await pending
+                assert report.ok()
+
+            async with factory() as check:
+                names = {
+                    row.name
+                    for row in (
+                        await check.execute(text("SELECT name::text FROM categories"))
+                    ).all()
+                }
+                assert "Nueva raíz" in names
+                after = await deadlocks(check)
+                assert after == before
+
+            async with factory() as setup:
+                await setup.execute(text("DELETE FROM categories"))
+                await setup.execute(
+                    text(
+                        "INSERT INTO categories (name, name_key, sort_order) VALUES "
+                        "('H', 'h1', 0), ('h', 'h2', 1)"
+                    )
+                )
+                for index in range(6):
+                    await setup.execute(
+                        text(
+                            "INSERT INTO categories (name, name_key, sort_order) "
+                            "VALUES (:name, :key, :sort)"
+                        ),
+                        {"name": f"R{index}", "key": f"r{index}", "sort": index + 2},
+                    )
+                await setup.commit()
+                listed = await setup.execute(
+                    text("SELECT name::text, id FROM categories")
+                )
+                ids = {row[0]: row[1] for row in listed.all()}
+                tracked.extend(ids.values())
+
+            async with factory() as count:
+                before = await deadlocks(count)
+
+            stats: dict[str, Any] = {
+                "fix_ok": 0,
+                "fix_err": 0,
+                "api_ok": 0,
+                "api_err": [],
+            }
+            stop = asyncio.Event()
+
+            async def fixloop() -> None:
+                while not stop.is_set():
+                    try:
+                        async with factory() as session:
+                            await fix_category_name_keys(session)
+                            await session.commit()
+                        stats["fix_ok"] += 1
+                    except Exception:  # noqa: BLE001
+                        stats["fix_err"] += 1
+
+            async def api(index: int) -> None:
+                kind = index % 3
+                try:
+                    async with factory() as session:
+                        if kind == 0:
+                            fresh = f"N{index}-{uuid.uuid4().hex[:4]}"
+                            row = await create_category(
+                                session,
+                                CategoryCreate.model_validate({"name": fresh}),
+                            )
+                            tracked.append(row.id)
+                        elif kind == 1:
+                            renamed = f"R{index % 6}x{index}"
+                            await update_category(
+                                session,
+                                ids[f"R{index % 6}"],
+                                CategoryUpdate.model_validate({"name": renamed}),
+                            )
+                        else:
+                            doomed = f"D{index}-{uuid.uuid4().hex[:4]}"
+                            row = await create_category(
+                                session,
+                                CategoryCreate.model_validate({"name": doomed}),
+                            )
+                            tracked.append(row.id)
+                            await delete_category(session, row.id)
+                        await session.commit()
+                    stats["api_ok"] += 1
+                except Exception as exc:  # noqa: BLE001
+                    stats["api_err"].append(type(exc).__name__)
+
+            fixer = asyncio.create_task(fixloop())
+            sem = asyncio.Semaphore(8)
+
+            async def limited(index: int) -> None:
+                async with sem:
+                    await api(index)
+
+            await asyncio.gather(*(limited(index) for index in range(24)))
+            stop.set()
+            await fixer
+
+            async with factory() as check:
+                after = await deadlocks(check)
+                renamed = await check.scalar(
+                    text("SELECT name::text FROM categories WHERE id = :id"),
+                    {"id": ids["R0"]},
+                )
+            assert after == before
+            assert stats["api_err"] == []
+            assert stats["fix_err"] == 0
+            assert stats["api_ok"] == 24
+            assert renamed is None or not str(renamed).startswith("h (dup")
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+async def _run_fix(factory: Any) -> Any:
+    async with factory() as session:
+        await session.execute(text("SET LOCAL lock_timeout = '8s'"))
+        report = await fix_category_name_keys(session)
+        await session.commit()
+        return report
 
 
 async def test_fix_prefers_already_normalized_keeper(
@@ -2423,7 +2583,7 @@ def test_tree_lock_is_transactional_not_session(
     require_postgres: Any,
     migrated_test_database: None,
 ) -> None:
-    """Tras commit/rollback no queda advisory lock; otra sesión puede tomarlo."""
+    """LOCK TABLE de --fix se libera al commit; no queda candado de sesión."""
 
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -2433,34 +2593,21 @@ def test_tree_lock_is_transactional_not_session(
     assert isinstance(dsn, RedactedDsn)
     suffix = uuid.uuid4().hex[:8]
     tracked: list[uuid.UUID] = []
-    classid, objid = _CATEGORY_TREE_LOCK_KEY
 
-    async def try_tree_lock(session: Any) -> bool:
-        got = await session.scalar(
-            text("SELECT pg_try_advisory_xact_lock(:classid, :objid)"),
-            {"classid": classid, "objid": objid},
-        )
-        return bool(got)
-
-    async def leftover_locks(session: Any) -> int:
-        return int(
-            await session.scalar(
-                text(
-                    "SELECT count(*) FROM pg_locks "
-                    "WHERE locktype = 'advisory' "
-                    "AND classid = :classid AND objid = :objid"
-                ),
-                {"classid": classid, "objid": objid},
-            )
-            or 0
-        )
-
-    async def assert_lock_released(factory: Any) -> None:
-        async with factory() as probe:
-            assert await leftover_locks(probe) == 0
-            assert await try_tree_lock(probe) is True
-            await probe.rollback()
-            assert await leftover_locks(probe) == 0
+    async def exclusive_held(session: Any) -> bool:
+        modes = {
+            row.mode
+            for row in (
+                await session.execute(
+                    text(
+                        "SELECT mode FROM pg_locks "
+                        "WHERE locktype = 'relation' AND granted "
+                        "AND relation = 'categories'::regclass"
+                    )
+                )
+            ).all()
+        }
+        return "ExclusiveLock" in modes
 
     async def run() -> None:
         engine = create_async_engine(dsn.secret(), pool_size=4, max_overflow=0)
@@ -2471,15 +2618,6 @@ def test_tree_lock_is_transactional_not_session(
                     setup, CategoryCreate(name=f"lockp-{suffix}")
                 )
                 tracked.append(parent.id)
-                child = await create_category(
-                    setup,
-                    CategoryCreate(name=f"lockc-{suffix}", parent_id=parent.id),
-                )
-                tracked.append(child.id)
-                other = await create_category(
-                    setup, CategoryCreate(name=f"locko-{suffix}")
-                )
-                tracked.append(other.id)
                 await setup.commit()
 
             async with factory() as holder:
@@ -2488,54 +2626,20 @@ def test_tree_lock_is_transactional_not_session(
                     CategoryCreate(name=f"lockn-{suffix}", parent_id=parent.id),
                 )
                 tracked.append(born.id)
-                async with factory() as probe:
-                    assert await try_tree_lock(probe) is False
-                    other_key = await probe.scalar(
-                        text("SELECT pg_try_advisory_xact_lock(:classid, :objid)"),
-                        {"classid": classid, "objid": 99},
-                    )
-                    assert bool(other_key) is True
-                    await probe.rollback()
-
-                async def blocked_create() -> str:
-                    async with factory() as waiter:
-                        row = await create_category(
-                            waiter,
-                            CategoryCreate(name=f"lockw-{suffix}", parent_id=parent.id),
-                        )
-                        tracked.append(row.id)
-                        await waiter.commit()
-                    return "ok"
-
-                pending = asyncio.create_task(blocked_create())
+                pending = asyncio.create_task(_run_fix(factory))
                 await asyncio.sleep(0.4)
                 assert pending.done() is False
                 await holder.commit()
-                assert await pending == "ok"
-                await assert_lock_released(factory)
+                report = await pending
+                assert report.ok()
 
             async with factory() as free:
-                assert await try_tree_lock(free) is True
-                await free.rollback()
-                await assert_lock_released(factory)
-
-            async with factory() as holder:
-                await update_category(
-                    holder, child.id, CategoryUpdate(parent_id=other.id)
+                assert await exclusive_held(free) is False
+                extra = await create_category(
+                    free, CategoryCreate(name=f"locko-{suffix}")
                 )
-                async with factory() as waiter:
-                    assert await try_tree_lock(waiter) is False
-                    await waiter.rollback()
-                await holder.commit()
-                await assert_lock_released(factory)
-
-            async with factory() as holder:
-                await delete_category(holder, child.id)
-                async with factory() as waiter:
-                    assert await try_tree_lock(waiter) is False
-                    await waiter.rollback()
-                await holder.commit()
-                await assert_lock_released(factory)
+                tracked.append(extra.id)
+                await free.commit()
         finally:
             await engine.dispose()
 
@@ -2662,7 +2766,6 @@ def test_delete_takes_tree_lock_before_row(
     assert isinstance(dsn, RedactedDsn)
     suffix = uuid.uuid4().hex[:8]
     tracked: list[uuid.UUID] = []
-    classid, objid = _CATEGORY_TREE_LOCK_KEY
 
     async def run() -> None:
         engine = create_async_engine(dsn.secret(), pool_size=3, max_overflow=0)
@@ -2691,13 +2794,6 @@ def test_delete_takes_tree_lock_before_row(
                 pending = asyncio.create_task(do_delete())
                 await asyncio.sleep(0.4)
                 assert pending.done() is False
-                async with factory() as probe:
-                    got = await probe.scalar(
-                        text("SELECT pg_try_advisory_xact_lock(:classid, :objid)"),
-                        {"classid": classid, "objid": objid},
-                    )
-                    assert bool(got) is False
-                    await probe.rollback()
                 await holder.rollback()
                 assert await pending == "ok"
         finally:
