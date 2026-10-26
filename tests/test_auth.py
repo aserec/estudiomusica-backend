@@ -532,6 +532,32 @@ def test_production_test_role_is_not_superuser(
     assert asyncio.run(rolsuper()) is False
 
 
+def test_signup_commit_failure_returns_500_without_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+    db_client: TestClient,
+    migrated_test_database: None,
+) -> None:
+    """A1/A6/A7: signup real (sin override de _get_session) y commit fallido.
+
+    El override de conftest sustituye _get_session y ocultaba un 201+cookie
+    si el commit iba después de responder. SessionDep (scope=function)
+    hace el commit antes: 500 y ninguna cookie.
+    """
+
+    from sqlalchemy.ext.asyncio import AsyncSession as SAAsyncSession
+
+    async def _boom(self: SAAsyncSession) -> None:
+        raise RuntimeError("commit-failed")
+
+    monkeypatch.setattr(SAAsyncSession, "commit", _boom)
+    response = db_client.post("/api/v1/auth/signup", json=signup_body())
+    assert response.status_code == 500
+    cookie = set_cookie_header(response)
+    assert "session=" not in cookie.lower()
+    assert "set-cookie" not in {key.lower() for key in response.headers}
+    assert not response.cookies
+
+
 async def test_auth_session_row_is_created(
     session_client: Any, db_session: AsyncSession
 ) -> None:
