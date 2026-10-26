@@ -12,8 +12,11 @@ from app.schemas.unicode_props import (
     EMOJI_MODIFIER_BASE,
     EMOJI_PRESENTATION,
     EXTENDED_PICTOGRAPHIC,
+    GRAPHEME_CONTROL,
+    GRAPHEME_CR,
     GRAPHEME_EXTEND,
     GRAPHEME_L,
+    GRAPHEME_LF,
     GRAPHEME_LV,
     GRAPHEME_LVT,
     GRAPHEME_PREPEND,
@@ -259,6 +262,12 @@ def _gcb(char: str) -> str:
         return "ZWJ"
     if _RI_START <= code <= _RI_END:
         return "RI"
+    if _in_ranges(code, GRAPHEME_CR):
+        return "CR"
+    if _in_ranges(code, GRAPHEME_LF):
+        return "LF"
+    if _in_ranges(code, GRAPHEME_CONTROL):
+        return "Control"
     if _in_ranges(code, GRAPHEME_PREPEND):
         return "Prepend"
     if _in_ranges(code, GRAPHEME_EXTEND):
