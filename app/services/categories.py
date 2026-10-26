@@ -160,8 +160,8 @@ async def list_categories(session: AsyncSession) -> list[Category]:
 
 
 async def create_category(session: AsyncSession, body: CategoryCreate) -> Category:
+    await _lock_category_tree(session)
     if body.parent_id is not None:
-        await _lock_category_tree(session)
         await _assert_parent_is_root(session, body.parent_id)
     if await _name_taken(session, body.name, body.parent_id):
         raise CategoryNameTaken()
@@ -200,8 +200,7 @@ async def update_category(
             raise Validation(fields=["sortOrder"])
         next_sort = body.sort_order
     changing_parent = "parent_id" in fields
-    if changing_parent:
-        await _lock_category_tree(session)
+    await _lock_category_tree(session)
     row = await _lock_category(session, category_id)
     if row is None:
         raise NotFound()
@@ -330,6 +329,7 @@ async def fix_category_name_keys(session: AsyncSession) -> NameKeyAudit:
     Una sola transacción: el caller hace commit (el script usa ``begin()``).
     """
 
+    await session.execute(text("LOCK TABLE categories IN EXCLUSIVE MODE"))
     await _lock_category_tree(session)
     rows = list(await session.scalars(select(Category).order_by(Category.id)))
     live = [row for row in rows if row.deleted_at is None]

@@ -1677,6 +1677,129 @@ async def test_fix_takes_advisory_lock(db_session: AsyncSession) -> None:
     assert (_CATEGORY_TREE_LOCK_KEY[0], _CATEGORY_TREE_LOCK_KEY[1]) in {
         (row.classid, row.objid) for row in held
     }
+    modes = {
+        row.mode
+        for row in (
+            await db_session.execute(
+                text(
+                    "SELECT mode FROM pg_locks "
+                    "WHERE locktype = 'relation' AND pid = pg_backend_pid() "
+                    "AND granted AND relation = 'categories'::regclass"
+                )
+            )
+        ).all()
+    }
+    assert "ExclusiveLock" in modes
+
+
+def test_fix_does_not_clobber_concurrent_put_or_post(
+    require_postgres: Any,
+    migrated_test_database: None,
+) -> None:
+    """PUT 'y'→'Otro' y POST raíz 'z (dup 1)' en paralelo con --fix, como conc.py."""
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    tracked: list[uuid.UUID] = []
+
+    async def run_fix(factory: Any) -> Any:
+        async with factory() as session:
+            await session.execute(text("SET LOCAL lock_timeout = '8s'"))
+            report = await fix_category_name_keys(session)
+            await session.commit()
+            return report
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret(), pool_size=4, max_overflow=0)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as setup:
+                await setup.execute(text("DELETE FROM categories"))
+                await setup.execute(
+                    text(
+                        "INSERT INTO categories (name, name_key, sort_order) VALUES "
+                        "('Y', 'y-keep', 0), "
+                        "('y', 'y-old', 1)"
+                    )
+                )
+                ids = (
+                    await setup.execute(text("SELECT id, name FROM categories"))
+                ).all()
+                by_name = {row.name: row.id for row in ids}
+                tracked.extend(by_name.values())
+                await setup.commit()
+
+            async with factory() as writer:
+                await update_category(
+                    writer,
+                    by_name["y"],
+                    CategoryUpdate.model_validate({"name": "Otro"}),
+                )
+                pending = asyncio.create_task(run_fix(factory))
+                await asyncio.sleep(0.4)
+                assert pending.done() is False
+                await writer.commit()
+                report = await pending
+                assert report.ok()
+
+            async with factory() as check:
+                renamed = await check.scalar(
+                    text("SELECT name::text FROM categories WHERE id = :id"),
+                    {"id": by_name["y"]},
+                )
+                assert renamed == "Otro"
+
+            async with factory() as setup:
+                await setup.execute(text("DELETE FROM categories"))
+                await setup.execute(
+                    text(
+                        "INSERT INTO categories (name, name_key, sort_order) VALUES "
+                        "('Z', 'z-keep', 0), "
+                        "('z', 'z-old', 1)"
+                    )
+                )
+                tracked.extend(
+                    row[0]
+                    for row in (
+                        await setup.execute(text("SELECT id FROM categories"))
+                    ).all()
+                )
+                await setup.commit()
+
+            async with factory() as writer:
+                created = await create_category(
+                    writer, CategoryCreate.model_validate({"name": "z (dup 1)"})
+                )
+                tracked.append(created.id)
+                pending = asyncio.create_task(run_fix(factory))
+                await asyncio.sleep(0.4)
+                assert pending.done() is False
+                await writer.commit()
+                report = await pending
+                assert report.ok()
+
+            async with factory() as check:
+                names = [
+                    row.name
+                    for row in (
+                        await check.execute(
+                            text("SELECT name::text FROM categories ORDER BY name")
+                        )
+                    ).all()
+                ]
+                assert "z (dup 1)" in names
+                assert len(names) == 3
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
 
 
 def test_verify_script_exits_zero_and_fix(
