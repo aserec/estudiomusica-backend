@@ -74,7 +74,7 @@ def _effective_search_len(term: str) -> int:
 
 
 def _name_match(term: str) -> ColumnElement[bool]:
-    pattern = f"%{_escape_like(term)}%"
+    pattern = f"%{_escape_like(unicodedata.normalize('NFC', term))}%"
     display_name = func.concat(User.first_name, " ", User.last_name)
     return or_(
         User.first_name.ilike(pattern, escape="\\"),
