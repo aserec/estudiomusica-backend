@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Annotated, Any
 
 from fastapi import Depends
+from sqlalchemy import event
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import Session as SyncSession
 
 from app.config import get_settings
 
@@ -30,6 +32,7 @@ _ADAPTER_CALLABLE_KEYS = frozenset(
     }
 )
 _SSLROOTCERT_KEYS = frozenset({"sslrootcert"})
+_SSLMODE_KEYS = frozenset({"sslmode"})
 
 
 _QUERY_SECRET_KEYS = frozenset({"password", "sslpassword"})
@@ -98,9 +101,27 @@ def ssl_context_from_rootcert(cafile: str, ssl_value: object = None) -> ssl.SSLC
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_REQUIRED
         return ctx
+    # ssl=require + sslrootcert también verifica el hostname; más estricto
+    # que libpq (require no comprueba CA ni hostname).
     ctx.check_hostname = mode not in {"disable", "allow"}
     ctx.verify_mode = ssl.CERT_REQUIRED
     return ctx
+
+
+def _ssl_is_disabled(ssl_value: object) -> bool:
+    if ssl_value is False:
+        return True
+    return isinstance(ssl_value, str) and ssl_value.lower() in {"disable", "false"}
+
+
+def asyncpg_ssl_connect_arg(ssl_value: object, cafile: str | None) -> object:
+    """SSL del engine y de la sonda. Sin ``SSLContext`` si ssl es disable/false."""
+
+    if _ssl_is_disabled(ssl_value):
+        return False
+    if cafile:
+        return ssl_context_from_rootcert(cafile, ssl_value)
+    return ssl_value
 
 
 def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
@@ -109,7 +130,8 @@ def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
     Quita ``prepared_statement_cache_size`` (solo el adaptador). Quita
     ``async_creator_fn`` / ``prepared_statement_name_func`` solo si son
     callable; un str de la query se deja para que tumbe igual que la app.
-    ``sslmode`` pasa a ``ssl``. ``sslrootcert`` pasa a un ``SSLContext``.
+    ``sslmode`` pasa a ``ssl``. ``sslrootcert`` pasa a un ``SSLContext``
+    salvo si ``ssl`` es ``disable`` / ``false`` (misma regla que el engine).
     """
 
     kwargs: dict[str, Any] = {}
@@ -135,27 +157,32 @@ def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
         kwargs[key] = value
     if sslmode is not None and "ssl" not in kwargs:
         kwargs["ssl"] = sslmode
-    if sslrootcert and kwargs.get("ssl") not in {False, "disable"}:
-        kwargs["ssl"] = ssl_context_from_rootcert(sslrootcert, kwargs.get("ssl"))
+    if sslrootcert or "ssl" in kwargs:
+        kwargs["ssl"] = asyncpg_ssl_connect_arg(kwargs.get("ssl"), sslrootcert)
     return kwargs
 
 
 def asyncpg_url_and_connect_args(raw: str) -> tuple[str, dict[str, Any]]:
-    """Quita ``sslrootcert`` de la URL y lo pasa como ``SSLContext``."""
+    """Quita ``sslrootcert`` / ``sslmode`` de la URL (asyncpg no los acepta).
+
+    El SSL lo decide ``asyncpg_ssl_connect_arg``, la misma función que la sonda.
+    """
 
     parsed = make_url(raw)
     query = dict(parsed.query or {})
-    cafile = _query_scalar(query, "sslrootcert")
-    ssl_value = _query_scalar(query, "ssl")
+    prepared = prepare_asyncpg_connect_kwargs(query)
     connect_args: dict[str, Any] = {}
-    if cafile:
-        query = {
-            key: value
-            for key, value in query.items()
-            if str(key).lower() not in _SSLROOTCERT_KEYS
-        }
+    drop = {
+        key
+        for key in query
+        if str(key).lower() in _SSLROOTCERT_KEYS or str(key).lower() in _SSLMODE_KEYS
+    }
+    if drop:
+        query = {key: value for key, value in query.items() if key not in drop}
         raw = parsed.set(query=query).render_as_string(hide_password=False)
-        connect_args["ssl"] = ssl_context_from_rootcert(cafile, ssl_value)
+    ssl_value = prepared.get("ssl")
+    if isinstance(ssl_value, (ssl.SSLContext, bool)):
+        connect_args["ssl"] = ssl_value
     return raw, connect_args
 
 
@@ -202,7 +229,7 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
-async def get_session() -> AsyncIterator[AsyncSession]:
+async def _get_session() -> AsyncIterator[AsyncSession]:
     """Sesión por petición: commit al salir del yield, rollback si falla.
 
     FastAPI 0.162 ejecuta el código posterior al ``yield`` *después* de
@@ -210,6 +237,54 @@ async def get_session() -> AsyncIterator[AsyncSession]:
     (``request``). ``SessionDep`` fija ``scope="function"`` para que el
     commit ocurra antes de responder: un POST no puede devolver 2xx
     si el commit falla o si la fila aún no es visible.
+
+    Un ``StreamingResponse`` que consulte la sesión en el generador
+    arrancaría otra transacción *después* de ese commit (idle in
+    transaction → 500 de QueuePool). El listener ``after_begin`` lo
+    prohíbe. Para streaming usa ``SessionStreamingDep``.
+    """
+
+    factory = get_session_factory()
+    async with factory() as session:
+        released = False
+
+        def _reject_begin_after_yield(
+            _orm_session: object,
+            _transaction: object,
+            connection: object,
+        ) -> None:
+            if not released:
+                return
+            rollback = getattr(connection, "rollback", None)
+            if callable(rollback):
+                rollback()
+            close = getattr(connection, "close", None)
+            if callable(close):
+                close()
+            raise RuntimeError(
+                "la sesión no se puede usar después del yield; "
+                "un StreamingResponse necesita SessionStreamingDep"
+            )
+
+        sync = getattr(session, "sync_session", None)
+        if isinstance(sync, SyncSession):
+            event.listen(sync, "after_begin", _reject_begin_after_yield)
+        try:
+            yield session
+            await session.commit()
+            released = True
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def _get_streaming_session() -> AsyncIterator[AsyncSession]:
+    """Sesión para ``StreamingResponse``: el commit espera al generador.
+
+    ``SessionDep`` (scope=function) cierra la transacción antes de
+    enviar el cuerpo. Esta dependencia usa scope=request para que el
+    generador pueda consultar y el commit/rollback corran al terminar
+    el stream, sin dejar idle in transaction.
     """
 
     factory = get_session_factory()
@@ -222,7 +297,13 @@ async def get_session() -> AsyncIterator[AsyncSession]:
             raise
 
 
-SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
+# Las ramas #93–#97 deben importar SessionDep, no Depends(get_session):
+# get_session ya no es pública (el scope por defecto reproducía 201
+# con la fila aún no visible).
+SessionDep = Annotated[AsyncSession, Depends(_get_session, scope="function")]
+SessionStreamingDep = Annotated[
+    AsyncSession, Depends(_get_streaming_session, scope="request")
+]
 
 
 def clear_engine() -> None:

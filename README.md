@@ -104,7 +104,7 @@ postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
 docker compose up -d
 ```
 
-Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings exige usuario, contraseña y base **explícitos** en el DSN (no se heredan de `PGUSER` / `PGPASSWORD` / `PGDATABASE`; asyncpg usaría el usuario como nombre de base) y rechaza la contraseña por defecto, el usuario por defecto (`estudiomusica`, p. ej. `estudiomusica:otra@…`, también en la query) y las bases `*_test` (path o query, sin distinguir mayúsculas, p. ej. `x_TEST`). También rechaza `.pgpass` (`passfile` en la query o `PGPASSFILE`) y certificado de cliente (`sslcert` / `sslkey` / `sslpassword` en la query, o `PGSSLCERT` / `PGSSLKEY`). `sslrootcert` en la query se traduce a un `SSLContext` con `cafile` (asyncpg no tiene ese kwarg); `PGSSLROOTCERT` es la alternativa por entorno. Ambos se permiten (`verify-full`). El cliente no puede rechazar autenticación peer: eso lo decide `pg_hba.conf`. No se validan `PGSSLMODE`, `PGSSLPASSWORD`, `?service=` / `PGSERVICEFILE` ni los certificados por defecto de `~/.postgresql`. Los overrides de query (`password`, `user`, `database`, `dbname`) se aplican antes de validar. `sslmode=` de la query se traduce a `ssl=` (asyncpg no acepta `sslmode` como kwarg). Los tests de production activan un opt-in (`allow_test_database`) que **no** lee el entorno. En development un DSN sin credenciales sí puede heredar `PGUSER`/`PGPASSWORD`. Los errores de validación no muestran el DSN ni `AUTH_SECRET` (`hide_input_in_errors`; tampoco en `.errors()` / `.json()`). Espera a que el healthcheck esté sano:
+Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings exige usuario, contraseña y base **explícitos** en el DSN (no se heredan de `PGUSER` / `PGPASSWORD` / `PGDATABASE`; asyncpg usaría el usuario como nombre de base) y rechaza la contraseña por defecto, el usuario por defecto (`estudiomusica`, p. ej. `estudiomusica:otra@…`, también en la query) y las bases `*_test` (path o query, sin distinguir mayúsculas, p. ej. `x_TEST`). También rechaza `.pgpass` (`passfile` en la query o `PGPASSFILE`) y certificado de cliente (`sslcert` / `sslkey` / `sslpassword` en la query, o `PGSSLCERT` / `PGSSLKEY`). `sslrootcert` en la query se traduce a un `SSLContext` con `cafile` (asyncpg no tiene ese kwarg); `PGSSLROOTCERT` es la alternativa por entorno. Ambos se permiten (`verify-full`). `ssl=require` + `sslrootcert` también verifica el hostname (más estricto que libpq, que con `require` no comprueba ni CA ni hostname). El cliente no puede rechazar autenticación peer: eso lo decide `pg_hba.conf`. No se validan `PGSSLMODE`, `PGSSLPASSWORD`, `?service=` / `PGSERVICEFILE` ni los certificados por defecto de `~/.postgresql`. Los overrides de query (`password`, `user`, `database`, `dbname`) se aplican antes de validar. `sslmode=` de la query se traduce a `ssl=` (asyncpg no acepta `sslmode` como kwarg). Los tests de production activan un opt-in (`allow_test_database`) que **no** lee el entorno. En development un DSN sin credenciales sí puede heredar `PGUSER`/`PGPASSWORD`. Los errores de validación no muestran el DSN ni `AUTH_SECRET` (`hide_input_in_errors`; tampoco en `.errors()` / `.json()`). Espera a que el healthcheck esté sano:
 
 ```bash
 docker compose ps
@@ -142,6 +142,8 @@ Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UU
 
 `env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
 
+Las rutas inyectan la sesión con **`SessionDep`** (`Depends` + `scope="function"`). `get_session` ya no es pública: el scope por defecto de FastAPI 0.162 (`request`) hacía commit *después* de responder (201 con la fila aún no visible). Las ramas #93–#97 deben importar `SessionDep`. Un `StreamingResponse` que consulte la sesión usa **`SessionStreamingDep`** (scope `request`).
+
 ### Tests con base aislada
 
 Los tests de persistencia **no** usan los JSON de `.data/` del frontend. Usan `estudiomusica_test` y envuelven cada caso en una transacción que se revierte al terminar. `ALEMBIC_TEST_DATABASE_URL` se deriva de `TEST_DATABASE_URL` (`<stem>_alembic_test`, p. ej. `estudiomusica_alembic_test`) y solo se usa en upgrade/downgrade de Alembic. El nombre efectivo de ambas bases debe terminar en `_test`; se rechazan query params que puedan cambiar el destino (`database`, `dbname`, `service`, `options`). Si no, pytest aborta (el mensaje nunca incluye la contraseña).
@@ -171,6 +173,14 @@ El fixture `production_client` crea el rol `em_prod_tests` (LOGIN, **sin** SUPER
 - `USAGE` en el tipo `citext` (email)
 
 No puede migrar ni crear bases. Las filas de esos tests (`prod-%@example.com`) se borran al terminar.
+
+Los tests de `?sslrootcert=` (`tls_postgres`) levantan un Postgres TLS efímero con Docker. Si `docker` no está en el `PATH`, se saltan, salvo `REQUIRE_TLS_TESTS=1` (entonces fallan). Para reutilizar un servidor TLS ya levantado:
+
+```bash
+export TLS_TEST_DATABASE_URL=postgresql+asyncpg://tlsprobe:tlsprobe-secret@127.0.0.1:55433/tlsprobe_test
+export TLS_TEST_CAFILE=/ruta/al/ca.pem
+uv run pytest
+```
 
 ## Tests, lint y types
 

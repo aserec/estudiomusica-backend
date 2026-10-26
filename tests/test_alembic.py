@@ -14,7 +14,6 @@ from alembic.config import Config
 from alembic.operations import ops
 from alembic.script import ScriptDirectory
 from sqlalchemy import String, Table, text
-from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import RedactedDsn
@@ -23,6 +22,7 @@ from app.models import PersistentModel
 from app.models.base import updated_at_trigger_name
 from tests.conftest import (
     ROOT,
+    _create_async_engine,
     alembic_config,
     drop_database_if_exists,
     ensure_database_exists,
@@ -34,7 +34,7 @@ pytestmark = pytest.mark.db
 
 def _scalar(dsn: RedactedDsn, sql: str) -> object:
     async def run() -> object:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.connect() as connection:
                 result = await connection.execute(text(sql))
@@ -49,7 +49,7 @@ def _wipe_alembic_schema(dsn: RedactedDsn) -> None:
     """Quita restos de 0001/0002 para que los tests no se pisen el DSN."""
 
     async def wipe() -> None:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
@@ -146,7 +146,7 @@ def test_0002_downgrade_keeps_preinstalled_citext(
     _wipe_alembic_schema(dsn)
 
     async def preinstall() -> None:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(text("CREATE EXTENSION IF NOT EXISTS citext"))
@@ -169,6 +169,22 @@ def test_0002_downgrade_keeps_preinstalled_citext(
     )
     command.upgrade(config, "head")
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
+
+
+def test_alembic_current_accepts_sslmode(
+    require_postgres: RedactedDsn,
+) -> None:
+    """B-N3: ``sqlalchemy.url`` con ``?sslmode=`` no lanza TypeError."""
+
+    from sqlalchemy.engine.url import make_url
+
+    parsed = make_url(require_postgres.secret())
+    query = dict(parsed.query or {})
+    query["sslmode"] = "prefer"
+    with_mode = RedactedDsn(
+        parsed.set(query=query).render_as_string(hide_password=False)
+    )
+    command.current(alembic_config(with_mode))
 
 
 def test_alembic_revision_chain_is_linear() -> None:
@@ -341,7 +357,7 @@ def test_migrated_database_has_updated_at_trigger_without_create_all(
         assert tables_without_trigger == 0
 
         async def advance() -> None:
-            engine = create_async_engine(dsn.secret())
+            engine = _create_async_engine(dsn.secret())
             try:
                 async with engine.begin() as connection:
                     inserted = await connection.execute(
@@ -381,7 +397,9 @@ import asyncio
 
 from alembic import context
 from sqlalchemy import Column, Integer, MetaData, String, Table, pool
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from app.db import asyncpg_url_and_connect_args
 
 config = context.config
 target_metadata = MetaData()
@@ -408,12 +426,11 @@ def do_run_migrations(connection):
 
 
 async def run_async_migrations() -> None:
-    configuration = config.get_section(config.config_ini_section) or {}
-    configuration["sqlalchemy.url"] = get_database_url()
-    connectable = async_engine_from_config(
-        configuration,
-        prefix="sqlalchemy.",
+    url, connect_args = asyncpg_url_and_connect_args(get_database_url())
+    connectable = create_async_engine(
+        url,
         poolclass=pool.NullPool,
+        connect_args=connect_args,
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
@@ -545,7 +562,7 @@ def test_0001_downgrade_with_business_trigger_is_clear(
     command.upgrade(config, "head")
 
     async def add_dependent_trigger() -> None:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(
@@ -600,7 +617,7 @@ def test_updated_at_trigger_quotes_uppercase_reserved_and_schema(
     )
 
     async def run() -> None:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(text("CREATE SCHEMA IF NOT EXISTS catalogo"))
@@ -744,7 +761,7 @@ def test_create_all_and_ops_mount_schema_trigger(
     command.upgrade(alembic_config(dsn), "head")
 
     async def run() -> None:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(text("CREATE SCHEMA IF NOT EXISTS catalogo"))
@@ -970,7 +987,7 @@ def test_alembic_check_ignores_foreign_schema(
     command.upgrade(alembic_config(dsn), "head")
 
     async def add_foreign() -> None:
-        engine = create_async_engine(dsn.secret())
+        engine = _create_async_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(text("CREATE SCHEMA IF NOT EXISTS ajeno"))
@@ -1006,7 +1023,7 @@ def test_alembic_check_ignores_foreign_schema(
     finally:
 
         async def drop_foreign() -> None:
-            engine = create_async_engine(dsn.secret())
+            engine = _create_async_engine(dsn.secret())
             try:
                 async with engine.begin() as connection:
                     await connection.execute(

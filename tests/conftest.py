@@ -22,8 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from app.db import (
     RedactedDsn,
     SessionDep,
+    SessionStreamingDep,
+    _get_session,
     asyncpg_url_and_connect_args,
-    get_session,
     redact_database_url,
 )
 from app.exceptions import Validation
@@ -308,6 +309,22 @@ def _mount_probes(application: FastAPI) -> None:
             {"label": label},
         )
         return {"label": found}
+
+    @application.get("/api/v1/_test/session-stream")
+    async def session_stream(session: SessionDep) -> StreamingResponse:
+        async def generate() -> AsyncIterator[str]:
+            found = await session.scalar(text("SELECT 1"))
+            yield f"row={found}"
+
+        return StreamingResponse(generate(), media_type="text/plain")
+
+    @application.get("/api/v1/_test/session-stream-ok")
+    async def session_stream_ok(session: SessionStreamingDep) -> StreamingResponse:
+        async def generate() -> AsyncIterator[str]:
+            found = await session.scalar(text("SELECT 1"))
+            yield f"row={found}"
+
+        return StreamingResponse(generate(), media_type="text/plain")
 
 
 def _build_client(
@@ -1108,11 +1125,11 @@ async def db_session(
                 yield session
 
             application = get_app()
-            application.dependency_overrides[get_session] = _override_session
+            application.dependency_overrides[_get_session] = _override_session
             try:
                 yield session
             finally:
-                application.dependency_overrides.pop(get_session, None)
+                application.dependency_overrides.pop(_get_session, None)
                 await session.close()
                 await transaction.rollback()
     finally:
@@ -1128,7 +1145,7 @@ async def session_client(
     db_session: AsyncSession,
     require_postgres: RedactedDsn,
 ) -> AsyncIterator[Any]:
-    """Cliente HTTP en el mismo loop, con get_session ligado a db_session."""
+    """Cliente HTTP en el mismo loop, con _get_session ligado a db_session."""
 
     from httpx2 import ASGITransport, AsyncClient
 
@@ -1146,9 +1163,9 @@ async def session_client(
     async def _override_session() -> AsyncIterator[AsyncSession]:
         yield db_session
 
-    application.dependency_overrides[get_session] = _override_session
+    application.dependency_overrides[_get_session] = _override_session
     transport = ASGITransport(app=application)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
-    application.dependency_overrides.pop(get_session, None)
+    application.dependency_overrides.pop(_get_session, None)
     get_settings.cache_clear()

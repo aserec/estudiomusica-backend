@@ -204,14 +204,17 @@ def _inspector_connect_kwargs(dsn: RedactedDsn) -> dict[str, Any]:
     from sqlalchemy.dialects.postgresql.asyncpg import PGDialect_asyncpg
     from sqlalchemy.engine.url import make_url
 
+    from app.db import prepare_asyncpg_connect_kwargs
+
     dialect = PGDialect_asyncpg()  # type: ignore[no-untyped-call]
     _args, opts = dialect.create_connect_args(  # type: ignore[no-untyped-call]
         make_url(dsn.secret())
     )
-    kwargs = {
-        key: opts[key]
+    prepared = prepare_asyncpg_connect_kwargs(opts)
+    kwargs: dict[str, Any] = {
+        key: prepared[key]
         for key in ("host", "port", "user", "password", "database", "ssl")
-        if key in opts and opts[key] is not None
+        if key in prepared and prepared[key] is not None
     }
     if "port" not in kwargs:
         kwargs["port"] = 5432
@@ -778,7 +781,7 @@ def test_health_connect_kwargs_follow_app_dialect(
         )
         password_kwargs = health_service._connect_kwargs()
         assert password_kwargs["password"] == "from-query"
-        assert password_kwargs["ssl"] == "disable"
+        assert password_kwargs["ssl"] is False
         assert password_kwargs["command_timeout"] == get_settings().db_command_timeout
 
         socket_url = "postgresql+asyncpg://probe:secret@/probe_db?host=/tmp/pg.sock"
@@ -920,7 +923,7 @@ async def test_health_probe_passes_ssl_to_asyncpg(
     try:
         result = await health_service.check_database()
         assert result.db == "down"
-        assert captured.get("ssl") == "disable"
+        assert captured.get("ssl") is False
     finally:
         health_service.clear_health_probe()
         get_settings.cache_clear()
@@ -1555,13 +1558,94 @@ def test_require_freeze_tests_converts_skip_to_failure(
         _maybe_skip_hostssl("el servidor rechaza ssl=disable (hostssl)")
 
 
+@pytest.mark.db
+def test_hostssl_helper_does_not_skip_on_plain_host(
+    require_postgres: RedactedDsn,
+) -> None:
+    """K1 en host: si ssl=False conecta, el helper no salta.
+
+    En hostssl real (28000/no encryption) este caso se salta; matar K1
+    ahí exige ``REQUIRE_FREEZE_TESTS=1``.
+    """
+
+    import threading
+
+    import asyncpg
+
+    login = _inspector_connect_kwargs(require_postgres)
+    error: list[BaseException] = []
+
+    async def probe() -> None:
+        connection = await asyncpg.connect(
+            host=login.get("host"),
+            port=login.get("port") or 5432,
+            user=login.get("user"),
+            password=login.get("password"),
+            database=login.get("database"),
+            ssl=False,
+            timeout=2,
+        )
+        await connection.close()
+
+    def worker() -> None:
+        try:
+            asyncio.run(probe())
+        except BaseException as exc:
+            error.append(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(timeout=5)
+    if error and _is_hostssl_no_encryption(error[0]):
+        pytest.skip("hostssl real; K1 en hostssl exige REQUIRE_FREEZE_TESTS")
+    if error:
+        raise error[0]
+    try:
+        _skip_if_hostssl_rejects_plain(require_postgres)
+    except pytest.skip.Exception as skipped:
+        raise AssertionError("K1: el helper saltó en un host plano") from skipped
+
+
+def test_hostssl_helper_reraises_other_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K2: un error que no es 28000/no encryption no se convierte en skip."""
+
+    class _Other(Exception):
+        sqlstate = "28P01"
+
+        def __str__(self) -> str:
+            return "password authentication failed"
+
+    async def _boom(*_a: object, **_k: object) -> object:
+        raise _Other()
+
+    import asyncpg
+
+    monkeypatch.setattr(asyncpg, "connect", _boom)
+    try:
+        _skip_if_hostssl_rejects_plain(
+            RedactedDsn("postgresql+asyncpg://u:p@127.0.0.1:1/db_test")
+        )
+    except pytest.skip.Exception as skipped:
+        raise AssertionError("K2: un error distinto no debe saltar") from skipped
+    except _Other:
+        return
+    raise AssertionError("se esperaba el error de autenticación, no un skip")
+
+
 @pytest.fixture(scope="session")
 def tls_postgres(
     tmp_path_factory: pytest.TempPathFactory,
     require_postgres: RedactedDsn,
 ) -> Iterator[tuple[Any, Any, str]]:
-    """Postgres TLS efímero para ``?sslrootcert=``. Se destruye al terminar."""
+    """Postgres TLS efímero para ``?sslrootcert=``. Se destruye al terminar.
 
+    Si hay ``TLS_TEST_DATABASE_URL`` y ``TLS_TEST_CAFILE``, se reutilizan.
+    Sin Docker y sin esas variables, se salta (salvo ``REQUIRE_TLS_TESTS=1``).
+    """
+
+    import shutil
     from pathlib import Path
 
     _ = require_postgres
@@ -1571,6 +1655,19 @@ def tls_postgres(
     if env_url and env_ca and Path(env_ca).is_file():
         yield Path(env_ca), _write_unrelated_ca(tmp / "bad-ca.pem"), env_url
         return
+    require = os.environ.get("REQUIRE_TLS_TESTS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if shutil.which("docker") is None:
+        if require:
+            raise AssertionError("REQUIRE_TLS_TESTS=1 y docker no está en PATH")
+        pytest.skip(
+            "tests TLS: docker no está en PATH (o define TLS_TEST_DATABASE_URL "
+            "y TLS_TEST_CAFILE)"
+        )
     cafile, bad_ca, dsn, cleanup = _start_ephemeral_tls_postgres(tmp)
     try:
         yield cafile, bad_ca, dsn
@@ -1588,11 +1685,34 @@ def test_health_sslrootcert_good_ca_up_bad_ca_down(
 ) -> None:
     """B-2: ``?sslrootcert=`` con CA buena da 200 y con CA mala 503."""
 
-    from tests.conftest import _build_client
+    from alembic import command
+    from sqlalchemy import text
+
+    from app.db import clear_engine
+    from tests.conftest import _build_client, _create_async_engine, alembic_config
 
     cafile, bad_ca, dsn = tls_postgres
     good = _dsn_with_query(dsn, ssl="verify-full", sslrootcert=str(cafile))
     bad = _dsn_with_query(dsn, ssl="verify-full", sslrootcert=str(bad_ca))
+
+    async def _ensure_session_probes() -> None:
+        engine = _create_async_engine(good, pool_pre_ping=True)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS session_probes ("
+                        "id uuid PRIMARY KEY,"
+                        "label varchar(64) NOT NULL,"
+                        "created_at timestamptz NOT NULL,"
+                        "updated_at timestamptz NOT NULL,"
+                        "deleted_at timestamptz)"
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_ensure_session_probes())
     good_iter = _build_client(
         monkeypatch,
         APP_ENV="development",
@@ -1606,10 +1726,18 @@ def test_health_sslrootcert_good_ca_up_bad_ca_down(
         response = good_client.get("/api/v1/health/db")
         assert response.status_code == 200
         assert response.json() == {"db": "ok"}
+        created = good_client.post("/api/v1/_test/session/sslroot")
+        assert created.status_code == 201, created.text
+        assert created.json() == {"label": "sslroot"}
+        visible = good_client.get("/api/v1/_test/session/sslroot")
+        assert visible.status_code == 200, visible.text
+        assert visible.json() == {"label": "sslroot"}
     finally:
         close = getattr(good_iter, "close", None)
         if callable(close):
             close()
+    command.current(alembic_config(RedactedDsn(good)))
+    clear_engine()
     bad_iter = _build_client(
         monkeypatch,
         APP_ENV="development",
@@ -1643,6 +1771,201 @@ def test_prepare_asyncpg_kwargs_translates_sslrootcert(
     )
     assert "sslrootcert" not in kwargs
     assert isinstance(kwargs["ssl"], ssl_mod.SSLContext)
+
+
+def test_ssl_disable_with_sslrootcert_skips_context(tmp_path: Any) -> None:
+    """T9: ``ssl=disable`` + ``sslrootcert`` no fuerza TLS (engine y sonda)."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import (
+        asyncpg_ssl_connect_arg,
+        asyncpg_url_and_connect_args,
+        prepare_asyncpg_connect_kwargs,
+    )
+
+    cafile = _write_unrelated_ca(Path(str(tmp_path)) / "unit-ca.pem")
+    assert asyncpg_ssl_connect_arg("disable", str(cafile)) is False
+    assert asyncpg_ssl_connect_arg("false", str(cafile)) is False
+    assert asyncpg_ssl_connect_arg(False, str(cafile)) is False
+    probe = prepare_asyncpg_connect_kwargs(
+        {"host": "127.0.0.1", "ssl": "disable", "sslrootcert": str(cafile)}
+    )
+    _url, engine_args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test"
+        f"?ssl=disable&sslrootcert={cafile}"
+    )
+    assert probe.get("ssl") is False
+    assert engine_args.get("ssl") is False
+    assert not isinstance(probe.get("ssl"), ssl_mod.SSLContext)
+    assert not isinstance(engine_args.get("ssl"), ssl_mod.SSLContext)
+
+
+def test_asyncpg_url_translates_sslmode(tmp_path: Any) -> None:
+    """B-N3: ``?sslmode=`` no llega a asyncpg (TypeError)."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import asyncpg_url_and_connect_args
+
+    cafile = _write_unrelated_ca(Path(str(tmp_path)) / "sslmode-ca.pem")
+    url, args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test"
+        f"?sslmode=verify-full&sslrootcert={cafile}"
+    )
+    assert "sslmode=" not in url.lower()
+    assert "sslrootcert=" not in url.lower()
+    assert isinstance(args.get("ssl"), ssl_mod.SSLContext)
+    plain, plain_args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?sslmode=disable"
+    )
+    assert "sslmode=" not in plain.lower()
+    assert plain_args.get("ssl") is False
+
+
+def test_sslrootcert_and_sslmode_are_case_insensitive(tmp_path: Any) -> None:
+    """S2a/S4a: ``SSLROOTCERT`` / ``SSLMODE`` se traducen igual."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import asyncpg_url_and_connect_args, prepare_asyncpg_connect_kwargs
+
+    cafile = _write_unrelated_ca(Path(str(tmp_path)) / "case-ca.pem")
+    kwargs = prepare_asyncpg_connect_kwargs(
+        {"host": "127.0.0.1", "SSL": "verify-full", "SSLROOTCERT": str(cafile)}
+    )
+    assert "sslrootcert" not in {str(key).lower() for key in kwargs}
+    assert isinstance(kwargs["ssl"], ssl_mod.SSLContext)
+    mode_only = prepare_asyncpg_connect_kwargs(
+        {"host": "127.0.0.1", "SSLMODE": "require"}
+    )
+    assert "sslmode" not in {str(key).lower() for key in mode_only}
+    assert "SSLMODE" not in mode_only
+    assert mode_only.get("ssl") == "require"
+    url, args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test"
+        f"?SSLMODE=verify-full&SSLROOTCERT={cafile}"
+    )
+    assert "sslmode=" not in url.lower()
+    assert "sslrootcert=" not in url.lower()
+    assert isinstance(args.get("ssl"), ssl_mod.SSLContext)
+    disable_url, disable_args = asyncpg_url_and_connect_args(
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?SSLMODE=disable"
+    )
+    assert "sslmode=" not in disable_url.lower()
+    assert disable_args.get("ssl") is False
+
+
+def test_ssl_require_with_rootcert_checks_hostname(tmp_path: Any) -> None:
+    """T1/T11: ``ssl=require`` + CA verifica hostname (más estricto que libpq)."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from app.db import ssl_context_from_rootcert
+
+    cafile = str(_write_unrelated_ca(Path(str(tmp_path)) / "require-ca.pem"))
+    require = ssl_context_from_rootcert(cafile, "require")
+    mixed = ssl_context_from_rootcert(cafile, "Require")
+    full = ssl_context_from_rootcert(cafile, "verify-full")
+    verify_ca = ssl_context_from_rootcert(cafile, "verify-ca")
+    assert require.check_hostname is True
+    assert mixed.check_hostname is True
+    assert require.verify_mode == ssl_mod.CERT_REQUIRED
+    assert full.check_hostname is True
+    assert verify_ca.check_hostname is False
+
+
+@pytest.mark.db
+@pytest.mark.timeout(60)
+def test_ssl_require_rootcert_rejects_hostname_mismatch(
+    tls_postgres: tuple[Any, Any, str],
+) -> None:
+    """T1/T11: hostname distinto con ``ssl=require`` + CA no conecta."""
+
+    import socket as sock
+    import ssl as ssl_mod
+
+    from sqlalchemy.engine.url import make_url
+
+    from app.db import ssl_context_from_rootcert
+
+    cafile, _bad_ca, dsn = tls_postgres
+    parsed = make_url(dsn)
+    host = str(parsed.host or "127.0.0.1")
+    port = int(parsed.port or 5432)
+    ctx = ssl_context_from_rootcert(str(cafile), "require")
+    raw = sock.create_connection((host, port), timeout=3)
+    try:
+        with pytest.raises(ssl_mod.SSLError):
+            ctx.wrap_socket(raw, server_hostname="wrong.example")
+    finally:
+        raw.close()
+    matched = sock.create_connection((host, port), timeout=3)
+    try:
+        wrapped = ctx.wrap_socket(matched, server_hostname=host)
+        wrapped.close()
+    finally:
+        matched.close()
+
+
+@pytest.mark.db
+def test_ssl_disable_sslrootcert_engine_matches_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+    tmp_path: Any,
+) -> None:
+    """T9: health y engine en claro si ``ssl=disable`` aunque haya CA."""
+
+    from pathlib import Path
+
+    from sqlalchemy import text
+
+    from app.config import get_settings
+    from app.db import clear_engine, dispose_engine, get_engine
+    from tests.conftest import _build_client
+
+    _skip_if_hostssl_rejects_plain(require_postgres)
+    cafile = _write_unrelated_ca(Path(str(tmp_path)) / "t9-ca.pem")
+    dsn = _dsn_with_query(
+        require_postgres.secret(), ssl="disable", sslrootcert=str(cafile)
+    )
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    get_settings.cache_clear()
+    clear_engine()
+    client_iter = _build_client(
+        monkeypatch,
+        APP_ENV="development",
+        EXPOSE_ERRORS="false",
+        ENABLE_EXAMPLE_ROUTES="true",
+        DB_HEALTH_CACHE_TTL="0",
+        DATABASE_URL=dsn,
+    )
+    client = next(client_iter)
+    try:
+        response = client.get("/api/v1/health/db")
+        assert response.status_code == 200
+        assert response.json() == {"db": "ok"}
+    finally:
+        close = getattr(client_iter, "close", None)
+        if callable(close):
+            close()
+
+    async def _engine_select() -> None:
+        engine = get_engine()
+        try:
+            async with engine.connect() as connection:
+                assert await connection.scalar(text("SELECT 1")) == 1
+        finally:
+            await dispose_engine()
+
+    asyncio.run(_engine_select())
+    clear_engine()
+    get_settings.cache_clear()
 
 
 def _write_unrelated_ca(path: Any) -> Any:

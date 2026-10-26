@@ -26,6 +26,8 @@ target_metadata = Base.metadata
 
 
 def get_database_url() -> str:
+    """DSN crudo. ``sslmode`` / ``sslrootcert`` se traducen como en la app."""
+
     configured = (config.get_main_option("sqlalchemy.url") or "").strip()
     if configured:
         return configured

@@ -5,17 +5,18 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import String, Table, text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import (
     RedactedDsn,
     SessionDep,
+    _get_session,
     clear_engine,
-    get_session,
     get_session_factory,
 )
 from app.models import PersistentModel
+from tests.conftest import _create_async_engine
 
 
 async def _finish(agen: AsyncIterator[object]) -> None:
@@ -25,7 +26,7 @@ async def _finish(agen: AsyncIterator[object]) -> None:
         await anext(agen)
     except StopAsyncIteration:
         return
-    raise AssertionError("get_session produjo una segunda sesión")
+    raise AssertionError("_get_session produjo una segunda sesión")
 
 
 class SessionProbe(PersistentModel):
@@ -65,7 +66,7 @@ async def test_get_session_commits_on_success(
         yield session
 
     monkeypatch.setattr("app.db.get_session_factory", lambda: _cm)
-    agen = get_session()
+    agen = _get_session()
     yielded = await anext(agen)
     assert yielded is session
     await _finish(agen)
@@ -86,7 +87,7 @@ async def test_get_session_rollbacks_on_error(
         yield session
 
     monkeypatch.setattr("app.db.get_session_factory", lambda: _cm)
-    agen = cast(AsyncGenerator[AsyncMock], get_session())
+    agen = cast(AsyncGenerator[AsyncMock], _get_session())
     await anext(agen)
     with pytest.raises(RuntimeError, match="boom"):
         await agen.athrow(RuntimeError("boom"))
@@ -114,7 +115,7 @@ async def test_get_session_commits_persistently(
     monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     try:
@@ -123,7 +124,7 @@ async def test_get_session_commits_persistently(
                 lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
             )
 
-        agen = get_session()
+        agen = _get_session()
         session = await anext(agen)
         session.add(SessionProbe(label="committed"))
         await _finish(agen)
@@ -156,7 +157,7 @@ async def test_get_session_rollbacks_persistently(
     monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     try:
@@ -165,7 +166,7 @@ async def test_get_session_rollbacks_persistently(
                 lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
             )
 
-        agen = cast(AsyncGenerator[AsyncSession], get_session())
+        agen = cast(AsyncGenerator[AsyncSession], _get_session())
         session = await anext(agen)
         session.add(SessionProbe(label="rolled-back"))
         await session.flush()
@@ -237,7 +238,7 @@ _DB_SESSION_LEAK_LABEL = "db-session-must-not-leak"
 async def leak_probe_table(require_postgres: RedactedDsn) -> AsyncIterator[Table]:
     """Crea la tabla fuera de db_session y la borra después del rollback."""
 
-    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = LeakProbe.__table__
     assert isinstance(probe_table, Table)
     async with engine.begin() as connection:
@@ -271,7 +272,7 @@ async def test_db_session_commit_is_not_visible_outside_the_fixture(
     )
     assert found == _DB_SESSION_LEAK_LABEL
 
-    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     try:
         async with engine.connect() as connection:
             leftover = await connection.scalar(
@@ -326,12 +327,57 @@ def test_session_dep_commits_before_response() -> None:
 
     from fastapi.params import Depends as DependsParam
 
+    import app.db as db_module
+
     args = get_args(SessionDep)
     assert args[0] is AsyncSession
     dep = args[1]
     assert isinstance(dep, DependsParam)
-    assert dep.dependency is get_session
+    assert dep.dependency is _get_session
     assert dep.scope == "function"
+    assert not hasattr(db_module, "get_session")
+
+
+def _iter_dependants(dependant: Any) -> Any:
+    yield dependant
+    for child in getattr(dependant, "dependencies", None) or ():
+        yield from _iter_dependants(child)
+
+
+def test_session_route_deps_use_function_scope() -> None:
+    """Ninguna ruta puede inyectar la sesión con el scope por defecto."""
+
+    from typing import get_args
+
+    from fastapi.params import Depends as DependsParam
+
+    from app.db import SessionStreamingDep, _get_streaming_session
+    from app.main import create_app
+    from tests.conftest import _mount_probes
+
+    application = create_app()
+    _mount_probes(application)
+    seen_session = False
+    seen_streaming = False
+    for route in application.routes:
+        dependant = getattr(route, "dependant", None)
+        if dependant is None:
+            continue
+        for item in _iter_dependants(dependant):
+            call = getattr(item, "call", None)
+            if call is _get_session:
+                seen_session = True
+                assert item.scope == "function", route
+            elif call is _get_streaming_session:
+                seen_streaming = True
+                assert item.scope == "request", route
+    assert seen_session
+    assert seen_streaming
+    streaming_args = get_args(SessionStreamingDep)
+    streaming_dep = streaming_args[1]
+    assert isinstance(streaming_dep, DependsParam)
+    assert streaming_dep.dependency is _get_streaming_session
+    assert streaming_dep.scope == "request"
 
 
 async def _create_probe_table(engine: Any, probe_table: Table) -> None:
@@ -368,7 +414,7 @@ async def test_http_posts_are_visible_from_another_session_before_response(
     monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    setup_engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    setup_engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     await _create_probe_table(setup_engine, probe_table)
@@ -413,7 +459,7 @@ async def test_http_session_commit_error_is_not_2xx(
     monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
     get_settings.cache_clear()
     clear_engine()
-    setup_engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    setup_engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
     await _create_probe_table(setup_engine, probe_table)
@@ -433,6 +479,66 @@ async def test_http_session_commit_error_is_not_2xx(
     finally:
         await _drop_probe_table(setup_engine, probe_table)
         await setup_engine.dispose()
+        await dispose_engine()
+        get_settings.cache_clear()
+        clear_engine()
+
+
+async def _count_idle_in_transaction(dsn: RedactedDsn) -> int:
+    engine = _create_async_engine(dsn.secret())
+    try:
+        async with engine.connect() as connection:
+            value = await connection.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE state = 'idle in transaction' "
+                    "AND pid <> pg_backend_pid()"
+                )
+            )
+            return int(value or 0)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_streaming_session_dep_leaves_no_idle_in_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+) -> None:
+    """M-1: StreamingResponse + SessionDep no deja idle in transaction."""
+
+    from httpx2 import ASGITransport, AsyncClient
+
+    from app.config import get_settings
+    from app.db import dispose_engine
+    from app.main import create_app
+    from tests.conftest import _mount_probes
+
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    get_settings.cache_clear()
+    clear_engine()
+    application = create_app()
+    _mount_probes(application)
+    baseline = await _count_idle_in_transaction(require_postgres)
+    try:
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            try:
+                leaked = await client.get("/api/v1/_test/session-stream")
+            except RuntimeError as exc:
+                assert "SessionStreamingDep" in str(exc)
+            else:
+                assert leaked.status_code >= 400 or "row=" not in leaked.text
+            after_leak = await _count_idle_in_transaction(require_postgres)
+            assert after_leak == baseline
+            ok = await client.get("/api/v1/_test/session-stream-ok")
+            assert ok.status_code == 200
+            assert ok.text == "row=1"
+            after_ok = await _count_idle_in_transaction(require_postgres)
+            assert after_ok == baseline
+    finally:
         await dispose_engine()
         get_settings.cache_clear()
         clear_engine()
