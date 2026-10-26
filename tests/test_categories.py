@@ -687,38 +687,67 @@ async def test_unique_indexes_filter_deleted_and_name_is_citext(
     assert udt == "citext"
 
 
-async def test_tree_lock_is_transactional_not_session(
-    db_session: AsyncSession,
+def test_tree_lock_is_transactional_not_session(
+    require_postgres: Any,
+    migrated_test_database: None,
 ) -> None:
+    """El candado es xact: tras COMMIT no queda en pg_locks.
+
+    Mata lock-no-xact-sesion.
+    """
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
     suffix = uuid.uuid4().hex[:8]
-    parent = await create_category(db_session, CategoryCreate(name=f"lockp-{suffix}"))
-    child = await create_category(
-        db_session,
-        CategoryCreate(name=f"lockc-{suffix}", parent_id=parent.id),
-    )
-    classid, objid = _CATEGORY_TREE_LOCK_KEY
-    held = (
-        await db_session.execute(
-            text(
-                "SELECT objsubid FROM pg_locks "
-                "WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
-                "AND classid = :classid AND objid = :objid"
-            ),
-            {"classid": classid, "objid": objid},
-        )
-    ).all()
-    assert any(row[0] == 1 for row in held)
-    assert not any(row[0] == 2 for row in held)
-    await update_category(db_session, child.id, CategoryUpdate(parent_id=None))
-    await delete_category(db_session, child.id)
-    leftover_session = await db_session.scalar(
-        text(
-            "SELECT count(*) FROM pg_locks "
-            "WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
-            "AND objsubid = 2"
-        )
-    )
-    assert leftover_session == 0
+    tracked: list[uuid.UUID] = []
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret(), pool_size=1, max_overflow=0)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                parent = await create_category(
+                    session, CategoryCreate(name=f"lockp-{suffix}")
+                )
+                tracked.append(parent.id)
+                child = await create_category(
+                    session,
+                    CategoryCreate(name=f"lockc-{suffix}", parent_id=parent.id),
+                )
+                tracked.append(child.id)
+                classid, objid = _CATEGORY_TREE_LOCK_KEY
+                held = (
+                    await session.execute(
+                        text(
+                            "SELECT classid, objid FROM pg_locks "
+                            "WHERE locktype = 'advisory' "
+                            "AND pid = pg_backend_pid()"
+                        )
+                    )
+                ).all()
+                assert (classid, objid) in {(row[0], row[1]) for row in held}
+                await update_category(session, child.id, CategoryUpdate(parent_id=None))
+                await delete_category(session, child.id)
+                await session.commit()
+                leftover = await session.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_locks "
+                        "WHERE locktype = 'advisory' "
+                        "AND pid = pg_backend_pid()"
+                    )
+                )
+                assert leftover == 0
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
 
 
 def test_category_mutations_require_manage_courses() -> None:
@@ -821,13 +850,10 @@ async def _cleanup_ids(database_url: str, ids: list[uuid.UUID]) -> None:
         async with factory() as session:
             if ids:
                 await session.execute(delete(Category).where(Category.id.in_(ids)))
-            leftover_session = await session.scalar(
-                text(
-                    "SELECT count(*) FROM pg_locks "
-                    "WHERE locktype = 'advisory' AND objsubid = 2"
-                )
+            leftover = await session.scalar(
+                text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'")
             )
-            assert leftover_session == 0
+            assert leftover == 0
             await session.commit()
     finally:
         await engine.dispose()
