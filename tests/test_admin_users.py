@@ -1037,10 +1037,20 @@ async def test_concurrent_mutual_admin_ops_leave_one_admin(
             admin_b = await _insert_admin(session, f"race-b-{fate}")
             ids = [admin_a, admin_b]
 
+        loaded = 0
+        gate = asyncio.Lock()
+        both_loaded = asyncio.Event()
+
         async def _act(actor_id: UUID, target_id: UUID) -> None:
+            nonlocal loaded
             async with AsyncSession(engine) as session, session.begin():
                 actor = await session.get(User, actor_id)
                 assert actor is not None
+                async with gate:
+                    loaded += 1
+                    if loaded == 2:
+                        both_loaded.set()
+                await both_loaded.wait()
                 if fate == "delete":
                     await soft_delete_user(session, actor=actor, user_id=target_id)
                 elif fate == "suspend":
