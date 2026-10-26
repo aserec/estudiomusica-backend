@@ -2261,7 +2261,9 @@ async def test_admin_search_fallback_keeps_nfc_not_nfkc_ligature(
 
 
 def test_name_match_compiles_without_concat() -> None:
-    compiled = _name_match("ana").compile(dialect=postgresql.dialect())
+    compiled = _name_match("ana").compile(
+        dialect=postgresql.dialect()  # type: ignore[no-untyped-call]
+    )
     sql = str(compiled)
     assert "concat(" not in sql.lower()
     assert "users.first_name || ' ' || users.last_name" in sql
