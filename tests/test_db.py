@@ -30,6 +30,22 @@ class SessionProbe(PersistentModel):
     label: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class LeakProbe(PersistentModel):
+    """Tabla persistida fuera de db_session; cada test la borra."""
+
+    __tablename__ = "session_probe_leak"
+
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class ExpireProbe(PersistentModel):
+    """Tabla para probar expire_on_commit de app.db, no del fixture."""
+
+    __tablename__ = "session_probe_expire"
+
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 @pytest.mark.asyncio
 async def test_get_session_commits_on_success(
     monkeypatch: pytest.MonkeyPatch,
@@ -167,57 +183,93 @@ async def test_get_session_rollbacks_persistently(
 
 
 @pytest.mark.db
-async def test_db_session_does_not_expire_on_commit(
-    db_session: AsyncSession,
+async def test_get_session_factory_does_not_expire_on_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
 ) -> None:
+    """expire_on_commit=False vive en app.db, no en el fixture db_session."""
+
     from sqlalchemy import inspect as sa_inspect
 
-    connection = await db_session.connection()
-    probe_table = SessionProbe.__table__
-    assert isinstance(probe_table, Table)
-    await connection.run_sync(probe_table.create)
+    from app.config import get_settings
+    from app.db import dispose_engine, get_engine, get_session_factory
 
-    probe = SessionProbe(label="still-loaded")
-    db_session.add(probe)
-    await db_session.commit()
-    assert sa_inspect(probe).expired is False
-    assert probe.label == "still-loaded"
+    monkeypatch.setenv("DATABASE_URL", require_postgres.secret())
+    get_settings.cache_clear()
+    clear_engine()
+    factory = get_session_factory()
+    assert factory.kw.get("expire_on_commit") is False
 
-
-_DB_SESSION_LEAK_LABEL = "db-session-must-not-leak"
-
-
-@pytest.mark.db
-async def test_db_session_commit_is_not_visible_outside_the_fixture(
-    db_session: AsyncSession,
-    require_postgres: RedactedDsn,
-) -> None:
-    """El fixture real envuelve el commit en una transacción que se revierte."""
-
-    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
-    probe_table = SessionProbe.__table__
+    engine = get_engine()
+    probe_table = ExpireProbe.__table__
     assert isinstance(probe_table, Table)
     try:
         async with engine.begin() as connection:
             await connection.run_sync(
                 lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
             )
-            await connection.execute(
-                text("DELETE FROM session_probes WHERE label = :label"),
-                {"label": _DB_SESSION_LEAK_LABEL},
+        async with factory() as session:
+            probe = ExpireProbe(label="still-loaded")
+            session.add(probe)
+            await session.commit()
+            assert sa_inspect(probe).expired is False
+            assert probe.label == "still-loaded"
+    finally:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
             )
+        await dispose_engine()
+        get_settings.cache_clear()
 
-        db_session.add(SessionProbe(label=_DB_SESSION_LEAK_LABEL))
-        await db_session.commit()
-        found = await db_session.scalar(
-            text("SELECT label FROM session_probes WHERE label = :label"),
-            {"label": _DB_SESSION_LEAK_LABEL},
+
+_DB_SESSION_LEAK_LABEL = "db-session-must-not-leak"
+
+
+@pytest.fixture
+async def leak_probe_table(require_postgres: RedactedDsn) -> AsyncIterator[Table]:
+    """Crea la tabla fuera de db_session y la borra después del rollback."""
+
+    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    probe_table = LeakProbe.__table__
+    assert isinstance(probe_table, Table)
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_conn: probe_table.create(sync_conn, checkfirst=True)
         )
-        assert found == _DB_SESSION_LEAK_LABEL
+        await connection.execute(text("DELETE FROM session_probe_leak"))
+    try:
+        yield probe_table
+    finally:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)
+            )
+        await engine.dispose()
 
+
+@pytest.mark.db
+async def test_db_session_commit_is_not_visible_outside_the_fixture(
+    leak_probe_table: Table,
+    db_session: AsyncSession,
+    require_postgres: RedactedDsn,
+) -> None:
+    """El fixture real envuelve el commit en una transacción que se revierte."""
+
+    db_session.add(LeakProbe(label=_DB_SESSION_LEAK_LABEL))
+    await db_session.commit()
+    found = await db_session.scalar(
+        text("SELECT label FROM session_probe_leak WHERE label = :label"),
+        {"label": _DB_SESSION_LEAK_LABEL},
+    )
+    assert found == _DB_SESSION_LEAK_LABEL
+
+    engine = create_async_engine(require_postgres.secret(), pool_pre_ping=True)
+    try:
         async with engine.connect() as connection:
             leftover = await connection.scalar(
-                text("SELECT label FROM session_probes WHERE label = :label"),
+                text("SELECT label FROM session_probe_leak WHERE label = :label"),
                 {"label": _DB_SESSION_LEAK_LABEL},
             )
             assert leftover is None
