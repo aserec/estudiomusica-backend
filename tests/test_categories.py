@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from sqlalchemy import delete, select, text
 from sqlalchemy.engine.url import make_url
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import CategoryNameTaken
@@ -1986,6 +1986,282 @@ def test_retry_does_not_expire_objects_loaded_before(
             assert calls["n"] == 2
         finally:
             categories_svc._name_taken = original
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+async def _wait_lock_waiters(monitor: AsyncSession) -> bool:
+    deadline = asyncio.get_running_loop().time() + 4.0
+    while asyncio.get_running_loop().time() < deadline:
+        waiting = await monitor.scalar(
+            text(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE datname = current_database() "
+                "AND wait_event_type = 'Lock'"
+            )
+        )
+        if int(waiting or 0) > 0:
+            return True
+        await asyncio.sleep(0.005)
+    return False
+
+
+async def _adversary_deadlock_rounds(
+    factory: Any,
+    *,
+    rounds: int,
+    hold_sql: str,
+    hold_params: dict[str, Any],
+    wait_sql: str,
+    wait_params: dict[str, Any],
+    start_api: Any,
+) -> Any:
+    async with factory() as monitor:
+        task: asyncio.Task[Any] | None = None
+        for _ in range(rounds):
+            async with factory() as adversary:
+                await adversary.execute(text("SET deadlock_timeout TO '10s'"))
+                await adversary.execute(text(hold_sql), hold_params)
+                if task is None:
+                    task = asyncio.create_task(start_api())
+                if not await _wait_lock_waiters(monitor):
+                    await adversary.rollback()
+                    break
+                try:
+                    await adversary.execute(text(wait_sql), wait_params)
+                except DBAPIError:
+                    await adversary.rollback()
+                else:
+                    await adversary.rollback()
+        assert task is not None
+        return await task
+
+
+async def _deadlock_this_session(
+    session: AsyncSession,
+    factory: Any,
+    *,
+    service_row: uuid.UUID,
+    blocker_row: uuid.UUID,
+) -> None:
+    from app.services.categories import _raise_from_db
+
+    ready = asyncio.Event()
+    go = asyncio.Event()
+
+    async def adversary() -> None:
+        async with factory() as other:
+            await other.execute(text("SET deadlock_timeout TO '10s'"))
+            await other.execute(
+                text("SELECT id FROM categories WHERE id = :id FOR UPDATE"),
+                {"id": blocker_row},
+            )
+            ready.set()
+            await go.wait()
+            try:
+                await other.execute(
+                    text("SELECT id FROM categories WHERE id = :id FOR UPDATE"),
+                    {"id": service_row},
+                )
+            except DBAPIError:
+                await other.rollback()
+            else:
+                await other.rollback()
+
+    task = asyncio.create_task(adversary())
+    await ready.wait()
+    await session.execute(text("SET LOCAL deadlock_timeout TO '20ms'"))
+
+    async def poke() -> None:
+        await asyncio.sleep(0.02)
+        go.set()
+
+    poked = asyncio.create_task(poke())
+    try:
+        await session.execute(
+            text("SELECT id FROM categories WHERE id = :id FOR UPDATE"),
+            {"id": blocker_row},
+        )
+    except DBAPIError as exc:
+        poked.cancel()
+        go.set()
+        await task
+        _raise_from_db(exc)
+    go.set()
+    await task
+    raise RuntimeError("el adversario fue la víctima del deadlock")
+
+
+def test_create_retries_real_deadlock_three_times(
+    require_postgres: Any,
+    migrated_test_database: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST con deadlock real: 2 abortos, 3.er intento OK; sleep acotado."""
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+    from app.services import categories as categories_svc
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(categories_svc.asyncio, "sleep", fake_sleep)
+
+    async def run() -> None:
+        engine = create_async_engine(
+            dsn.secret(),
+            pool_size=6,
+            connect_args={"server_settings": {"deadlock_timeout": "20ms"}},
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as setup:
+                parent = await create_category(
+                    setup, CategoryCreate(name=f"rdp-{suffix}")
+                )
+                tracked.append(parent.id)
+                await setup.commit()
+            child_name = f"rdc-{suffix}"
+
+            async def start_api() -> Category:
+                async with factory() as session:
+                    row = await create_category(
+                        session,
+                        CategoryCreate(name=child_name, parent_id=parent.id),
+                    )
+                    await session.commit()
+                    return row
+
+            row = await _adversary_deadlock_rounds(
+                factory,
+                rounds=2,
+                hold_sql=(
+                    "INSERT INTO categories (name, name_key, parent_id, sort_order) "
+                    "VALUES (:name, :name, :parent_id, 0)"
+                ),
+                hold_params={"name": child_name, "parent_id": parent.id},
+                wait_sql="SELECT id FROM categories WHERE id = :id FOR UPDATE",
+                wait_params={"id": parent.id},
+                start_api=start_api,
+            )
+            tracked.append(row.id)
+            assert row.name == child_name
+            assert len(sleeps) == 2
+            assert all(0.01 <= delay < 1.0 for delay in sleeps)
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+def test_update_and_delete_retry_real_deadlock(
+    require_postgres: Any,
+    migrated_test_database: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PUT y DELETE con deadlock real: 3 intentos, sin sleep tras el último."""
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+    from app.exceptions import TransientDbConflict
+    from app.services import categories as categories_svc
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(categories_svc.asyncio, "sleep", fake_sleep)
+
+    async def run() -> None:
+        engine = create_async_engine(
+            dsn.secret(),
+            pool_size=6,
+            connect_args={"server_settings": {"deadlock_timeout": "20ms"}},
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        original_children = categories_svc._has_active_children
+        try:
+            async with factory() as setup:
+                first = await create_category(
+                    setup, CategoryCreate(name=f"rdu-{suffix}")
+                )
+                second = await create_category(
+                    setup, CategoryCreate(name=f"rdv-{suffix}")
+                )
+                extra = await create_category(
+                    setup, CategoryCreate(name=f"rdx-{suffix}")
+                )
+                tracked.extend([first.id, second.id, extra.id])
+                await setup.commit()
+            lo, hi = sorted((first, second), key=lambda row: row.id)
+
+            async def start_put() -> Category:
+                async with factory() as session:
+                    row = await update_category(
+                        session, lo.id, CategoryUpdate(parent_id=hi.id)
+                    )
+                    await session.commit()
+                    return row
+
+            updated = await _adversary_deadlock_rounds(
+                factory,
+                rounds=2,
+                hold_sql="SELECT id FROM categories WHERE id = :id FOR UPDATE",
+                hold_params={"id": hi.id},
+                wait_sql="SELECT id FROM categories WHERE id = :id FOR UPDATE",
+                wait_params={"id": lo.id},
+                start_api=start_put,
+            )
+            assert updated.parent_id == hi.id
+            assert len(sleeps) == 2
+            assert all(0.01 <= delay < 1.0 for delay in sleeps)
+
+            sleeps.clear()
+            calls = {"n": 0}
+
+            async def deadlock_children(
+                session: AsyncSession, category_id: uuid.UUID
+            ) -> bool:
+                calls["n"] += 1
+                if calls["n"] <= 3:
+                    await _deadlock_this_session(
+                        session,
+                        factory,
+                        service_row=extra.id,
+                        blocker_row=hi.id,
+                    )
+                return await original_children(session, category_id)
+
+            categories_svc._has_active_children = deadlock_children
+            with pytest.raises(TransientDbConflict):
+                async with factory() as session:
+                    await delete_category(session, extra.id)
+            assert calls["n"] == 3
+            assert len(sleeps) == 2
+            assert all(0.01 <= delay < 1.0 for delay in sleeps)
+        finally:
+            categories_svc._has_active_children = original_children
             await engine.dispose()
 
     try:
