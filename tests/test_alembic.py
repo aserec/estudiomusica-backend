@@ -1,7 +1,10 @@
 import asyncio
 import importlib
 import importlib.util
+import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -209,12 +212,71 @@ def test_alembic_revision_chain_is_linear() -> None:
     assert script.get_revision("0001_initial").down_revision is None
 
 
+def test_alembic_check_has_no_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    """`alembic check` exit 0. Si el modelo pasa citext→varchar, falla."""
+
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = alembic_config(dsn)
+    command.upgrade(config, "head")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = dsn.secret()
+    env.pop("PYTEST_ADDOPTS", None)
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, output
+    assert "IndexError" not in output
+    assert "No new upgrade operations detected." in output
+
+
 class MigratedTriggerProbe(PersistentModel):
     """Tabla solo de test: el hook de autogenerate debe verla."""
 
     __tablename__ = "migrated_trigger_probes"
 
     label: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class _AutogenOpts:
+    def __init__(self, autogenerate: bool) -> None:
+        self.autogenerate = autogenerate
+
+
+class _AutogenConfig:
+    def __init__(self, autogenerate: bool) -> None:
+        self.cmd_opts = _AutogenOpts(autogenerate)
+
+
+class _AutogenContext:
+    def __init__(self, autogenerate: bool) -> None:
+        self.config = _AutogenConfig(autogenerate)
+
+
+def test_autogenerate_hook_keeps_empty_revision_for_check() -> None:
+    """`alembic check` no es --autogenerate: el directive vacío debe quedarse."""
+
+    class _Script:
+        def __init__(self) -> None:
+            self.upgrade_ops = ops.UpgradeOps([])
+
+    script = _Script()
+    directives: list[object] = [script]
+    process_revision_directives(_AutogenContext(False), None, directives)  # type: ignore[arg-type]
+    assert directives == [script]
+    process_revision_directives(None, None, directives)  # type: ignore[arg-type]
+    assert directives == [script]
 
 
 def test_autogenerate_hook_drops_empty_revision() -> None:
@@ -224,7 +286,7 @@ def test_autogenerate_hook_drops_empty_revision() -> None:
 
     script = _Script()
     directives: list[object] = [script]
-    process_revision_directives(None, None, directives)  # type: ignore[arg-type]
+    process_revision_directives(_AutogenContext(True), None, directives)  # type: ignore[arg-type]
     assert directives == []
 
 

@@ -89,11 +89,11 @@ def test_production_admin_category_crud(
 
         updated = production_client.put(
             f"{_ADMIN}/{category_id}",
-            json={"name": f"{name}-b", "description": "editado"},
+            json={"name": f"{name}-b"},
         )
         assert updated.status_code == 200
         assert updated.json()["name"] == f"{name}-b"
-        assert updated.json()["description"] == "editado"
+        assert updated.json()["description"] == "demo"
     finally:
         deleted = production_client.delete(f"{_ADMIN}/{category_id}")
         assert deleted.status_code == 204

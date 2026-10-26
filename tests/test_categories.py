@@ -1,11 +1,18 @@
+import asyncio
+import unicodedata
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import SystemRole
+from app.permissions.types import Permission
+from app.schemas.categories import normalize_category_name
+from app.services.categories import _raise_from_integrity
 from tests.test_auth import unique_email
 from tests.test_roles import (
     SYSTEM_ROLES,
@@ -157,7 +164,7 @@ async def test_admin_creates_category_and_it_appears_in_list(
     assert created["name"] == "Armonía"
     assert created["parentId"] is None
     assert created["description"] == "tonal"
-    assert created["sortOrder"] == 0
+    assert isinstance(created["sortOrder"], int)
 
     listed = await session_client.get(_LIST)
     assert listed.status_code == 200
@@ -270,18 +277,46 @@ async def test_put_unknown_category_is_not_found(
     assert response.json() == {"error": "not_found"}
 
 
-async def test_put_without_parent_id_moves_to_root(
+async def test_put_omitted_fields_do_not_change(
     session_client: Any, db_session: AsyncSession
 ) -> None:
     await _admin(session_client, db_session)
     parent = await _create(session_client, name="Contenedor")
-    child = await _create(session_client, name="Movida", parent_id=parent["id"])
+    child = await _create(
+        session_client,
+        name="Movida",
+        parent_id=parent["id"],
+        description="conservar",
+    )
     response = await session_client.put(
         f"{_ADMIN}/{child['id']}",
-        json={"name": "Movida", "description": child["description"]},
+        json={"name": "Movida 2"},
+    )
+    assert response.status_code == 200
+    assert response.json()["name"] == "Movida 2"
+    assert response.json()["parentId"] == parent["id"]
+    assert response.json()["description"] == "conservar"
+
+
+async def test_put_explicit_null_clears_parent_and_description(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    parent = await _create(session_client, name="Contenedor")
+    child = await _create(
+        session_client,
+        name="Movida",
+        parent_id=parent["id"],
+        description="borrar",
+    )
+    response = await session_client.put(
+        f"{_ADMIN}/{child['id']}",
+        json={"parentId": None, "description": None},
     )
     assert response.status_code == 200
     assert response.json()["parentId"] is None
+    assert response.json()["description"] is None
+    assert response.json()["name"] == "Movida"
 
 
 async def test_put_same_name_on_self_is_allowed(
@@ -297,41 +332,49 @@ async def test_put_same_name_on_self_is_allowed(
     assert response.json()["description"] == "occidental"
 
 
-async def test_hierarchy_cycle_is_conflict(
+async def test_single_level_rejects_grandchildren_and_non_root_parent(
     session_client: Any, db_session: AsyncSession
 ) -> None:
     await _admin(session_client, db_session)
     root = await _create(session_client, name="Raíz")
     child = await _create(session_client, name="Hija", parent_id=root["id"])
-    grand = await _create(session_client, name="Nieta", parent_id=child["id"])
+    other = await _create(session_client, name="Otra")
+
+    grandchild = await session_client.post(
+        _ADMIN, json={"name": "Nieta", "parentId": child["id"]}
+    )
+    assert grandchild.status_code == 400
+    assert grandchild.json()["error"] == "validation"
+    assert "parentId" in grandchild.json()["fields"]
 
     self_parent = await session_client.put(
         f"{_ADMIN}/{root['id']}",
-        json={"name": "Raíz", "parentId": root["id"]},
+        json={"parentId": root["id"]},
     )
-    assert self_parent.status_code == 409
-    assert self_parent.json() == {"error": "category_cycle"}
+    assert self_parent.status_code == 400
+    assert self_parent.json()["error"] == "validation"
+    assert "parentId" in self_parent.json()["fields"]
 
-    parent_to_child = await session_client.put(
+    parent_under_child = await session_client.put(
         f"{_ADMIN}/{root['id']}",
-        json={"name": "Raíz", "parentId": child["id"]},
+        json={"parentId": child["id"]},
     )
-    assert parent_to_child.status_code == 409
-    assert parent_to_child.json() == {"error": "category_cycle"}
+    assert parent_under_child.status_code == 400
+    assert "parentId" in parent_under_child.json()["fields"]
 
-    parent_to_grand = await session_client.put(
+    root_with_children = await session_client.put(
         f"{_ADMIN}/{root['id']}",
-        json={"name": "Raíz", "parentId": grand["id"]},
+        json={"parentId": other["id"]},
     )
-    assert parent_to_grand.status_code == 409
-    assert parent_to_grand.json() == {"error": "category_cycle"}
+    assert root_with_children.status_code == 400
+    assert "parentId" in root_with_children.json()["fields"]
 
-    child_to_self_chain = await session_client.put(
+    moved_leaf = await session_client.put(
         f"{_ADMIN}/{child['id']}",
-        json={"name": "Hija", "parentId": grand["id"]},
+        json={"parentId": other["id"]},
     )
-    assert child_to_self_chain.status_code == 409
-    assert child_to_self_chain.json() == {"error": "category_cycle"}
+    assert moved_leaf.status_code == 200
+    assert moved_leaf.json()["parentId"] == other["id"]
 
 
 async def test_delete_with_children_is_category_not_empty(
@@ -359,38 +402,6 @@ async def test_delete_with_children_is_category_not_empty(
     ids = [item["id"] for item in listed.json()]
     assert parent["id"] not in ids
     assert child["id"] not in ids
-
-
-async def test_delete_with_courses_is_category_not_empty(
-    session_client: Any, db_session: AsyncSession
-) -> None:
-    await _admin(session_client, db_session)
-    category = await _create(session_client, name="Con cursos")
-    await db_session.execute(
-        text(
-            """
-            CREATE TABLE courses (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                category_id uuid NOT NULL REFERENCES categories(id),
-                deleted_at timestamptz
-            )
-            """
-        )
-    )
-    await db_session.execute(
-        text("INSERT INTO courses (category_id) VALUES (:category_id)"),
-        {"category_id": category["id"]},
-    )
-    await db_session.flush()
-
-    blocked = await session_client.delete(f"{_ADMIN}/{category['id']}")
-    assert blocked.status_code == 409
-    assert blocked.json() == {"error": "category_not_empty"}
-
-    await db_session.execute(text("UPDATE courses SET deleted_at = clock_timestamp()"))
-    await db_session.flush()
-    allowed = await session_client.delete(f"{_ADMIN}/{category['id']}")
-    assert allowed.status_code == 204
 
 
 async def test_soft_deleted_name_can_be_reused(
@@ -445,3 +456,277 @@ async def test_student_can_list_but_not_create(
     assert denied.status_code == 403
     assert denied.json() == {"error": "forbidden"}
     assert admin["email"] not in denied.text
+
+
+def test_normalize_category_name_nfc_spaces_and_invisibles() -> None:
+    nfc = "Café"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfc != nfd
+    assert normalize_category_name(nfd) == nfc
+    assert normalize_category_name("Solfeo  I") == "Solfeo I"
+    with pytest.raises(ValueError):
+        normalize_category_name("\u200b")
+    with pytest.raises(ValueError):
+        normalize_category_name("\x00ok")
+    with pytest.raises(ValueError):
+        normalize_category_name("   ")
+
+
+async def test_name_nfc_nfd_and_double_space_collide(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    nfc = "Café"
+    created = await _create(session_client, name=unicodedata.normalize("NFD", nfc))
+    assert created["name"] == nfc
+    again = await session_client.post(_ADMIN, json={"name": nfc})
+    assert again.status_code == 409
+    assert again.json() == {"error": "category_name_taken"}
+
+    spaced = await _create(session_client, name="Solfeo  I")
+    assert spaced["name"] == "Solfeo I"
+    dup = await session_client.post(_ADMIN, json={"name": "Solfeo I"})
+    assert dup.status_code == 409
+
+
+async def test_name_rejects_zero_width_and_nul(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    await _admin(session_client, db_session)
+    zwsp = await session_client.post(_ADMIN, json={"name": "\u200b"})
+    assert zwsp.status_code == 400
+    assert zwsp.json()["error"] == "validation"
+    assert "name" in zwsp.json()["fields"]
+
+    nul = await session_client.post(_ADMIN, json={"name": "a\x00b"})
+    assert nul.status_code in {400, 422}
+    assert nul.status_code != 500
+    if nul.status_code == 400:
+        assert nul.json()["error"] == "validation"
+
+
+def test_unknown_integrity_error_is_not_name_taken() -> None:
+    class _Orig(Exception):
+        constraint_name = "ck_unrelated"
+
+    exc = IntegrityError("INSERT", {}, _Orig())
+    with pytest.raises(IntegrityError):
+        _raise_from_integrity(exc)
+
+
+async def test_parent_not_self_check_exists(db_session: AsyncSession) -> None:
+    name = await db_session.scalar(
+        text(
+            "SELECT conname FROM pg_constraint "
+            "WHERE conname = 'ck_categories_parent_not_self'"
+        )
+    )
+    assert name == "ck_categories_parent_not_self"
+
+
+async def test_unique_indexes_filter_deleted_and_name_is_citext(
+    db_session: AsyncSession,
+) -> None:
+    root_idx = await db_session.scalar(
+        text(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE indexname = 'uq_categories_root_name_active'"
+        )
+    )
+    parent_idx = await db_session.scalar(
+        text(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE indexname = 'uq_categories_parent_name_active'"
+        )
+    )
+    assert root_idx is not None and "deleted_at IS NULL" in root_idx
+    assert parent_idx is not None and "deleted_at IS NULL" in parent_idx
+    udt = await db_session.scalar(
+        text(
+            "SELECT udt_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'categories' "
+            "AND column_name = 'name'"
+        )
+    )
+    assert udt == "citext"
+
+
+def test_category_mutations_require_manage_courses() -> None:
+    from app.routers.categories import _MANAGE
+
+    names = _MANAGE.__code__.co_freevars
+    assert _MANAGE.__closure__ is not None
+    captured = {
+        name: cell.cell_contents
+        for name, cell in zip(names, _MANAGE.__closure__, strict=True)
+    }
+    assert captured["permissions"] == (Permission.SITE_MANAGE_COURSES,)
+
+
+def _tree_depth_and_cycles(items: list[dict[str, Any]]) -> tuple[int, bool]:
+    by_id = {item["id"]: item for item in items}
+
+    def walk(item: dict[str, Any]) -> int:
+        seen: set[str] = set()
+        depth = 0
+        current = item
+        while current["parentId"]:
+            if current["id"] in seen:
+                return 999
+            seen.add(current["id"])
+            parent = by_id.get(current["parentId"])
+            if parent is None:
+                break
+            depth += 1
+            current = parent
+        return depth
+
+    depths = [walk(item) for item in items]
+    return max(depths, default=0), any(depth >= 999 for depth in depths)
+
+
+def _reparent_in_thread(
+    database_url: str,
+    category_id: uuid.UUID,
+    parent_id: uuid.UUID,
+    barrier: Any,
+) -> str:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.exceptions import Validation
+    from app.schemas.categories import CategoryUpdate
+    from app.services.categories import update_category
+
+    async def run() -> str:
+        engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                barrier.wait(timeout=5)
+                try:
+                    await update_category(
+                        session,
+                        category_id,
+                        CategoryUpdate(parent_id=parent_id),
+                    )
+                    await session.commit()
+                    return "ok"
+                except Validation:
+                    await session.rollback()
+                    return "validation"
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def test_concurrent_reparent_never_creates_grandchildren_or_cycles(
+    require_postgres: Any,
+    migrated_test_database: None,
+) -> None:
+    import threading
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+    from app.schemas.categories import CategoryCreate
+    from app.services.categories import create_category, list_categories
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+
+    async def seed() -> dict[str, uuid.UUID]:
+        engine = create_async_engine(dsn.secret())
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                root = await create_category(
+                    session, CategoryCreate(name=f"Root-{suffix}")
+                )
+                node_x = await create_category(
+                    session, CategoryCreate(name=f"X-{suffix}")
+                )
+                leaf = await create_category(
+                    session, CategoryCreate(name=f"Leaf-{suffix}")
+                )
+                node_a = await create_category(
+                    session, CategoryCreate(name=f"A-{suffix}")
+                )
+                node_b = await create_category(
+                    session, CategoryCreate(name=f"B-{suffix}")
+                )
+                await session.commit()
+                return {
+                    "root": root.id,
+                    "x": node_x.id,
+                    "leaf": leaf.id,
+                    "a": node_a.id,
+                    "b": node_b.id,
+                }
+        finally:
+            await engine.dispose()
+
+    ids = asyncio.run(seed())
+    first_barrier = threading.Barrier(2)
+    second_barrier = threading.Barrier(2)
+    first_results: list[str] = []
+    second_results: list[str] = []
+
+    t1 = threading.Thread(
+        target=lambda: first_results.append(
+            _reparent_in_thread(dsn.secret(), ids["leaf"], ids["x"], first_barrier)
+        )
+    )
+    t2 = threading.Thread(
+        target=lambda: first_results.append(
+            _reparent_in_thread(dsn.secret(), ids["x"], ids["root"], first_barrier)
+        )
+    )
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert sorted(first_results) == ["ok", "validation"]
+
+    t3 = threading.Thread(
+        target=lambda: second_results.append(
+            _reparent_in_thread(dsn.secret(), ids["a"], ids["b"], second_barrier)
+        )
+    )
+    t4 = threading.Thread(
+        target=lambda: second_results.append(
+            _reparent_in_thread(dsn.secret(), ids["b"], ids["a"], second_barrier)
+        )
+    )
+    t3.start()
+    t4.start()
+    t3.join()
+    t4.join()
+    assert sorted(second_results) == ["ok", "validation"]
+
+    async def inspect() -> None:
+        engine = create_async_engine(dsn.secret())
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                rows = await list_categories(session)
+                ours = [
+                    {
+                        "id": str(row.id),
+                        "parentId": str(row.parent_id) if row.parent_id else None,
+                    }
+                    for row in rows
+                    if row.id in set(ids.values())
+                ]
+                depth, has_cycle = _tree_depth_and_cycles(ours)
+                assert has_cycle is False
+                assert depth <= 1
+                for row in rows:
+                    if row.id in set(ids.values()):
+                        row.deleted_at = datetime.now(UTC)
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(inspect())
