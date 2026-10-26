@@ -36,6 +36,7 @@ def test_generated_unicode_tables_match_vendored_ucd() -> None:
     assert tables["ASSIGNED"] == ASSIGNED
     assert not any(start <= 0x088F <= end for start, end in ASSIGNED)
     assert not any(start <= 0x1ACF <= end for start, end in ASSIGNED)
+    assert not any(start <= 0x1FAEF <= end for start, end in ASSIGNED)
     assert any(start <= 0x0710 <= end for start, end in JOINING_R)
     assert any(start <= 0x07CA <= end for start, end in JOINING_D)
     assert any(start <= 0x1820 <= end for start, end in JOINING_D)

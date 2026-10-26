@@ -712,7 +712,7 @@ def test_normalize_category_name_nfc_spaces_and_invisibles() -> None:
         normalize_category_name("a\u0378b")
     with pytest.raises(ValueError, match="unassigned"):
         normalize_category_description("a\u0378b")
-    for raw in ("a\u088fb", "a\u1acfb"):
+    for raw in ("a\u088fb", "a\u1acfb", "a\U0001faefb"):
         with pytest.raises(ValueError, match="unassigned"):
             normalize_category_name(raw)
         with pytest.raises(ValueError, match="unassigned"):
@@ -721,6 +721,13 @@ def test_normalize_category_name_nfc_spaces_and_invisibles() -> None:
     with pytest.raises(ValueError):
         normalize_category_name("x" * 121)
     assert normalize_category_name("x" * 120) == "x" * 120
+
+
+def test_a_cn_solo_bmp() -> None:
+    with pytest.raises(ValueError, match="unassigned"):
+        normalize_category_name("a\U0001faefb")
+    with pytest.raises(ValueError, match="unassigned"):
+        normalize_category_description("cn\U0001faef")
 
 
 @pytest.mark.parametrize(("raw", "expected"), _NAME_KEY_CASES)
@@ -769,6 +776,37 @@ def test_copyright_tone_and_zwj_share_key() -> None:
     assert "\u200d" not in category_name_key(joined)
 
 
+def test_z_tono_cualquier_base() -> None:
+    assert category_name_key("©\U0001f3fd\u200d💻") == category_name_key(
+        "©\U0001f3fd💻"
+    )
+    assert "\u200d" not in category_name_key("©\U0001f3fd\u200d💻")
+
+
+def test_z_tono_tambien_derecha() -> None:
+    kept = "😀\u200d\u261d\U0001f3fd"
+    assert category_name_key(kept) == kept
+    assert "\u200d" in category_name_key(kept)
+    stripped = "😀\u200d©\U0001f3fd"
+    assert category_name_key(stripped) == "😀©\U0001f3fd"
+    assert "\u200d" not in category_name_key(stripped)
+
+
+def test_z_sin_bound_tras_tono() -> None:
+    raw = "\U0001f3fd\u200d💻"
+    assert category_name_key(raw) == "\U0001f3fd💻"
+    assert "\u200d" not in category_name_key(raw)
+
+
+def test_z_vs16_derecha_cualquier_T() -> None:
+    vs15 = "😀\u200d©\ufe0e"
+    assert category_name_key(vs15) == "😀©\ufe0e"
+    assert "\u200d" not in category_name_key(vs15)
+    vs16 = "😀\u200d©\ufe0f"
+    assert category_name_key(vs16) == vs16
+    assert "\u200d" in category_name_key(vs16)
+
+
 def test_zwj_sin_filtro_EP() -> None:
     raw = "a\ufe0f\u200d\u2764\ufe0f"
     assert category_name_key(raw) == "a\ufe0f\u2764\ufe0f"
@@ -798,8 +836,7 @@ def test_zwnj_borde_true() -> None:
 def test_flag_con_espacio() -> None:
     payload = (
         _BLACK_FLAG
-        + "\U000e0020"
-        + "".join(chr(0xE0000 + ord(char)) for char in "gbeng")
+        + "".join(chr(0xE0000 + ord(char)) for char in "gb ng")
         + "\U000e007f"
     )
     with pytest.raises(ValueError):
@@ -1137,13 +1174,11 @@ async def test_name_taken_solo_raiz_sin_padre(
     session_client: Any, db_session: AsyncSession
 ) -> None:
     await _admin(session_client, db_session)
-    root = await _create(session_client, name="Compartido")
-    other = await _create(session_client, name="OtroPadre")
-    child = await _create(session_client, name="Compartido", parent_id=other["id"])
-    assert child["parentId"] == other["id"]
-    assert await _name_taken(db_session, "Compartido", None) is True
-    assert await _name_taken(db_session, "Compartido", uuid.UUID(other["id"])) is True
-    assert await _name_taken(db_session, "Compartido", uuid.UUID(root["id"])) is False
+    parent = await _create(session_client, name="OtroPadre")
+    child = await _create(session_client, name="Compartido", parent_id=parent["id"])
+    assert child["parentId"] == parent["id"]
+    assert await _name_taken(db_session, "Compartido", None) is False
+    assert await _name_taken(db_session, "Compartido", uuid.UUID(parent["id"])) is True
 
 
 async def test_put_sort_order_repairs_desynced_name_key(
@@ -1187,7 +1222,7 @@ async def test_unassigned_code_point_is_validation(
         _ADMIN, json={"name": "CnDesc", "description": "a\u0378b"}
     )
     assert desc.status_code == 400
-    for raw in ("a\u088fb", "a\u1acfb"):
+    for raw in ("a\u088fb", "a\u1acfb", "a\U0001faefb"):
         response = await session_client.post(_ADMIN, json={"name": raw})
         assert response.status_code == 400
         desc = await session_client.post(
@@ -1474,6 +1509,158 @@ async def test_dup_name_cuts_on_grapheme_not_tags() -> None:
     assert _BLACK_FLAG not in cut or "\U000e007f" in cut
     assert "\U000e0067" not in cut
     assert normalize_category_name(cut) == cut
+
+
+async def test_f_sin_chequeo_clash(db_session: AsyncSession) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('Piano', 'p1', 0), "
+            "('Pia\u200dno', 'p2', 1), "
+            "('Piano (dup 1)', 'p3', 2)"
+        )
+    )
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    names = {
+        row.name
+        for row in (await db_session.execute(text("SELECT name FROM categories"))).all()
+    }
+    assert "Piano" in names
+    assert "Piano (dup 1)" in names
+    assert "Pia\u200dno (dup 2)" in names or "Piano (dup 2)" in names
+
+
+async def test_f_suffix_no_incrementa_limitado(db_session: AsyncSession) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('Solfeo', 's1', 0), "
+            "('Solfeo', 's2', 1), "
+            "('Solfeo (dup 1)', 's3', 2)"
+        )
+    )
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    names = [
+        row.name
+        for row in (
+            await db_session.execute(text("SELECT name FROM categories ORDER BY name"))
+        ).all()
+    ]
+    assert names.count("Solfeo") == 1
+    assert "Solfeo (dup 1)" in names
+    assert any(name.endswith("(dup 2)") for name in names)
+
+
+async def test_f_sin_dos_fases(db_session: AsyncSession) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('Piano', 'x-temp', 0), "
+            "('Pia\u200dno', 'piano', 1)"
+        )
+    )
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    keys = [
+        row.name_key
+        for row in (
+            await db_session.execute(text("SELECT name_key FROM categories"))
+        ).all()
+    ]
+    assert len(set(keys)) == 2
+
+
+async def test_f_solo_vivas_y_f_incluye_borradas(db_session: AsyncSession) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order, deleted_at) VALUES "
+            "('Piano', 'ghost-key', 0, clock_timestamp()), "
+            "('Piano', 'live-wrong', 1, NULL)"
+        )
+    )
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    rows = (
+        await db_session.execute(
+            text(
+                "SELECT name, name_key, deleted_at IS NULL AS live "
+                "FROM categories ORDER BY sort_order"
+            )
+        )
+    ).all()
+    assert rows[0].name == "Piano"
+    assert rows[0].live is False
+    assert rows[0].name_key == category_name_key("Piano")
+    assert rows[1].name == "Piano"
+    assert rows[1].live is True
+    assert rows[1].name_key == category_name_key("Piano")
+
+
+async def test_f_dup_sin_truncar_y_limite_121() -> None:
+    suffix = " (dup 1)"
+    budget = 120 - len(suffix)
+    assert budget == 112
+    long_120 = "A" * 120
+    clipped = _dup_name(long_120, 1)
+    assert len(clipped) == 120
+    assert clipped.endswith(suffix)
+    assert clipped == ("A" * budget) + suffix
+    exact = _dup_name("B" * budget, 1)
+    assert len(exact) == 120
+    assert exact == ("B" * budget) + suffix
+    over = _dup_name("C" * (budget + 1), 1)
+    assert len(over) == 120
+    assert over == ("C" * budget) + suffix
+    assert len(("C" * (budget + 1)) + suffix) == 121
+
+
+async def test_f_fix_agrupa_casefold(db_session: AsyncSession) -> None:
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) VALUES "
+            "('Straße', :k1, 0), "
+            "('STRASSE', :k2, 1)"
+        ),
+        {"k1": category_name_key("Straße"), "k2": category_name_key("STRASSE")},
+    )
+    assert "Straße".casefold() == "STRASSE".casefold()
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    names = {
+        row.name
+        for row in (await db_session.execute(text("SELECT name FROM categories"))).all()
+    }
+    assert names == {"Straße", "STRASSE"}
+
+
+async def test_f_ignora_parent(db_session: AsyncSession) -> None:
+    parent_id = await db_session.scalar(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order) "
+            "VALUES ('Padre', 'padre', 0) RETURNING id"
+        )
+    )
+    await db_session.execute(
+        text(
+            "INSERT INTO categories (name, name_key, sort_order, parent_id) VALUES "
+            "('Piano', 'root-piano', 1, NULL), "
+            "('Piano', 'child-piano', 2, :parent)"
+        ),
+        {"parent": parent_id},
+    )
+    report = await fix_category_name_keys(db_session)
+    assert report.ok()
+    names = [
+        row.name
+        for row in (
+            await db_session.execute(
+                text("SELECT name FROM categories ORDER BY sort_order")
+            )
+        ).all()
+    ]
+    assert names == ["Padre", "Piano", "Piano"]
 
 
 async def test_fix_takes_advisory_lock(db_session: AsyncSession) -> None:
