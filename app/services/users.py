@@ -273,7 +273,6 @@ async def update_user_identity(
     actor_row, target = await _lock_actor_and_target(
         session, actor_id=actor.id, target_id=user_id
     )
-    _require_active_admin_actor(actor_row)
     if body.first_name is not None:
         target.first_name = body.first_name
     if body.last_name is not None:
@@ -307,7 +306,6 @@ async def set_user_admin(
         actor_row, target = await _lock_actor_and_target(
             session, actor_id=actor.id, target_id=user_id
         )
-        _require_active_admin_actor(actor_row)
         if target.is_site_admin:
             return target
         return await assign_system_role(
@@ -317,7 +315,6 @@ async def set_user_admin(
     actor_row, target, locked = await _lock_actor_target_and_active_admins(
         session, actor_id=actor.id, target_id=user_id
     )
-    _require_active_admin_actor(actor_row)
     if actor_row.id == target.id:
         raise CannotModifySelf()
     already_admin = target.is_site_admin
@@ -343,7 +340,6 @@ async def set_user_suspended(
         actor_row, target = await _lock_actor_and_target(
             session, actor_id=actor.id, target_id=user_id
         )
-        _require_active_admin_actor(actor_row)
         target.suspended_at = None
         await session.flush()
         return target
@@ -351,7 +347,6 @@ async def set_user_suspended(
     actor_row, target, locked = await _lock_actor_target_and_active_admins(
         session, actor_id=actor.id, target_id=user_id
     )
-    _require_active_admin_actor(actor_row)
     if actor_row.id == target.id:
         raise CannotModifySelf()
     if target.suspended_at is None and _is_active_admin(target):
@@ -370,7 +365,6 @@ async def soft_delete_user(
     actor_row, target, locked = await _lock_actor_target_and_active_admins(
         session, actor_id=actor.id, target_id=user_id
     )
-    _require_active_admin_actor(actor_row)
     if actor_row.id == target.id:
         raise CannotModifySelf()
     if _is_active_admin(target):
@@ -409,9 +403,9 @@ async def search_users(
     if not await actor_can_search_users(session, actor):
         raise AccessDenied()
     term = q.strip()
-    email_term = _email_term(term)
     if len(term) > _SEARCH_Q_MAX:
         raise Validation(fields=["q"])
+    email_term = _email_term(term)
     full_search = _actor_has_full_search(actor)
     if not term:
         return Paginated(
@@ -452,16 +446,15 @@ async def search_users(
                 .limit(_TEACHER_SEARCH_CAP)
             )
         )
-        by_id: dict[UUID, User] = {}
+        fetched: list[User] = []
         if exact is not None:
-            by_id[exact.id] = exact
+            fetched.append(exact)
         for user in name_rows:
-            by_id.setdefault(user.id, user)
-        fetched = sorted(
-            by_id.values(),
-            key=lambda user: (user.created_at, user.id),
-            reverse=True,
-        )[:_TEACHER_SEARCH_CAP]
+            if exact is not None and user.id == exact.id:
+                continue
+            fetched.append(user)
+            if len(fetched) >= _TEACHER_SEARCH_CAP:
+                break
         total = len(fetched)
         offset = (pagination.page - 1) * pagination.page_size
         rows = fetched[offset : offset + pagination.page_size]

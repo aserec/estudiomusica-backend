@@ -1763,7 +1763,9 @@ async def test_search_nfd_email_matches_nfc_stored(
     )
     assert admin_search.status_code == 200
     assert admin_search.json()["items"][0]["email"] == stored
-    listed = await session_client.get("/api/v1/admin/users", params={"query": typed_nfd})
+    listed = await session_client.get(
+        "/api/v1/admin/users", params={"query": typed_nfd}
+    )
     assert listed.status_code == 200
     assert listed.json()["items"][0]["email"] == stored
 
@@ -1866,6 +1868,8 @@ async def test_teacher_merged_search_caps_at_ten(
     body = found.json()
     assert body["total"] == 10
     assert len(body["items"]) == 10
+    assert body["items"][0]["id"] == str(exact.id)
+    assert body["items"][0]["email"] == query
 
 
 async def test_teacher_merged_search_order(
@@ -1900,7 +1904,7 @@ async def test_teacher_merged_search_order(
     found = await session_client.get("/api/v1/users/search", params={"q": query})
     assert found.status_code == 200
     ids = [item["id"] for item in found.json()["items"]]
-    assert ids == [*reversed(name_ids), str(exact.id)]
+    assert ids == [str(exact.id), *reversed(name_ids)]
 
 
 async def test_deactivated_alumno_cannot_demote_admin(
