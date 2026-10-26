@@ -509,6 +509,7 @@ async def test_student_can_list_but_not_create(
 
 
 _FLAG_ENGLAND = "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f"
+_TAGS_GBENG = "\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f"
 _FLAG_SCOTLAND = (
     "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
 )
@@ -602,6 +603,7 @@ _NAME_KEY_CASES: tuple[tuple[str, str], ...] = (
     ("😀\u200d❤\ufe0f\ufe0e", "😀❤\ufe0f\ufe0e"),
     ("😀\u200d❤\ufe0e\ufe0f", "😀\u200d❤\ufe0e\ufe0f"),
     (_FLAG_ENGLAND + "\u200d😀", _FLAG_ENGLAND + "\u200d😀"),
+    ("A" + _TAGS_GBENG + "\u200d😀", "A" + _TAGS_GBENG + "😀"),
 )
 
 _LEGITIMATE_CF_NAMES: tuple[tuple[str, str], ...] = (
@@ -758,6 +760,14 @@ def test_subdivision_flag_zwj_element_is_kept() -> None:
     assert raw == _FLAG_ENGLAND + "\u200d😀"
     assert category_name_key(raw) == raw
     assert "\u200d" in category_name_key(raw)
+
+
+def test_tagged_non_ep_base_drops_zwj() -> None:
+    """La base no-EP + tags + ZWJ + 😀 no conserva el ZWJ (UTS #51)."""
+
+    raw = "A" + _TAGS_GBENG + "\u200d😀"
+    assert category_name_key(raw) == "A" + _TAGS_GBENG + "😀"
+    assert "\u200d" not in category_name_key(raw)
 
 
 def test_zwnj_izq_acepta_U() -> None:
@@ -3603,6 +3613,133 @@ def test_reparent_locks_parent_for_share(
         asyncio.run(run())
     finally:
         asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+def test_create_locks_parent_for_share(
+    require_postgres: Any,
+    migrated_test_database: None,
+) -> None:
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+    from app.services import categories as categories_svc
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_name_taken(
+        _session: AsyncSession,
+        _name: str,
+        _parent_id: uuid.UUID | None,
+        *,
+        exclude_id: uuid.UUID | None = None,
+    ) -> bool:
+        started.set()
+        await release.wait()
+        return False
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret(), pool_size=3, max_overflow=0)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        original = categories_svc._name_taken
+        try:
+            async with factory() as setup:
+                parent = await create_category(
+                    setup, CategoryCreate(name=f"postp-{suffix}")
+                )
+                tracked.append(parent.id)
+                await setup.commit()
+
+            categories_svc._name_taken = blocked_name_taken
+            async with factory() as holder:
+
+                async def do_create() -> None:
+                    row = await create_category(
+                        holder,
+                        CategoryCreate(name=f"postc-{suffix}", parent_id=parent.id),
+                    )
+                    tracked.append(row.id)
+                    await holder.commit()
+
+                pending = asyncio.create_task(do_create())
+                await asyncio.wait_for(started.wait(), timeout=2)
+                async with factory() as probe:
+                    with pytest.raises(DBAPIError):
+                        await probe.execute(
+                            text(
+                                "SELECT id FROM categories "
+                                "WHERE id = :id FOR UPDATE NOWAIT"
+                            ),
+                            {"id": parent.id},
+                        )
+                    await probe.rollback()
+                    with pytest.raises(DBAPIError):
+                        await probe.execute(
+                            text(
+                                "SELECT id FROM categories WHERE id = :id "
+                                "FOR NO KEY UPDATE NOWAIT"
+                            ),
+                            {"id": parent.id},
+                        )
+                    await probe.rollback()
+                    shared = await probe.scalar(
+                        text(
+                            "SELECT id FROM categories WHERE id = :id FOR SHARE NOWAIT"
+                        ),
+                        {"id": parent.id},
+                    )
+                    assert shared == parent.id
+                    await probe.rollback()
+                release.set()
+                await pending
+        finally:
+            categories_svc._name_taken = original
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
+def test_foreign_key_23503_is_not_retried(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services import categories as categories_svc
+    from app.services.categories import _raise_from_db
+
+    class _PgError(Exception):
+        sqlstate = "23503"
+
+    wrapped = IntegrityError("INSERT", {}, _PgError())
+    with pytest.raises(IntegrityError):
+        _raise_from_db(wrapped)
+
+    calls = {"n": 0}
+
+    async def boom(
+        session: AsyncSession,
+        name: str,
+        parent_id: uuid.UUID | None,
+        *,
+        exclude_id: uuid.UUID | None = None,
+    ) -> bool:
+        calls["n"] += 1
+        raise IntegrityError("INSERT", {}, _PgError())
+
+    monkeypatch.setattr(categories_svc, "_name_taken", boom)
+    with pytest.raises(IntegrityError):
+        await create_category(
+            db_session, CategoryCreate.model_validate({"name": "Fkno"})
+        )
+    assert calls["n"] == 1
 
 
 def test_category_dump_restore_preserves_rows(

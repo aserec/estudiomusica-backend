@@ -268,19 +268,21 @@ async def list_categories(session: AsyncSession) -> list[Category]:
 async def create_category(session: AsyncSession, body: CategoryCreate) -> Category:
     async def once(write: AsyncSession) -> Category:
         try:
-            if body.parent_id is not None:
-                await _assert_parent_is_root(write, body.parent_id)
-            if await _name_taken(write, body.name, body.parent_id):
+            parent_id = body.parent_id
+            if parent_id is not None:
+                parent = await _assert_parent_is_root(write, parent_id)
+                parent_id = parent.id
+            if await _name_taken(write, body.name, parent_id):
                 raise CategoryNameTaken()
             sort_order = (
                 body.sort_order
                 if body.sort_order is not None
-                else await _next_sort_order(write, body.parent_id)
+                else await _next_sort_order(write, parent_id)
             )
             row = Category(
                 name=body.name,
                 name_key=category_name_key(body.name),
-                parent_id=body.parent_id,
+                parent_id=parent_id,
                 description=body.description,
                 sort_order=sort_order,
             )
