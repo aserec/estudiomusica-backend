@@ -1,18 +1,27 @@
+import asyncio
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import get_settings
+from app.db import RedactedDsn
 from app.exceptions import AccessDenied, RoleNotAssignable
 from app.models import CourseMembership, SystemRoleRow, User
 from app.models.user import SystemRole
 from app.permissions.types import CourseRole
-from app.services.roles import assert_role_assignable, assign_system_role
+from app.schemas.roles import SystemRoleUpdate
+from app.services.roles import (
+    assert_role_assignable,
+    assign_system_role,
+    update_system_role,
+)
 from tests.test_auth import PASSWORD, signup_body, unique_email
 
 pytestmark = pytest.mark.db
@@ -566,6 +575,186 @@ async def test_deactivated_alumno_blocks_signup(
     assert blocked.status_code == 409
     assert blocked.json() == {"error": "role_not_assignable"}
     _assert_no_secrets(blocked)
+
+
+async def test_deactivate_alumno_keeps_existing_users(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    """Desactivar un rol con usuarios es válido: lo conservan, no se asigna más."""
+
+    holder = await _signup(session_client, email=unique_email("keep-al"))
+    admin = await _signup(session_client, email=unique_email("keep-ad"))
+    await _set_role(db_session, admin["id"], SystemRole.ADMIN)
+    patched = await session_client.patch(
+        "/api/v1/admin/system-roles/alumno",
+        json={"active": False},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["active"] is False
+    holder_user = await db_session.get(User, holder["id"])
+    actor = await db_session.get(User, admin["id"])
+    assert holder_user is not None and actor is not None
+    assert holder_user.system_role_id == SystemRole.ALUMNO
+    with pytest.raises(RoleNotAssignable):
+        await assign_system_role(
+            db_session,
+            actor=actor,
+            target=holder_user,
+            role_id=SystemRole.ALUMNO,
+        )
+    await db_session.refresh(holder_user)
+    assert holder_user.system_role_id == SystemRole.ALUMNO
+
+
+@asynccontextmanager
+async def _committed_admin_pair(
+    dsn: RedactedDsn,
+) -> AsyncIterator[tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID]]:
+    engine = create_async_engine(dsn.secret(), pool_pre_ping=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    actor_id: uuid.UUID | None = None
+    target_id: uuid.UUID | None = None
+    try:
+        async with factory() as session, session.begin():
+            actor = User(
+                first_name="Lock",
+                last_name="Actor",
+                email=unique_email("lock-actor"),
+                password_hash="x",
+                system_role_id=SystemRole.ADMIN,
+                is_admin=True,
+            )
+            target = User(
+                first_name="Lock",
+                last_name="Target",
+                email=unique_email("lock-target"),
+                password_hash="x",
+                system_role_id=SystemRole.ADMIN,
+                is_admin=True,
+            )
+            session.add_all([actor, target])
+            await session.flush()
+            actor_id = actor.id
+            target_id = target.id
+            alumno = await session.get(SystemRoleRow, SystemRole.ALUMNO)
+            assert alumno is not None
+            alumno.active = True
+        assert actor_id is not None and target_id is not None
+        yield factory, actor_id, target_id
+    finally:
+        async with factory() as session, session.begin():
+            for user_id in (actor_id, target_id):
+                if user_id is None:
+                    continue
+                user = await session.get(User, user_id)
+                if user is not None:
+                    await session.delete(user)
+            alumno = await session.get(SystemRoleRow, SystemRole.ALUMNO)
+            if alumno is not None:
+                alumno.active = True
+        await engine.dispose()
+
+
+async def _deactivate_alumno_vs_demote_admin(
+    factory: async_sessionmaker[AsyncSession],
+    actor_id: uuid.UUID,
+    target_id: uuid.UUID,
+) -> BaseException | None:
+    """Barrera: el PATCH retiene el lock; el assign entra en la ventana abierta."""
+
+    barrier = asyncio.Barrier(2)
+
+    async def deactivate() -> None:
+        async with factory() as session, session.begin():
+            await update_system_role(
+                session,
+                SystemRole.ALUMNO,
+                SystemRoleUpdate(active=False),
+            )
+            await barrier.wait()
+            await asyncio.sleep(0.3)
+
+    async def demote() -> None:
+        await barrier.wait()
+        async with factory() as session, session.begin():
+            actor = await session.get(User, actor_id)
+            target = await session.get(User, target_id)
+            assert actor is not None and target is not None
+            await assign_system_role(
+                session,
+                actor=actor,
+                target=target,
+                role_id=SystemRole.ALUMNO,
+            )
+
+    _patched, assigned = await asyncio.gather(
+        deactivate(), demote(), return_exceptions=True
+    )
+    if isinstance(_patched, BaseException):
+        raise _patched
+    if isinstance(assigned, BaseException):
+        return assigned
+    return None
+
+
+async def test_concurrent_deactivate_alumno_vs_demote_admin(
+    require_postgres: RedactedDsn, migrated_test_database: None
+) -> None:
+    """Con locks, quitar un admin no lo deja en alumno inactivo."""
+
+    async with _committed_admin_pair(require_postgres) as (
+        factory,
+        actor_id,
+        target_id,
+    ):
+        assigned = await _deactivate_alumno_vs_demote_admin(
+            factory, actor_id, target_id
+        )
+        assert isinstance(assigned, RoleNotAssignable)
+        async with factory() as session:
+            target = await session.get(User, target_id)
+            alumno = await session.get(SystemRoleRow, SystemRole.ALUMNO)
+            assert target is not None and alumno is not None
+            assert target.system_role_id == SystemRole.ADMIN
+            assert target.is_admin is True
+            assert alumno.active is False
+
+
+async def test_concurrent_deactivate_vs_demote_without_lock_assigns_inactive(
+    require_postgres: RedactedDsn,
+    migrated_test_database: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sin el lock, la misma barrera clava al admin en alumno inactivo."""
+
+    async def unlocked(
+        session: AsyncSession,
+        role_id: str,
+        *,
+        with_for_update: bool | dict[str, bool] | None = None,
+    ) -> SystemRoleRow | None:
+        row = await session.get(SystemRoleRow, role_id)
+        if row is None or row.deleted_at is not None:
+            return None
+        return row
+
+    monkeypatch.setattr("app.services.roles._load_system_role", unlocked)
+    async with _committed_admin_pair(require_postgres) as (
+        factory,
+        actor_id,
+        target_id,
+    ):
+        assigned = await _deactivate_alumno_vs_demote_admin(
+            factory, actor_id, target_id
+        )
+        assert assigned is None
+        async with factory() as session:
+            target = await session.get(User, target_id)
+            alumno = await session.get(SystemRoleRow, SystemRole.ALUMNO)
+            assert target is not None and alumno is not None
+            assert target.system_role_id == SystemRole.ALUMNO
+            assert target.is_admin is False
+            assert alumno.active is False
 
 
 def test_is_site_admin_follows_system_role_not_column() -> None:

@@ -103,7 +103,7 @@ DELETE /api/v1/admin/system-roles/{id}   409 si isSystem o está en uso
 GET    /api/v1/courses/{courseId}/me/permissions
 ```
 
-`GET /admin/system-roles` exige `site:manage-admins` (solo admin). Un no-admin recibe `403 {error: forbidden}`. Sin sesión o token inválido: `401 {error: unauthorized}`. Desactivar un rol impide asignarlo a usuarios nuevos; quienes ya lo tienen lo conservan. Desactivar `admin` o DELETE de un rol sembrado responde `409 {error: system_role_protected}`.
+`GET /admin/system-roles` exige `site:manage-admins` (solo admin). Un no-admin recibe `403 {error: forbidden}`. Sin sesión o token inválido: `401 {error: unauthorized}`. Desactivar un rol con usuarios es válido: quienes ya lo tienen lo conservan (aunque quede inactivo). Asignar un rol inactivo responde `409 {error: role_not_assignable}`. `assign_system_role` bloquea el destino `FOR SHARE` (y relee `active`); el PATCH bloquea `FOR UPDATE`, para no clavar a alguien en un rol que se está desactivando. Desactivar `admin` o DELETE de un rol sembrado responde `409 {error: system_role_protected}`.
 
 Dependencias reutilizables: `require_site_permission(...)` y `require_course_permission(...)` (leen `course_id` del path). La asignación de matrícula queda fuera de este ticket (#403). El TODO(#306) de visibilidad multimedia/SM3 del profesor adjunto es el flag `ASSISTANT_MEDIA_AND_SM3_VISIBLE` (por defecto `false`); no se ha inventado un permiso nuevo.
 

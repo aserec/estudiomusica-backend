@@ -34,7 +34,26 @@ def to_system_role_response(row: SystemRoleRow) -> SystemRoleResponse:
 async def get_system_role_row(
     session: AsyncSession, role_id: str
 ) -> SystemRoleRow | None:
-    row = await session.get(SystemRoleRow, role_id)
+    return await _load_system_role(session, role_id)
+
+
+async def _load_system_role(
+    session: AsyncSession,
+    role_id: str,
+    *,
+    with_for_update: bool | dict[str, bool] | None = None,
+) -> SystemRoleRow | None:
+    """Carga el rol. ``with_for_update`` refresca y retiene el lock hasta el commit."""
+
+    if with_for_update is None:
+        row = await session.get(SystemRoleRow, role_id)
+    else:
+        row = await session.get(
+            SystemRoleRow,
+            role_id,
+            with_for_update=with_for_update,
+            populate_existing=True,
+        )
     if row is None or row.deleted_at is not None:
         return None
     return row
@@ -49,10 +68,21 @@ async def list_system_roles(session: AsyncSession) -> list[SystemRoleRow]:
     return list(result)
 
 
-async def assert_role_assignable(session: AsyncSession, role_id: str) -> SystemRoleRow:
-    """Un rol inactivo no se puede asignar a usuarios nuevos."""
+async def assert_role_assignable(
+    session: AsyncSession, role_id: str, *, for_share: bool = False
+) -> SystemRoleRow:
+    """Un rol inactivo no se puede asignar a usuarios nuevos.
 
-    row = await get_system_role_row(session, role_id)
+    Con ``for_share`` bloquea ``SELECT … FOR SHARE`` y vuelve a leer
+    ``active`` tras el lock (``populate_existing``) para no asignar un
+    rol que otro PATCH está desactivando.
+    """
+
+    row = await _load_system_role(
+        session,
+        role_id,
+        with_for_update={"read": True} if for_share else None,
+    )
     if row is None:
         raise NotFound()
     if not row.active:
@@ -78,7 +108,7 @@ async def assign_system_role(
 
     if not _actor_manages_admins(actor):
         raise AccessDenied()
-    row = await assert_role_assignable(session, role_id)
+    row = await assert_role_assignable(session, role_id, for_share=True)
     target.system_role_id = row.id
     target.is_admin = row.id == SystemRole.ADMIN
     await session.flush()
@@ -88,7 +118,13 @@ async def assign_system_role(
 async def update_system_role(
     session: AsyncSession, role_id: str, body: SystemRoleUpdate
 ) -> SystemRoleRow:
-    row = await get_system_role_row(session, role_id)
+    """Actualiza el rol. Desactivar con usuarios es válido: lo conservan.
+
+    ``FOR UPDATE`` serializa con ``assign_system_role`` (``FOR SHARE``):
+    no se puede asignar un rol a la vez que se desactiva.
+    """
+
+    row = await _load_system_role(session, role_id, with_for_update=True)
     if row is None:
         raise NotFound()
     if body.active is False and row.id == SystemRole.ADMIN:
