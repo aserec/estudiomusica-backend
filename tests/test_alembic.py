@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import importlib
 import importlib.util
@@ -6,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from alembic import command
@@ -68,6 +70,11 @@ def _wipe_alembic_schema(dsn: RedactedDsn) -> None:
                 await connection.execute(
                     text("DROP TABLE IF EXISTS migrated_trigger_probes CASCADE")
                 )
+                await connection.execute(
+                    text('DROP TABLE IF EXISTS "ListaCanciones" CASCADE')
+                )
+                await connection.execute(text('DROP TABLE IF EXISTS "order" CASCADE'))
+                await connection.execute(text("DROP SCHEMA IF EXISTS catalogo CASCADE"))
                 await connection.execute(text("DROP EXTENSION IF EXISTS citext"))
                 await connection.execute(
                     text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
@@ -180,6 +187,10 @@ def test_alembic_upgrade_head_and_downgrade_base(
         _scalar(dsn, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'")
         == "set_updated_at"
     )
+    assert (
+        _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
+        == "citext"
+    )
 
     command.downgrade(config, "base")
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") is None
@@ -196,6 +207,110 @@ def test_alembic_upgrade_head_and_downgrade_base(
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
     assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
+
+
+def _execute(
+    dsn: RedactedDsn, sql: str, params: dict[str, object] | None = None
+) -> None:
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text(sql), params or {})
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def _rows(dsn: RedactedDsn, sql: str) -> list[Any]:
+    async def run() -> list[Any]:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.connect() as connection:
+                result = await connection.execute(text(sql))
+                return list(result.all())
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def test_0003_backfills_system_role_from_is_admin(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    """Crea un admin y un no-admin en 0002 y comprueba el backfill de 0003."""
+
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = alembic_config(dsn)
+
+    command.upgrade(config, "0002_auth_users")
+    _execute(
+        dsn,
+        "INSERT INTO users (first_name, last_name, email, password_hash, is_admin) "
+        "VALUES "
+        "('Ada', 'Admin', 'backfill-admin@example.com', 'x', true), "
+        "('Luis', 'Alumno', 'backfill-alumno@example.com', 'x', false)",
+    )
+    assert (
+        _scalar(
+            dsn,
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'users' AND column_name = 'system_role_id'",
+        )
+        is None
+    )
+
+    command.upgrade(config, "0003_system_roles")
+    by_email = {
+        row.email: (row.is_admin, row.system_role_id)
+        for row in _rows(
+            dsn,
+            "SELECT email, is_admin, system_role_id FROM users "
+            "WHERE email IN ('backfill-admin@example.com', "
+            "'backfill-alumno@example.com')",
+        )
+    }
+    assert by_email["backfill-admin@example.com"] == (True, "admin")
+    assert by_email["backfill-alumno@example.com"] == (False, "alumno")
+
+
+def test_0002_downgrade_keeps_preinstalled_citext(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
+
+    async def preinstall() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text("CREATE EXTENSION IF NOT EXISTS citext"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(preinstall())
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = alembic_config(dsn)
+    command.upgrade(config, "head")
+    command.downgrade(config, "0001_initial")
+    assert (
+        _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
+        == "citext"
+    )
+    command.downgrade(config, "base")
+    assert (
+        _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
+        == "citext"
+    )
+    command.upgrade(config, "head")
+    assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
 
 
 def test_alembic_revision_chain_is_linear() -> None:
@@ -310,7 +425,31 @@ def test_autogenerate_hook_adds_updated_at_trigger() -> None:
     assert len(sql_ops) == 1
     sql = str(sql_ops[0].sqltext)
     assert updated_at_trigger_name("migrated_trigger_probes") in sql
+    assert '"migrated_trigger_probes"' in sql
     assert "unrelated_table" not in sql
+
+
+def _configure_keywords(fn_name: str) -> set[str]:
+    tree = ast.parse((ROOT / "app" / "migrations" / "env.py").read_text())
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or node.name != fn_name:
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            if isinstance(func, ast.Attribute) and func.attr == "configure":
+                return {kw.arg for kw in child.keywords if kw.arg}
+    raise AssertionError(f"no se encontró context.configure en {fn_name}")
+
+
+def test_env_wires_autogen_hook_offline_and_online() -> None:
+    """K2 (sin enganche) y K3 (solo offline) deben morir."""
+
+    offline = _configure_keywords("run_migrations_offline")
+    online = _configure_keywords("do_run_migrations")
+    assert "process_revision_directives" in offline
+    assert "process_revision_directives" in online
 
 
 _PROBE_REVISION = '''"""Probe PersistentModel created via Alembic, not create_all.
@@ -632,3 +771,123 @@ def test_0001_downgrade_with_business_trigger_is_clear(
             command.downgrade(config, "base")
     finally:
         _wipe_alembic_schema(dsn)
+
+
+_TABLE_DDL = """
+CREATE TABLE {qualified} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    deleted_at timestamptz,
+    label varchar(32) NOT NULL
+)
+"""
+
+
+def test_updated_at_trigger_quotes_uppercase_reserved_and_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    from app.models.base import (
+        attach_updated_at_trigger,
+        qualify_table,
+        quote_ident,
+        updated_at_drop_trigger_sql,
+        updated_at_trigger_name,
+        updated_at_trigger_sql,
+    )
+
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    command.upgrade(alembic_config(dsn), "head")
+
+    cases = (
+        ("ListaCanciones", None),
+        ("order", None),
+        ("piezas", "catalogo"),
+    )
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text("CREATE SCHEMA IF NOT EXISTS catalogo"))
+                for table_name, schema in cases:
+                    qualified = qualify_table(table_name, schema)
+                    await connection.execute(text(f"DROP TABLE IF EXISTS {qualified}"))
+                    await connection.execute(
+                        text(_TABLE_DDL.format(qualified=qualified))
+                    )
+
+                    def _attach(
+                        sync_conn: object,
+                        name: str = table_name,
+                        sch: str | None = schema,
+                    ) -> None:
+                        attach_updated_at_trigger(sync_conn, name, schema=sch)  # type: ignore[arg-type]
+
+                    await connection.run_sync(_attach)
+                    sql = updated_at_trigger_sql(table_name, schema)
+                    assert quote_ident(table_name) in sql
+                    if schema:
+                        assert quote_ident(schema) in sql
+                    trigger = await connection.scalar(
+                        text(
+                            "SELECT tgname FROM pg_trigger t "
+                            "JOIN pg_class c ON c.oid = t.tgrelid "
+                            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                            "WHERE c.relname = :table AND n.nspname = :schema "
+                            "AND t.tgname = :tg"
+                        ),
+                        {
+                            "table": table_name,
+                            "schema": schema or "public",
+                            "tg": updated_at_trigger_name(table_name),
+                        },
+                    )
+                    assert trigger == updated_at_trigger_name(table_name)
+
+                    inserted = await connection.execute(
+                        text(
+                            f"INSERT INTO {qualified} (label) "
+                            "VALUES ('first') RETURNING id, updated_at"
+                        )
+                    )
+                    row = inserted.one()
+                    await connection.execute(
+                        text(f"UPDATE {qualified} SET label = 'second' WHERE id = :id"),
+                        {"id": row.id},
+                    )
+                    second = await connection.scalar(
+                        text(f"SELECT updated_at FROM {qualified} WHERE id = :id"),
+                        {"id": row.id},
+                    )
+                    assert second is not None
+                    assert second > row.updated_at
+
+                    await connection.execute(
+                        text(updated_at_drop_trigger_sql(table_name, schema))
+                    )
+                    leftover = await connection.scalar(
+                        text(
+                            "SELECT tgname FROM pg_trigger t "
+                            "JOIN pg_class c ON c.oid = t.tgrelid "
+                            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                            "WHERE c.relname = :table AND n.nspname = :schema "
+                            "AND t.tgname = :tg AND NOT t.tgisinternal"
+                        ),
+                        {
+                            "table": table_name,
+                            "schema": schema or "public",
+                            "tg": updated_at_trigger_name(table_name),
+                        },
+                    )
+                    assert leftover is None
+                    await connection.execute(text(f"DROP TABLE {qualified}"))
+                await connection.execute(text("DROP SCHEMA IF EXISTS catalogo CASCADE"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())

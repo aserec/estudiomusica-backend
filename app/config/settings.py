@@ -16,6 +16,17 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_FILE = _PROJECT_ROOT / ".env"
 
 
+def allow_test_database() -> bool:
+    """Opt-in de tests para un DSN ``*_test`` fuera de development.
+
+    Siempre ``False`` en runtime. No es un setting ni lee el entorno: un
+    despliegue no puede activarlo. Los tests lo sustituyen con
+    ``monkeypatch.setattr``.
+    """
+
+    return False
+
+
 class Settings(BaseSettings):
     """Ajustes de runtime.
 
@@ -148,12 +159,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_default_database_credentials(self) -> Self:
-        """Las credenciales de desarrollo no valen fuera de development.
+        """Las credenciales y bases de test no valen fuera de development.
 
         asyncpg acepta ``password``, ``user``, ``database`` y ``dbname``
         en la query; se aplican como override del DSN antes de validar.
-        Un ``*_test`` en el path se admite con credenciales no por defecto
-        (fixture ``production_client``). El override por query no.
+        El nombre ``*_test`` se rechaza en el path y en la query. Los tests
+        pueden optar in con ``allow_test_database`` (no es variable de entorno).
         """
 
         if self.app_env == "development":
@@ -164,14 +175,19 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_URL no es un DSN válido") from None
         query_password = self._query_value(parsed, "password")
         query_user = self._query_value(parsed, "user")
-        query_database = self._query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
         password = query_password or parsed.password
-        if password == _DEFAULT_DEV_PASSWORD or query_user == _DEFAULT_DEV_USER:
+        username = query_user or parsed.username
+        database = (
+            self._query_value(parsed, *_DATABASE_NAME_QUERY_KEYS)
+            or parsed.database
+            or ""
+        )
+        if password == _DEFAULT_DEV_PASSWORD or username == _DEFAULT_DEV_USER:
             raise ValueError(
                 "DATABASE_URL no puede usar la contraseña o el usuario "
                 "por defecto de desarrollo fuera de APP_ENV=development"
             )
-        if query_database and query_database.endswith("_test"):
+        if database.endswith("_test") and not allow_test_database():
             raise ValueError(
                 "DATABASE_URL no puede apuntar a una base *_test "
                 "fuera de APP_ENV=development"

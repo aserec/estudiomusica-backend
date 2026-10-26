@@ -2,6 +2,7 @@ import uuid
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -471,6 +472,81 @@ async def test_deactivated_alumno_blocks_signup(
     assert blocked.status_code == 409
     assert blocked.json() == {"error": "role_not_assignable"}
     _assert_no_secrets(blocked)
+
+
+def test_is_site_admin_follows_system_role_not_column() -> None:
+    mismatched = User(
+        first_name="Ada",
+        last_name="Lovelace",
+        email="ada-mismatch@example.com",
+        password_hash="x",
+        system_role_id=SystemRole.ALUMNO,
+        is_admin=True,
+    )
+    assert mismatched.is_admin is True
+    assert mismatched.is_site_admin is False
+    assert mismatched.system_role is SystemRole.ALUMNO
+
+    admin_flag_off = User(
+        first_name="Boss",
+        last_name="Admin",
+        email="boss-mismatch@example.com",
+        password_hash="x",
+        system_role_id=SystemRole.ADMIN,
+        is_admin=False,
+    )
+    assert admin_flag_off.is_admin is False
+    assert admin_flag_off.is_site_admin is True
+    assert admin_flag_off.system_role is SystemRole.ADMIN
+
+    unknown = User(
+        first_name="Cora",
+        last_name="Coach",
+        email="coach-unknown@example.com",
+        password_hash="x",
+        system_role_id="custom_coach",
+        is_admin=True,
+    )
+    assert unknown.system_role is SystemRole.ALUMNO
+    assert unknown.is_site_admin is False
+
+
+async def test_mismatched_is_admin_is_rejected_by_check(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client, email=unique_email("ck-drift"))
+    user = await db_session.get(User, created["id"])
+    assert user is not None
+    user.is_admin = True
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+async def test_me_is_admin_matches_system_role(
+    session_client: Any, db_session: AsyncSession
+) -> None:
+    created = await _signup(session_client, email=unique_email("me-role"))
+    me = await session_client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["systemRole"] == "alumno"
+    assert me.json()["isAdmin"] is False
+
+    await _set_role(db_session, created["id"], SystemRole.PROFESOR)
+    profesor = await session_client.get("/api/v1/auth/me")
+    assert profesor.status_code == 200
+    assert profesor.json()["systemRole"] == "profesor"
+    assert profesor.json()["isAdmin"] is False
+    denied = await session_client.get("/api/v1/admin/system-roles")
+    assert denied.status_code == 403
+    assert denied.json() == {"error": "forbidden"}
+
+    await _set_role(db_session, created["id"], SystemRole.ADMIN)
+    admin = await session_client.get("/api/v1/auth/me")
+    assert admin.status_code == 200
+    assert admin.json()["systemRole"] == "admin"
+    assert admin.json()["isAdmin"] is True
+    listed = await session_client.get("/api/v1/admin/system-roles")
+    assert listed.status_code == 200
 
 
 def test_assistant_media_setting_is_configurable() -> None:

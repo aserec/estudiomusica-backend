@@ -156,6 +156,27 @@ def test_mid_stream_exception_is_reraised(
     assert "mid-stream" in caplog.text
 
 
+def test_offline_production_client_is_production(
+    offline_production_client: TestClient,
+) -> None:
+    from fastapi import Response
+
+    from app.auth.cookies import attach_session_cookie
+    from app.config import get_settings
+
+    settings = get_settings()
+    assert settings.app_env == "production"
+    assert settings.auth_cookie_secure() is True
+    assert settings.expose_errors is False
+    assert settings.example_routes_enabled() is False
+    response = Response()
+    attach_session_cookie(response, "dummy-token", settings)
+    cookie = str(response.headers.get("set-cookie", ""))
+    assert "Secure" in cookie
+    assert "HttpOnly" in cookie
+    assert "samesite=lax" in cookie.lower()
+
+
 def test_production_500_has_no_message(
     offline_production_client: TestClient,
 ) -> None:

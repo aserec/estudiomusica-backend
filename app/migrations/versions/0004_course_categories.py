@@ -5,8 +5,9 @@ Revises: 0003_system_roles
 Create Date: 2026-10-25
 
 Crea ``categories`` (árbol con ``parent_id``) y monta ``set_updated_at()``
-con ``op_create_updated_at_trigger``. El CRUD de cursos (#401) añadirá
-``courses.category_id`` FK a esta tabla.
+con ``op_create_updated_at_trigger`` (0001 solo crea la función; el SQL
+del trigger va quoted por el preparer). #97 añadirá ``courses.category_id``
+FK a esta tabla.
 """
 
 from collections.abc import Sequence

@@ -111,6 +111,38 @@ def test_packaged_alembic_ini_is_importable() -> None:
     assert files("app").joinpath("alembic.ini").is_file()
 
 
+def test_make_alembic_config_loads_packaged_ini() -> None:
+    from alembic.script import ScriptDirectory
+
+    from app.migrations.config import make_alembic_config, packaged_alembic_ini
+
+    config = make_alembic_config()
+    assert config.config_file_name is not None
+    loaded = Path(config.config_file_name).resolve()
+    assert loaded == packaged_alembic_ini().resolve()
+    assert loaded.parent.name == "app"
+    assert "prepend_sys_path = ." not in loaded.read_text()
+    assert ScriptDirectory.from_config(config).get_heads() == ["0004_course_categories"]
+
+
+def test_alembic_config_does_not_prepend_cwd_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from alembic.script import ScriptDirectory
+
+    from app.migrations.config import make_alembic_config
+
+    fake_app = tmp_path / "app"
+    fake_app.mkdir()
+    (fake_app / "__init__.py").write_text(
+        "raise RuntimeError('cwd app shadowed the installed package')\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    config = make_alembic_config()
+    assert (config.get_main_option("prepend_sys_path") or "") == ""
+    assert ScriptDirectory.from_config(config).get_heads() == ["0004_course_categories"]
+
+
 def test_alembic_config_escapes_percent_in_password() -> None:
     """set_main_option interpola '%'; hay que pasar '%%' para no romper el DSN."""
 

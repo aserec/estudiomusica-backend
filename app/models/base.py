@@ -4,8 +4,12 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, MetaData, Table, Uuid, event, func, text
+from sqlalchemy.dialects.postgresql.base import PGDialect
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql.elements import quoted_name
+
+_PG_PREPARER = PGDialect().identifier_preparer  # type: ignore[no-untyped-call]
 
 NAMING_CONVENTION: dict[str, str] = {
     "ix": "ix_%(column_0_label)s",
@@ -22,26 +26,50 @@ def updated_at_trigger_name(table_name: str) -> str:
     return f"{table_name}_set_updated_at"
 
 
-def updated_at_trigger_sql(table_name: str) -> str:
+def quote_ident(name: str) -> str:
+    """Identificador entrecomillado (mayúsculas, reservadas, schema)."""
+
+    return _PG_PREPARER.quote(quoted_name(name, quote=True))
+
+
+def qualify_table(table_name: str, schema: str | None = None) -> str:
+    table = quote_ident(table_name)
+    if schema:
+        return f"{quote_ident(schema)}.{table}"
+    return table
+
+
+def updated_at_trigger_sql(table_name: str, schema: str | None = None) -> str:
     """SQL para montar el trigger BEFORE UPDATE en una tabla."""
 
+    trigger = quote_ident(updated_at_trigger_name(table_name))
+    table = qualify_table(table_name, schema)
+    function = quote_ident(UPDATED_AT_FUNCTION)
     return (
-        f"CREATE TRIGGER {updated_at_trigger_name(table_name)} "
-        f"BEFORE UPDATE ON {table_name} "
-        f"FOR EACH ROW EXECUTE FUNCTION {UPDATED_AT_FUNCTION}()"
+        f"CREATE TRIGGER {trigger} "
+        f"BEFORE UPDATE ON {table} "
+        f"FOR EACH ROW EXECUTE FUNCTION {function}()"
     )
 
 
-def attach_updated_at_trigger(connection: Connection, table_name: str) -> None:
+def updated_at_drop_trigger_sql(table_name: str, schema: str | None = None) -> str:
+    trigger = quote_ident(updated_at_trigger_name(table_name))
+    table = qualify_table(table_name, schema)
+    return f"DROP TRIGGER IF EXISTS {trigger} ON {table}"
+
+
+def attach_updated_at_trigger(
+    connection: Connection, table_name: str, schema: str | None = None
+) -> None:
     """Ejecuta el CREATE TRIGGER (conexión síncrona: Alembic / after_create)."""
 
-    connection.execute(text(updated_at_trigger_sql(table_name)))
+    connection.execute(text(updated_at_trigger_sql(table_name, schema)))
 
 
 def _after_create_updated_at_trigger(
     target: Table, connection: Connection, **_kwargs: object
 ) -> None:
-    attach_updated_at_trigger(connection, target.name)
+    attach_updated_at_trigger(connection, target.name, schema=target.schema)
 
 
 class Base(DeclarativeBase):

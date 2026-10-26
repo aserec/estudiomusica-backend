@@ -1,14 +1,14 @@
 import asyncio
 import unicodedata
 import uuid
-from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import delete, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models import Category
 from app.models.user import SystemRole
 from app.permissions.types import Permission
 from app.schemas.categories import normalize_category_name
@@ -722,9 +722,9 @@ def test_concurrent_reparent_never_creates_grandchildren_or_cycles(
                 depth, has_cycle = _tree_depth_and_cycles(ours)
                 assert has_cycle is False
                 assert depth <= 1
-                for row in rows:
-                    if row.id in set(ids.values()):
-                        row.deleted_at = datetime.now(UTC)
+                await session.execute(
+                    delete(Category).where(Category.id.in_(list(ids.values())))
+                )
                 await session.commit()
         finally:
             await engine.dispose()
