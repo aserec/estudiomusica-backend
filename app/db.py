@@ -18,13 +18,25 @@ _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
+_QUERY_SECRET_KEYS = frozenset({"password", "sslpassword"})
+
+
 def redact_database_url(url: str) -> str:
-    """DSN sin contraseña, para logs y mensajes de error."""
+    """DSN sin contraseña, para logs y mensajes de error.
+
+    Oculta la del netloc y las de ``password`` / ``sslpassword`` en la
+    query, sin distinguir mayúsculas.
+    """
 
     try:
-        return make_url(url).render_as_string(hide_password=True)
+        parsed = make_url(url)
     except Exception:
         return "<dsn-redactado>"
+    query = dict(parsed.query or {})
+    for key in list(query):
+        if str(key).lower() in _QUERY_SECRET_KEYS:
+            query[key] = "***"
+    return parsed.set(query=query).render_as_string(hide_password=True)
 
 
 class RedactedDsn:

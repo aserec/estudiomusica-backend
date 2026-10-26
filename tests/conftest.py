@@ -482,6 +482,26 @@ def _as_redacted_dsn(database_url: str | RedactedDsn) -> RedactedDsn:
     return RedactedDsn(database_url)
 
 
+def _dsn_secret_values(dsn: RedactedDsn) -> tuple[str, ...]:
+    """Contraseñas del netloc y de ``password`` / ``sslpassword`` en la query."""
+
+    try:
+        parsed = make_url(dsn.secret())
+    except Exception:
+        return ()
+    values: list[str] = []
+    if parsed.password:
+        values.append(parsed.password)
+    for key, raw in (parsed.query or {}).items():
+        if str(key).lower() not in {"password", "sslpassword"}:
+            continue
+        if isinstance(raw, (list, tuple)):
+            raw = raw[0] if raw else ""
+        if raw:
+            values.append(str(raw))
+    return tuple(values)
+
+
 def _redacted_exception_detail(exc: BaseException, dsn: RedactedDsn) -> str:
     """Texto de la causa sin la contraseña del DSN."""
 
@@ -491,11 +511,7 @@ def _redacted_exception_detail(exc: BaseException, dsn: RedactedDsn) -> str:
     secret = dsn.secret()
     if secret:
         text = text.replace(secret, str(dsn))
-    try:
-        password = make_url(secret).password
-    except Exception:
-        password = None
-    if password:
+    for password in _dsn_secret_values(dsn):
         text = text.replace(password, "***")
         text = text.replace(quote(password, safe=""), "***")
     text = " ".join(text.split())
@@ -550,8 +566,7 @@ def drop_database_if_exists(database_url: str | RedactedDsn) -> None:
     """Borra una base de test. Conecta a la BD de mantenimiento ``postgres``."""
 
     dsn = _as_redacted_dsn(database_url)
-    parsed = make_url(dsn.secret())
-    db_name = parsed.database
+    db_name = make_url(dsn.secret()).database
     if db_name is None:
         raise RuntimeError(f"DSN sin nombre de base. {dsn}") from None
     if not db_name.endswith("_test"):
@@ -559,7 +574,9 @@ def drop_database_if_exists(database_url: str | RedactedDsn) -> None:
 
     async def drop() -> None:
         engine = create_async_engine(
-            parsed.set(database="postgres").render_as_string(hide_password=False),
+            make_url(dsn.secret())
+            .set(database="postgres")
+            .render_as_string(hide_password=False),
             isolation_level="AUTOCOMMIT",
             connect_args={
                 "timeout": _PING_CONNECT_TIMEOUT,

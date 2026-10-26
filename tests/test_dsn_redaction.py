@@ -21,6 +21,16 @@ from tests.conftest import (
 
 SENTINEL = "sentinel-password-must-not-appear-9f3c"
 _DOWN_DSN = f"postgresql+asyncpg://leaky_user:{SENTINEL}@127.0.0.1:1/no_such_db_test"
+_DOWN_QUERY_DSN = (
+    f"postgresql+asyncpg://leaky_user@127.0.0.1:1/no_such_db_test?password={SENTINEL}"
+)
+_DOWN_QUERY_UPPER_DSN = (
+    f"postgresql+asyncpg://leaky_user@127.0.0.1:1/no_such_db_test?Password={SENTINEL}"
+)
+_DOWN_SSLPASS_DSN = (
+    f"postgresql+asyncpg://leaky_user:ok@127.0.0.1:1/no_such_db_test"
+    f"?sslpassword={SENTINEL}"
+)
 _BAD_AUTH_DSN = (
     f"postgresql+asyncpg://estudiomusica:{SENTINEL}@127.0.0.1:5432/estudiomusica_test"
 )
@@ -35,6 +45,15 @@ def test_redacted_dsn_hides_password_in_str_and_repr() -> None:
     assert SENTINEL not in repr(dsn)
     assert "***" in str(dsn)
     assert dsn.secret().endswith("/app_test")
+
+
+def test_redacted_dsn_hides_query_password_and_sslpassword() -> None:
+    for raw in (_DOWN_QUERY_DSN, _DOWN_QUERY_UPPER_DSN, _DOWN_SSLPASS_DSN):
+        dsn = RedactedDsn(raw)
+        assert SENTINEL not in str(dsn)
+        assert SENTINEL not in repr(dsn)
+        rendered = str(dsn)
+        assert "***" in rendered or "%2A%2A%2A" in rendered
 
 
 def test_as_redacted_dsn_wraps_raw_string() -> None:
@@ -106,6 +125,8 @@ def _run_suite_with_showlocals(
     env_extra: dict[str, str],
     *,
     plugin: Path | None = None,
+    tb: str = "short",
+    target: str = _DB_PROBE,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("PYTEST_ADDOPTS", None)
@@ -116,10 +137,10 @@ def _run_suite_with_showlocals(
         "pytest",
         "-l",
         "--showlocals",
-        "--tb=short",
+        f"--tb={tb}",
         "-p",
         "no:cacheprovider",
-        _DB_PROBE,
+        target,
     ]
     if plugin is not None:
         command[6:6] = ["-p", plugin.stem]
@@ -168,6 +189,83 @@ def test_require_postgres_without_pg_does_not_leak_password_with_showlocals() ->
     )
     output = _assert_failed_without_sentinel(result)
     assert "no está disponible" in output
+
+
+def test_query_password_zero_hits_with_long_traceback_when_pg_down() -> None:
+    result = _run_suite_with_showlocals(
+        {
+            "TEST_DATABASE_URL": _DOWN_QUERY_DSN,
+            "REQUIRE_POSTGRES": "1",
+        },
+        tb="long",
+    )
+    output = _assert_failed_without_sentinel(result)
+    assert output.count(SENTINEL) == 0
+    assert "no está disponible" in output
+
+
+def test_drop_query_password_zero_hits_with_long_traceback(tmp_path: Path) -> None:
+    probe = tmp_path / "test_drop_query_password.py"
+    probe.write_text(
+        "import os\n"
+        "from app.db import RedactedDsn\n"
+        "from tests.conftest import drop_database_if_exists\n"
+        "\n"
+        "def test_drop_fails():\n"
+        "    drop_database_if_exists(RedactedDsn(os.environ['LEAK_DSN']))\n"
+    )
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env["LEAK_DSN"] = _DOWN_QUERY_DSN
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-l",
+            "--tb=long",
+            "-p",
+            "no:cacheprovider",
+            str(probe),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=90,
+        check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode != 0
+    assert output.count(SENTINEL) == 0
+    assert "No se pudo borrar" in output
+
+
+def test_drop_database_redacts_auth_failure_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1b/C2/C3: fallo de autenticación en la rama RuntimeError, sin fuga."""
+
+    from tests.conftest import drop_database_if_exists as drop
+
+    def boom(_coro: object) -> None:
+        close = getattr(_coro, "close", None)
+        if callable(close):
+            close()
+        raise RuntimeError(
+            f'password authentication failed for user "leaky_user" ({SENTINEL})'
+        )
+
+    monkeypatch.setattr("tests.conftest.asyncio.run", boom)
+    with pytest.raises(RuntimeError) as caught:
+        drop(_DOWN_QUERY_DSN)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    message = str(caught.value)
+    assert SENTINEL not in message
+    assert "No se pudo borrar" in message
+    assert "password authentication failed" in message
+    assert "***" in message
 
 
 def test_drop_database_from_none_includes_redacted_cause() -> None:
