@@ -12,6 +12,7 @@ from alembic.config import Config
 from alembic.operations import ops
 from alembic.script import ScriptDirectory
 from sqlalchemy import String, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -140,6 +141,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
             )
             == name
         )
+    _assert_is_admin_check_rejects_incoherent_and_null(dsn)
 
     command.downgrade(config, "-1")
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0002_auth_users"
@@ -160,6 +162,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
         _scalar(dsn, "SELECT version_num FROM alembic_version") == "0003_system_roles"
     )
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+    _assert_is_admin_check_rejects_incoherent_and_null(dsn)
 
     command.downgrade(config, "0001_initial")
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == "0001_initial"
@@ -188,6 +191,64 @@ def test_alembic_upgrade_head_and_downgrade_base(
     )
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+
+
+def _assert_is_admin_check_rejects_incoherent_and_null(dsn: RedactedDsn) -> None:
+    """El CHECK existe en la BD migrada y no admite is_admin incoherente ni NULL."""
+
+    assert (
+        _scalar(
+            dsn,
+            "SELECT conname FROM pg_constraint "
+            "WHERE conname = 'ck_users_is_admin_matches_system_role'",
+        )
+        == "ck_users_is_admin_matches_system_role"
+    )
+    definition = str(
+        _scalar(
+            dsn,
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'ck_users_is_admin_matches_system_role'",
+        )
+    )
+    assert "IS NOT NULL" in definition
+
+    async def probe() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.connect() as connection:
+                transaction = await connection.begin()
+                try:
+                    inserted = await connection.execute(
+                        text(
+                            "INSERT INTO users "
+                            "(first_name, last_name, email, password_hash) "
+                            "VALUES ('Chk', 'User', 'check-probe@example.com', 'x') "
+                            "RETURNING id"
+                        )
+                    )
+                    user_id = inserted.scalar_one()
+                    with pytest.raises(IntegrityError):
+                        async with connection.begin_nested():
+                            await connection.execute(
+                                text("UPDATE users SET is_admin = true WHERE id = :id"),
+                                {"id": user_id},
+                            )
+                    await connection.execute(
+                        text("ALTER TABLE users ALTER COLUMN is_admin DROP NOT NULL")
+                    )
+                    with pytest.raises(IntegrityError):
+                        async with connection.begin_nested():
+                            await connection.execute(
+                                text("UPDATE users SET is_admin = NULL WHERE id = :id"),
+                                {"id": user_id},
+                            )
+                finally:
+                    await transaction.rollback()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(probe())
 
 
 def _execute(

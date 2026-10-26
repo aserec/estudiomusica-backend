@@ -1,11 +1,14 @@
 import pytest
 
 from app.config import Settings
+from app.exceptions import AccessDenied
+from app.models import User
 from app.models.user import SystemRole
 from app.permissions.deps import require_course_permission, require_site_permission
 from app.permissions.matrix import (
     COURSE_ROLE_PERMISSIONS,
     PERMISSION_MATRIX_VERSION,
+    SITE_ROLE_PERMISSIONS,
     effective_permissions,
     extra_assistant_permissions,
     has_course_permission,
@@ -64,6 +67,31 @@ def test_require_permission_factories_need_at_least_one() -> None:
         require_site_permission()
     with pytest.raises(ValueError, match="al menos un permiso"):
         require_course_permission()
+
+
+@pytest.mark.asyncio
+async def test_require_site_permission_requires_all_not_any(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        SITE_ROLE_PERMISSIONS,
+        SystemRole.ADMIN,
+        frozenset({Permission.SITE_MANAGE_ADMINS}),
+    )
+    user = User(
+        first_name="Ada",
+        last_name="Admin",
+        email="all-vs-any@example.com",
+        password_hash="x",
+        system_role_id=SystemRole.ADMIN,
+        is_admin=True,
+    )
+    dependency = require_site_permission(
+        Permission.SITE_MANAGE_ADMINS,
+        Permission.SITE_MANAGE_COURSES,
+    )
+    with pytest.raises(AccessDenied):
+        await dependency(user=user)
 
 
 def test_todo_306_flag_does_not_invent_a_permission() -> None:

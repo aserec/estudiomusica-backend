@@ -535,13 +535,6 @@ def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
                     await connection.execute(
                         text(f"GRANT USAGE ON TYPE citext TO {role}")
                     )
-                updated_at = await connection.scalar(
-                    text("SELECT 1 FROM pg_proc WHERE proname = 'set_updated_at'")
-                )
-                if updated_at is not None:
-                    await connection.execute(
-                        text(f"GRANT EXECUTE ON FUNCTION set_updated_at() TO {role}")
-                    )
         finally:
             await engine.dispose()
 

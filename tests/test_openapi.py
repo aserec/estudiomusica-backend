@@ -111,6 +111,7 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert "401" in roles_get["responses"]
     assert "403" in roles_get["responses"]
     roles_patch = paths["/api/v1/admin/system-roles/{role_id}"]["patch"]
+    assert "409" in roles_patch["responses"]
     assert "200" in roles_patch["responses"]
     assert "400" in roles_patch["responses"]
     roles_delete = paths["/api/v1/admin/system-roles/{role_id}"]["delete"]
