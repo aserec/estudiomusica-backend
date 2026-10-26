@@ -11,7 +11,6 @@ from app.schemas.unicode_props import (
     JOINING_L,
     JOINING_R,
     JOINING_T,
-    REGIONAL_INDICATOR,
     UCD_VERSION,
 )
 
@@ -29,7 +28,6 @@ def test_generated_unicode_tables_match_vendored_ucd() -> None:
     assert tables["EXTENDED_PICTOGRAPHIC"] == EXTENDED_PICTOGRAPHIC
     assert tables["EMOJI_PRESENTATION"] == EMOJI_PRESENTATION
     assert tables["EMOJI_MODIFIER_BASE"] == EMOJI_MODIFIER_BASE
-    assert tables["REGIONAL_INDICATOR"] == REGIONAL_INDICATOR
     assert not any(start <= 0x00A9 <= end for start, end in EMOJI_MODIFIER_BASE)
     assert any(start <= 0x1F469 <= end for start, end in EMOJI_MODIFIER_BASE)
     assert any(start <= 0x261D <= end for start, end in EMOJI_MODIFIER_BASE)

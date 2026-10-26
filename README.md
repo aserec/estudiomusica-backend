@@ -126,7 +126,35 @@ Las filas ya guardadas cuyo `name` o `description` hoy se rechazarían (RLO, U+F
 
 `0004_course_categories` crea la tabla `categories` (`id`, `name`, `name_key` CITEXT persistido por la app, `parent_id`, `description`, `sort_order`, timestamps, `deleted_at`) y el trigger `updated_at`. No hay función SQL de clave. #97 añadirá `courses.category_id` FK a esta tabla.
 
-La 0004 cambió durante la revisión (78b08eaf, 8924e0a0, 510acf77) y no ha estado en `main` ni en BD fuera de desarrollo/revisión. Una BD de desarrollo migrada con esas versiones hay que recrearla o hacer `alembic downgrade 0003_system_roles && alembic upgrade head` (**borra las categorías**). Alternativa sin pérdida (8924e0a0 y 510acf77): `ALTER TABLE categories ALTER name_key DROP EXPRESSION; DROP FUNCTION public.category_name_key(public.citext);` y backfill de `name_key` en Python, deduplicando con `uv run python scripts/verify_category_name_keys.py --fix`. Ese `ALTER`/`DROP FUNCTION` **falla en 78b08eaf** (no hay columna ni función). Camino sin pérdida para 78b08eaf: copiar a `categories_bak`, `downgrade 0003_system_roles`, `upgrade head` y recargar desde el backup con dedupe.
+La 0004 cambió durante la revisión (78b08eaf, 8924e0a0, 510acf77) y no ha estado en `main` ni en BD fuera de desarrollo/revisión. Una BD de desarrollo migrada con esas versiones hay que recrearla o hacer `alembic downgrade 0003_system_roles && alembic upgrade head` (**borra las categorías**). Alternativa sin pérdida (8924e0a0 y 510acf77): `ALTER TABLE categories ALTER name_key DROP EXPRESSION; DROP FUNCTION public.category_name_key(public.citext);` y backfill de `name_key` en Python, deduplicando con `uv run python scripts/verify_category_name_keys.py --fix`. Ese `ALTER`/`DROP FUNCTION` **falla en 78b08eaf** (no hay columna ni función). Camino sin pérdida para 78b08eaf:
+
+```sql
+CREATE TABLE categories_bak AS TABLE categories;
+```
+
+```bash
+alembic downgrade 0003_system_roles
+alembic upgrade head
+```
+
+```sql
+INSERT INTO categories (
+    id, created_at, updated_at, deleted_at,
+    name, name_key, parent_id, description, sort_order
+)
+SELECT
+    id, created_at, updated_at, deleted_at,
+    name, id::text, parent_id, description, sort_order
+FROM categories_bak;
+```
+
+```bash
+uv run python scripts/verify_category_name_keys.py --fix
+```
+
+```sql
+DROP TABLE categories_bak;
+```
 
 ## Postgres, migraciones y tests con BD
 

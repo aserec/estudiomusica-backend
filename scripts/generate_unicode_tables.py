@@ -16,9 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 UCD_DIR = ROOT / "third_party" / "ucd" / UCD_VERSION
 OUT = ROOT / "app" / "schemas" / "unicode_props.py"
 
-# UTS #51: Regional_Indicator es el bloque fijo U+1F1E6..U+1F1FF.
-REGIONAL_INDICATOR = ((0x1F1E6, 0x1F1FF),)
-
 
 def _parse_code(token: str) -> int:
     return int(token, 16)
@@ -106,7 +103,6 @@ def parse_tables(ucd_dir: Path) -> dict[str, tuple[tuple[int, int], ...]]:
         "EXTENDED_PICTOGRAPHIC": parse_ucd_property(emoji, "Extended_Pictographic"),
         "EMOJI_PRESENTATION": parse_ucd_property(emoji, "Emoji_Presentation"),
         "EMOJI_MODIFIER_BASE": parse_ucd_property(emoji, "Emoji_Modifier_Base"),
-        "REGIONAL_INDICATOR": REGIONAL_INDICATOR,
         "ASSIGNED": parse_assigned(category),
     }
 

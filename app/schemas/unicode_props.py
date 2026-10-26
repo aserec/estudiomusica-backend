@@ -739,8 +739,6 @@ EMOJI_MODIFIER_BASE: tuple[tuple[int, int], ...] = (
     (0x1FAF0, 0x1FAF8),
 )
 
-REGIONAL_INDICATOR: tuple[tuple[int, int], ...] = ((0x1F1E6, 0x1F1FF),)
-
 ASSIGNED: tuple[tuple[int, int], ...] = (
     (0x0000, 0x0377),
     (0x037A, 0x037F),
