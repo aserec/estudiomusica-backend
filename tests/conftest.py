@@ -754,6 +754,54 @@ def ensure_database_exists(database_url: str | RedactedDsn) -> None:
         ) from None
 
 
+def drop_database_if_exists(database_url: str | RedactedDsn) -> None:
+    """Borra una base de test. Conecta a la BD de mantenimiento ``postgres``."""
+
+    dsn = _as_redacted_dsn(database_url)
+    parsed = make_url(dsn.secret())
+    db_name = parsed.database
+    if db_name is None:
+        raise RuntimeError(f"DSN sin nombre de base. {dsn}") from None
+    if not db_name.endswith("_test"):
+        raise RuntimeError(f"Solo se pueden borrar bases *_test. {dsn}") from None
+
+    async def drop() -> None:
+        engine = create_async_engine(
+            parsed.set(database="postgres").render_as_string(hide_password=False),
+            isolation_level="AUTOCOMMIT",
+            connect_args={
+                "timeout": _PING_CONNECT_TIMEOUT,
+                "command_timeout": _PING_CONNECT_TIMEOUT,
+            },
+        )
+        try:
+            async with asyncio.timeout(_PING_TOTAL_TIMEOUT):
+                async with engine.connect() as connection:
+                    await connection.execute(
+                        text(
+                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                            "WHERE datname = :name AND pid <> pg_backend_pid()"
+                        ),
+                        {"name": db_name},
+                    )
+                    await connection.execute(
+                        text(f'DROP DATABASE IF EXISTS "{db_name}"')
+                    )
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(drop())
+    except Exception as exc:
+        if _is_connection_error(exc):
+            raise ConnectionError(
+                f"No se pudo borrar la base de test ({type(exc).__name__}). {dsn}"
+            ) from None
+        raise RuntimeError(
+            f"No se pudo borrar la base de test ({type(exc).__name__}). {dsn}"
+        ) from None
+
+
 def _ping_postgres(database_url: str | RedactedDsn) -> None:
     dsn = _as_redacted_dsn(database_url)
 
@@ -837,6 +885,12 @@ _LEFTOVER_TEST_TABLES = (
     "migrated_trigger_probes",
     "ListaCanciones",
     "order",
+    "schema_trigger_probes",
+)
+_LEFTOVER_TEST_DATABASES = (
+    "autogen_sa_probe_test",
+    "autogen_hook_probe_test",
+    "schema_autogen_probe_test",
 )
 
 
@@ -863,6 +917,14 @@ def _drop_leftover_test_tables(dsn: RedactedDsn) -> None:
         raise RuntimeError(
             f"No se pudieron borrar tablas de test ({type(exc).__name__}). {dsn}"
         ) from None
+
+
+def _drop_leftover_test_databases(dsn: RedactedDsn) -> None:
+    parsed = make_url(dsn.secret())
+    for name in _LEFTOVER_TEST_DATABASES:
+        drop_database_if_exists(
+            RedactedDsn(parsed.set(database=name).render_as_string(hide_password=False))
+        )
 
 
 @pytest.fixture(scope="session")
@@ -894,6 +956,7 @@ def migrated_test_database(require_postgres: RedactedDsn) -> Iterator[None]:
     """Aplica las migraciones en la BD de test. Un fallo de migración es error."""
 
     _drop_leftover_test_tables(require_postgres)
+    _drop_leftover_test_databases(require_postgres)
     drop_production_test_role(require_postgres)
     apply_test_migrations(require_postgres)
     try:
@@ -903,6 +966,7 @@ def migrated_test_database(require_postgres: RedactedDsn) -> Iterator[None]:
 
         drop_production_test_role(require_postgres)
         _drop_leftover_test_tables(require_postgres)
+        _drop_leftover_test_databases(require_postgres)
         get_settings.cache_clear()
 
 

@@ -297,6 +297,102 @@ def test_production_rejects_query_dbname_test_name(
     get_settings.cache_clear()
 
 
+def test_production_rejects_uppercase_default_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://EstudioMusica:otra-clave@db.example:5432/app",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="usuario") as caught:
+        Settings()
+    assert "otra-clave" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_production_rejects_uppercase_test_database_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432/x_TEST",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match=r"\*_test") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_production_rejects_dsn_without_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("PGDATABASE", "x_test")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://app:s3cret@db.example:5432",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="explícitamente") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_production_rejects_dsn_without_database_with_test_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://x_test:s3cret@db.example:5432",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="explícitamente") as caught:
+        Settings()
+    assert "s3cret" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_development_allows_dsn_without_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("PGUSER", "estudiomusica")
+    monkeypatch.setenv("PGPASSWORD", "estudiomusica")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://127.0.0.1:5432/estudiomusica",
+    )
+    get_settings.cache_clear()
+    settings = Settings()
+    assert "127.0.0.1:5432/estudiomusica" in settings.resolved_database_url()
+    get_settings.cache_clear()
+
+
+def test_validation_error_errors_and_json_redact_dsn_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        f"postgresql+asyncpg://app:{_SECRET}@db.example:5432/app_test",
+    )
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    dumped = caught.value.json()
+    assert _SECRET not in dumped
+    for error in caught.value.errors():
+        assert _SECRET not in str(error.get("input"))
+        assert _SECRET not in repr(error.get("input"))
+    get_settings.cache_clear()
+
+
 def test_short_dsn_password_is_hidden_in_validation_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,6 +1,7 @@
 """Hook de autogenerate: trigger ``updated_at`` en tablas PersistentModel."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, MutableMapping
+from typing import Literal
 
 from alembic.operations import ops
 from alembic.operations.ops import MigrationScript
@@ -26,12 +27,54 @@ def persistent_model_tables() -> set[tuple[str | None, str]]:
     return names
 
 
+def own_schema_names() -> set[str]:
+    """Schemas de las tablas del metadata (más ``public``)."""
+
+    names = {"public"}
+    for table in Base.metadata.tables.values():
+        if table.schema:
+            names.add(table.schema)
+    return names
+
+
+_IncludeNameType = Literal[
+    "schema",
+    "table",
+    "column",
+    "index",
+    "unique_constraint",
+    "foreign_key_constraint",
+    "check_constraint",
+]
+_IncludeParent = MutableMapping[
+    Literal["schema_name", "table_name", "schema_qualified_table_name"],
+    str | None,
+]
+
+
+def include_name(
+    name: str | None,
+    type_: _IncludeNameType,
+    _parent_names: _IncludeParent,
+) -> bool:
+    """Limita la reflexión a los schemas propios cuando ``include_schemas``."""
+
+    if type_ == "schema":
+        # Alembic pasa ``None`` para el schema por defecto.
+        return name is None or name in own_schema_names()
+    return True
+
+
 def process_revision_directives(
     context: MigrationContext,
     revision: str | Iterable[str | None] | Iterable[str],
     directives: list[MigrationScript],
 ) -> None:
-    """Añade el trigger ``updated_at`` a cada ``CreateTable`` PersistentModel."""
+    """Añade el trigger ``updated_at`` a cada ``CreateTable`` PersistentModel.
+
+    Las revisiones vacías solo se descartan con ``--autogenerate``
+    (``cmd_opts.autogenerate``). ``alembic check`` necesita el script.
+    """
 
     if not directives:
         return
@@ -54,3 +97,12 @@ def process_revision_directives(
                 )
             )
     upgrade_ops.ops.extend(extra)
+    config = getattr(context, "config", None) if context is not None else None
+    cmd_opts = getattr(config, "cmd_opts", None)
+    if not getattr(cmd_opts, "autogenerate", False):
+        return
+    downgrade_ops = script.downgrade_ops
+    upgrade_empty = upgrade_ops.is_empty()
+    downgrade_empty = downgrade_ops is None or downgrade_ops.is_empty()
+    if upgrade_empty and downgrade_empty:
+        directives[:] = []
