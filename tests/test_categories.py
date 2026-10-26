@@ -1186,14 +1186,16 @@ async def test_category_insert_with_empty_search_path(
     db_session: AsyncSession,
 ) -> None:
     await db_session.execute(text("SET LOCAL search_path = ''"))
+    key = category_name_key("SearchPathProbe")
     inserted = await db_session.scalar(
         text(
             "INSERT INTO public.categories (name, name_key, sort_order) "
-            "VALUES ('SearchPathProbe', 'searchpathprobe', 0) "
+            "VALUES ('SearchPathProbe', :key, 0) "
             "RETURNING public.categories.name_key"
-        )
+        ),
+        {"key": key},
     )
-    assert inserted == category_name_key("SearchPathProbe")
+    assert inserted == key
 
 
 def test_tree_lock_is_transactional_not_session(
