@@ -5,6 +5,7 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,8 @@ from tests.conftest import (
     _ping_postgres,
     _postgres_required,
     _skip_or_fail_postgres,
+    _skip_or_fail_tls,
+    _tls_required,
     apply_test_migrations,
 )
 
@@ -139,6 +142,113 @@ def test_skip_or_fail_fails_when_required_TRUE(
 def test_postgres_required_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("REQUIRE_POSTGRES", raising=False)
     assert _postgres_required() is False
+
+
+@pytest.mark.parametrize(
+    "value", ["1", "true", "TRUE", "yes", "YES", "on", "ON", "y", "t"]
+)
+def test_tls_required_truthy(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", value)
+    assert _tls_required() is True
+
+
+@pytest.mark.parametrize(
+    "value", ["0", "false", "FALSE", "no", "off", "OFF", "n", "f", ""]
+)
+def test_tls_required_falsy(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", value)
+    assert _tls_required() is False
+
+
+def test_tls_required_unknown_value_aborts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "maybe")
+    with pytest.raises(pytest.UsageError, match="REQUIRE_TLS_TESTS"):
+        _tls_required()
+
+
+def test_unknown_require_tls_tests_aborts_even_when_suite_starts() -> None:
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env["REQUIRE_TLS_TESTS"] = "maybe"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--tb=short",
+            "-p",
+            "no:cacheprovider",
+            "tests/test_health.py::test_api_health_returns_ok",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 2
+    assert "REQUIRE_TLS_TESTS" in output
+    assert "maybe" in output
+
+
+def test_skip_or_fail_tls_fails_when_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
+    with pytest.raises(pytest.fail.Exception, match="no se pudo arrancar"):
+        _skip_or_fail_tls("no se pudo arrancar Postgres TLS")
+
+
+def test_skip_or_fail_tls_skips_when_optional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("REQUIRE_TLS_TESTS", raising=False)
+    with pytest.raises(pytest.skip.Exception, match="no se pudo arrancar"):
+        _skip_or_fail_tls("no se pudo arrancar Postgres TLS")
+
+
+def test_tls_cafile_missing_fails_when_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.test_health_db import _reuse_tls_test_env
+
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
+    monkeypatch.setenv("TLS_TEST_DATABASE_URL", "postgresql+asyncpg://u:p@h/db_test")
+    monkeypatch.setenv("TLS_TEST_CAFILE", str(tmp_path / "missing-ca.pem"))
+    with pytest.raises(pytest.fail.Exception, match="TLS_TEST_CAFILE no existe"):
+        _reuse_tls_test_env()
+
+
+def test_tls_cafile_missing_skips_when_optional(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.test_health_db import _reuse_tls_test_env
+
+    monkeypatch.delenv("REQUIRE_TLS_TESTS", raising=False)
+    monkeypatch.setenv("TLS_TEST_DATABASE_URL", "postgresql+asyncpg://u:p@h/db_test")
+    monkeypatch.setenv("TLS_TEST_CAFILE", str(tmp_path / "missing-ca.pem"))
+    with pytest.raises(pytest.skip.Exception, match="TLS_TEST_CAFILE no existe"):
+        _reuse_tls_test_env()
+
+
+def test_tls_cafile_reuses_existing_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.test_health_db import _reuse_tls_test_env
+
+    cafile = tmp_path / "ca.pem"
+    cafile.write_text("dummy-ca\n", encoding="utf-8")
+    url = "postgresql+asyncpg://u:p@h/db_test"
+    monkeypatch.setenv("TLS_TEST_DATABASE_URL", url)
+    monkeypatch.setenv("TLS_TEST_CAFILE", str(cafile))
+    assert _reuse_tls_test_env() == (url, str(cafile))
+
+
+def test_tls_required_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("REQUIRE_TLS_TESTS", raising=False)
+    assert _tls_required() is False
 
 
 def test_skip_or_fail_fails_when_postgres_is_required(

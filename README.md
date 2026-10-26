@@ -174,7 +174,7 @@ El fixture `production_client` crea el rol `em_prod_tests_<pid>` (LOGIN, **sin**
 
 No puede migrar ni crear bases. Las filas de esos tests (`prod-%@example.com`) se borran al terminar.
 
-Los tests de `?sslrootcert=` (`tls_postgres`) levantan un Postgres TLS efímero con Docker. Si `docker` no está en el `PATH` y no hay `TLS_TEST_DATABASE_URL` + `TLS_TEST_CAFILE`, se saltan **antes** de generar certificados con `openssl`. `REQUIRE_TLS_TESTS=1` lo exige (falla, no salta). Para reutilizar un servidor TLS ya levantado:
+Los tests de `?sslrootcert=` (`tls_postgres`) levantan un Postgres TLS efímero con Docker. Si `docker` no está en el `PATH` y no hay `TLS_TEST_DATABASE_URL` + `TLS_TEST_CAFILE`, se saltan **antes** de generar certificados con `openssl`. `REQUIRE_TLS_TESTS=1` lo exige (falla, no salta; también si `TLS_TEST_CAFILE` no existe o el Postgres TLS efímero no arranca). Un valor desconocido aborta, como `REQUIRE_POSTGRES`. Para reutilizar un servidor TLS ya levantado:
 
 ```bash
 export TLS_TEST_DATABASE_URL=postgresql+asyncpg://tlsprobe:tlsprobe-secret@127.0.0.1:55433/tlsprobe_test

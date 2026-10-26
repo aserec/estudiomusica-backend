@@ -1633,6 +1633,23 @@ def test_hostssl_helper_reraises_other_errors(
     raise AssertionError("se esperaba el error de autenticación, no un skip")
 
 
+def _reuse_tls_test_env() -> tuple[str, str] | None:
+    """URL+CAFILE de entorno, o skip/fail si el CAFILE no existe."""
+
+    from pathlib import Path
+
+    from tests.conftest import _skip_or_fail_tls
+
+    env_url = os.environ.get("TLS_TEST_DATABASE_URL")
+    env_ca = os.environ.get("TLS_TEST_CAFILE")
+    if not env_url or not env_ca:
+        return None
+    if Path(env_ca).is_file():
+        return env_url, env_ca
+    _skip_or_fail_tls(f"TLS_TEST_CAFILE no existe: {env_ca}")
+    raise AssertionError("unreachable")
+
+
 @pytest.fixture(scope="session")
 def tls_postgres(
     tmp_path_factory: pytest.TempPathFactory,
@@ -1641,29 +1658,24 @@ def tls_postgres(
     """Postgres TLS efímero para ``?sslrootcert=``. Se destruye al terminar.
 
     Si hay ``TLS_TEST_DATABASE_URL`` y ``TLS_TEST_CAFILE``, se reutilizan.
-    Sin Docker y sin esas variables, se salta (salvo ``REQUIRE_TLS_TESTS=1``).
+    Sin Docker, CAFILE inexistente o Postgres TLS que no arranca, se salta
+    (salvo ``REQUIRE_TLS_TESTS`` activo, que falla). Un valor desconocido aborta.
     """
 
     import shutil
     from pathlib import Path
 
     _ = require_postgres
-    env_url = os.environ.get("TLS_TEST_DATABASE_URL")
-    env_ca = os.environ.get("TLS_TEST_CAFILE")
     tmp = Path(str(tmp_path_factory.mktemp("tls-pg")))
-    if env_url and env_ca and Path(env_ca).is_file():
+    reused = _reuse_tls_test_env()
+    if reused is not None:
+        env_url, env_ca = reused
         yield Path(env_ca), _write_unrelated_ca(tmp / "bad-ca.pem"), env_url
         return
-    require = os.environ.get("REQUIRE_TLS_TESTS", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
     if shutil.which("docker") is None:
-        if require:
-            raise AssertionError("REQUIRE_TLS_TESTS=1 y docker no está en PATH")
-        pytest.skip(
+        from tests.conftest import _skip_or_fail_tls
+
+        _skip_or_fail_tls(
             "tests TLS: docker no está en PATH (o define TLS_TEST_DATABASE_URL "
             "y TLS_TEST_CAFILE)"
         )
@@ -2529,7 +2541,9 @@ def _start_ephemeral_tls_postgres(
         check=False,
     )
     if started.returncode != 0:
-        pytest.skip(f"no se pudo arrancar Postgres TLS: {started.stderr}")
+        from tests.conftest import _skip_or_fail_tls
+
+        _skip_or_fail_tls(f"no se pudo arrancar Postgres TLS: {started.stderr}")
     dsn = (
         f"postgresql+asyncpg://tlsprobe:tlsprobe-secret@127.0.0.1:{port}/tlsprobe_test"
     )
@@ -2561,5 +2575,7 @@ def _start_ephemeral_tls_postgres(
             time_mod.sleep(0.4)
     else:
         _cleanup()
-        pytest.skip(f"Postgres TLS no aceptó conexiones: {last_error}")
+        from tests.conftest import _skip_or_fail_tls
+
+        _skip_or_fail_tls(f"Postgres TLS no aceptó conexiones: {last_error}")
     return server_crt, bad_ca, dsn, _cleanup

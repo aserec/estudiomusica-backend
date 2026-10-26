@@ -191,6 +191,16 @@ def validate_require_postgres() -> None:
 
 
 @pytest.fixture(scope="session", autouse=True)
+def validate_require_tls_tests() -> None:
+    """Un REQUIRE_TLS_TESTS desconocido aborta siempre, también con Docker."""
+
+    try:
+        _tls_required()
+    except pytest.UsageError as exc:
+        pytest.exit(str(exc), returncode=2)
+
+
+@pytest.fixture(scope="session", autouse=True)
 def isolate_settings_env(reject_non_test_database: None) -> Iterator[None]:
     """Fija todas las variables de Settings durante la sesión de tests.
 
@@ -763,18 +773,30 @@ _PYDANTIC_TRUE = frozenset({"1", "true", "t", "yes", "y", "on"})
 _PYDANTIC_FALSE = frozenset({"0", "false", "f", "no", "n", "off", ""})
 
 
-def _postgres_required() -> bool:
+def _env_flag(name: str) -> bool:
     """Los mismos booleanos que Pydantic; un valor desconocido aborta."""
 
-    raw = os.environ.get("REQUIRE_POSTGRES", "").strip().lower()
+    raw = os.environ.get(name, "").strip().lower()
     if raw in _PYDANTIC_TRUE:
         return True
     if raw in _PYDANTIC_FALSE:
         return False
     raise pytest.UsageError(
-        "REQUIRE_POSTGRES no es un booleano válido "
+        f"{name} no es un booleano válido "
         f"(true/false, 1/0, yes/no, on/off, y/n, t/f). Recibido: {raw!r}"
     )
+
+
+def _postgres_required() -> bool:
+    """Los mismos booleanos que Pydantic; un valor desconocido aborta."""
+
+    return _env_flag("REQUIRE_POSTGRES")
+
+
+def _tls_required() -> bool:
+    """Los mismos booleanos que Pydantic; un valor desconocido aborta."""
+
+    return _env_flag("REQUIRE_TLS_TESTS")
 
 
 class _MissingDatabase(RuntimeError):
@@ -783,6 +805,12 @@ class _MissingDatabase(RuntimeError):
 
 def _skip_or_fail_postgres(message: str) -> None:
     if _postgres_required():
+        raise pytest.fail.Exception(message) from None
+    raise pytest.skip.Exception(message) from None
+
+
+def _skip_or_fail_tls(message: str) -> None:
+    if _tls_required():
         raise pytest.fail.Exception(message) from None
     raise pytest.skip.Exception(message) from None
 
