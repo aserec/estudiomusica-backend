@@ -769,6 +769,18 @@ def test_name_unique_integrity_error_is_name_taken() -> None:
     with pytest.raises(CategoryNameTaken):
         _raise_from_integrity(exc)
 
+    sibling = IntegrityError(
+        "INSERT",
+        {},
+        type(
+            "Orig",
+            (Exception,),
+            {"constraint_name": "uq_categories_parent_id_name_key"},
+        )(),
+    )
+    with pytest.raises(CategoryNameTaken):
+        _raise_from_integrity(sibling)
+
     parent = IntegrityError(
         "INSERT",
         {},
@@ -825,7 +837,7 @@ async def test_unique_indexes_filter_deleted_and_name_is_citext(
     parent_idx = await db_session.scalar(
         text(
             "SELECT indexdef FROM pg_indexes "
-            "WHERE indexname = 'uq_categories_parent_name_active'"
+            "WHERE indexname = 'uq_categories_parent_id_name_key'"
         )
     )
     assert root_idx is not None and "deleted_at IS NULL" in root_idx
@@ -917,11 +929,23 @@ def test_tree_lock_is_transactional_not_session(
                     CategoryCreate(name=f"lockn-{suffix}", parent_id=parent.id),
                 )
                 tracked.append(born.id)
-                async with factory() as waiter:
-                    assert await try_tree_lock(waiter) is False
-                    await waiter.rollback()
+
+                async def blocked_create() -> str:
+                    async with factory() as waiter:
+                        row = await create_category(
+                            waiter,
+                            CategoryCreate(name=f"lockw-{suffix}", parent_id=parent.id),
+                        )
+                        tracked.append(row.id)
+                        await waiter.commit()
+                    return "ok"
+
+                pending = asyncio.create_task(blocked_create())
+                await asyncio.sleep(0.4)
+                assert pending.done() is False
                 await holder.commit()
                 assert await leftover_locks(holder) == 0
+                assert await pending == "ok"
 
             async with factory() as free:
                 assert await try_tree_lock(free) is True
@@ -954,14 +978,57 @@ def test_tree_lock_is_transactional_not_session(
         asyncio.run(_cleanup_ids(dsn.secret(), tracked))
 
 
-async def test_duplicate_create_keeps_session_usable(
-    db_session: AsyncSession,
+def test_duplicate_create_keeps_session_usable(
+    require_postgres: Any,
+    migrated_test_database: None,
 ) -> None:
-    first = await create_category(db_session, CategoryCreate(name="DupSess"))
-    with pytest.raises(CategoryNameTaken):
-        await create_category(db_session, CategoryCreate(name="DupSess"))
-    second = await create_category(db_session, CategoryCreate(name="DupSess2"))
-    assert second.id != first.id
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret(), pool_size=1, max_overflow=0)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                first = await create_category(
+                    session, CategoryCreate(name=f"DupSess-{suffix}")
+                )
+                tracked.append(first.id)
+
+                async def never_taken(*_args: object, **_kwargs: object) -> bool:
+                    return False
+
+                from app.services import categories as categories_svc
+
+                original = categories_svc._name_taken
+                categories_svc._name_taken = never_taken
+                try:
+                    with pytest.raises(CategoryNameTaken):
+                        await create_category(
+                            session, CategoryCreate(name=f"DupSess-{suffix}")
+                        )
+                finally:
+                    categories_svc._name_taken = original
+
+                second = await create_category(
+                    session, CategoryCreate(name=f"DupSess2-{suffix}")
+                )
+                tracked.append(second.id)
+                await session.commit()
+                assert second.id != first.id
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
 
 
 def test_cleanup_production_deletes_prod_categories(

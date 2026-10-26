@@ -44,7 +44,7 @@ class Category(PersistentModel):
             postgresql_where=text("deleted_at IS NULL AND parent_id IS NULL"),
         ),
         Index(
-            "uq_categories_parent_name_active",
+            "uq_categories_parent_id_name_key",
             "parent_id",
             "name_key",
             unique=True,

@@ -96,7 +96,7 @@ def upgrade() -> None:
         postgresql_where=sa.text("deleted_at IS NULL AND parent_id IS NULL"),
     )
     op.create_index(
-        "uq_categories_parent_name_active",
+        "uq_categories_parent_id_name_key",
         "categories",
         ["parent_id", "name_key"],
         unique=True,
@@ -108,7 +108,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op_drop_updated_at_trigger("categories")
     op.drop_index(
-        "uq_categories_parent_name_active",
+        "uq_categories_parent_id_name_key",
         table_name="categories",
         if_exists=True,
     )

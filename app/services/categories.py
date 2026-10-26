@@ -21,7 +21,7 @@ from app.schemas.categories import (
 _CATEGORY_TREE_LOCK_KEY = (400, 1)
 _NAME_CONSTRAINTS = (
     "uq_categories_root_name_active",
-    "uq_categories_parent_name_active",
+    "uq_categories_parent_id_name_key",
 )
 
 
