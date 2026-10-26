@@ -46,6 +46,7 @@ PRODUCTION_AUTH_SECRET = "production-test-auth-secret-at-least-32ch"
 # y haría DROP ROLE. El padre y el hijo no comparten nombre, así no chocan.
 # Tras un crash, el setup borra los em_prod_tests_<pid> cuyo proceso no vive.
 _PRODUCTION_TEST_ROLE_PREFIX = "em_prod_tests_"
+_PRODUCTION_TEST_ROLE_RE = re.compile(r"em_prod_tests_[1-9][0-9]{0,9}")
 PRODUCTION_TEST_USER = f"{_PRODUCTION_TEST_ROLE_PREFIX}{os.getpid()}"
 _PRODUCTION_TEST_EMAIL_PREFIX = "prod-"
 # Serializa el barrido de huérfanos entre pytest concurrentes.
@@ -600,19 +601,20 @@ async def _role_life_lock_is_free(connection: Any, name: str) -> bool:
 def _orphan_production_test_role(name: str) -> bool:
     """True si el rol es ``em_prod_tests_<pid>`` y ese pid ya no existe."""
 
-    if not name.startswith(_PRODUCTION_TEST_ROLE_PREFIX):
+    if _PRODUCTION_TEST_ROLE_RE.fullmatch(name) is None:
         return False
     suffix = name[len(_PRODUCTION_TEST_ROLE_PREFIX) :]
-    if not suffix.isdigit():
+    try:
+        pid = int(suffix)
+    except ValueError, OverflowError:
         return False
-    pid = int(suffix)
     if pid == os.getpid():
         return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return True
-    except OSError:
+    except OverflowError, ValueError, OSError:
         return False
     return False
 
@@ -705,8 +707,10 @@ async def _drop_production_test_role(admin: RedactedDsn) -> None:
                 await connection.execute(
                     text(
                         "SELECT rolname FROM pg_roles "
-                        "WHERE rolname LIKE 'em_prod_tests_%'"
-                    )
+                        "WHERE rolname LIKE 'em_prod_tests\\_%' ESCAPE '\\' "
+                        "OR rolname = :own"
+                    ),
+                    {"own": PRODUCTION_TEST_USER},
                 )
             ).all()
             names = [name for (name,) in rows]

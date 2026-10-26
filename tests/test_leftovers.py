@@ -573,7 +573,20 @@ def test_orphan_production_test_role_ignores_live_and_foreign_names() -> None:
     assert _orphan_production_test_role("em_prod_tests") is False
     assert _orphan_production_test_role("em_prod_tests_abc") is False
     assert _orphan_production_test_role("other_1") is False
+    assert _orphan_production_test_role("em_prod_tests_03300003") is False
+    assert _orphan_production_test_role("em_prod_tests_\u0661") is False
+    assert _orphan_production_test_role("em_prod_tests_99999999999999999999") is False
     assert _orphan_production_test_role(f"em_prod_tests_{_unused_pid()}") is True
+
+
+def test_orphan_production_test_role_captures_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(_pid: int, _sig: int) -> None:
+        raise OverflowError("to_int:int too big to convert")
+
+    monkeypatch.setattr(os, "kill", boom)
+    assert _orphan_production_test_role("em_prod_tests_2147483648") is False
 
 
 def test_own_schema_names_includes_public() -> None:
