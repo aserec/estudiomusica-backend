@@ -14,13 +14,6 @@ logger = logging.getLogger(__name__)
 
 # Tope para el close ordenado. Un close congelado se termina.
 HEALTH_TIMEOUT_MARGIN_SECONDS = 0.4
-_DIALECT_ONLY_CONNECT_KEYS = frozenset(
-    {
-        "prepared_statement_cache_size",
-        "prepared_statement_name_func",
-        "async_creator_fn",
-    }
-)
 
 _cleanup_tasks: set[asyncio.Task[Any]] = set()
 _health_url_override: str | None = None
@@ -111,22 +104,12 @@ def _abandon_probe(
 def _connect_kwargs() -> dict[str, Any]:
     """Parámetros del dialecto menos las claves que solo consume SQLAlchemy."""
 
-    from app.db import get_engine
+    from app.db import get_engine, prepare_asyncpg_connect_kwargs
 
     settings = get_settings()
     url = make_url(_health_dsn())
     _args, opts = get_engine().sync_engine.dialect.create_connect_args(url)
-    kwargs = {
-        key: value
-        for key, value in dict(opts).items()
-        if key not in _DIALECT_ONLY_CONNECT_KEYS
-    }
-    sslmode = None
-    for key in list(kwargs):
-        if str(key).lower() == "sslmode":
-            sslmode = kwargs.pop(key)
-    if sslmode is not None and "ssl" not in kwargs:
-        kwargs["ssl"] = sslmode
+    kwargs = prepare_asyncpg_connect_kwargs(opts)
     kwargs["timeout"] = settings.db_connect_timeout
     kwargs["command_timeout"] = settings.db_command_timeout
     server_settings = dict(kwargs.get("server_settings") or {})
@@ -138,7 +121,7 @@ def _connect_kwargs() -> dict[str, Any]:
 def clear_health_probe() -> None:
     """Cierra la sonda residual (síncrono). Lo llama ``clear_engine``."""
 
-    global _held_raw, _health_url_override, _probe_task, _waiters, _cache
+    global _held_raw, _health_url_override, _probe_task, _cache
     if _raw_is_open(_held_raw):
         with contextlib.suppress(Exception, asyncio.CancelledError):
             _terminate_driver_object(_held_raw)
@@ -148,7 +131,6 @@ def clear_health_probe() -> None:
     _held_raw = None
     _health_url_override = None
     _probe_task = None
-    _waiters = 0
     _cache = None
 
 
@@ -229,6 +211,12 @@ async def check_database() -> DatabaseHealthResponse:
         except TimeoutError:
             logger.warning("database health check failed: %s", "TimeoutError")
             return DatabaseHealthResponse(db="down")
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is None or current.cancelling() == 0:
+                logger.warning("database health check failed: %s", "CancelledError")
+                return DatabaseHealthResponse(db="down")
+            raise
     finally:
         _waiters -= 1
         if _waiters == 0 and not task.done():
