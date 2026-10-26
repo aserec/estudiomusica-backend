@@ -268,8 +268,8 @@ async def _get_session() -> AsyncIterator[AsyncSession]:
             event.listen(sync, "after_begin", _reject_begin_after_yield)
         try:
             yield session
-            released = True
             await session.commit()
+            released = True
         except Exception:
             await session.rollback()
             raise
