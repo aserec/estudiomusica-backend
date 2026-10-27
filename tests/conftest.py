@@ -593,14 +593,20 @@ class _SessionAdvisoryLock:
                     self._lost = True
                     return
                 await asyncio.sleep(0.5)
-            with suppress(Exception):
-                await asyncio.wait_for(
+            unlocked: object = False
+            try:
+                unlocked = await asyncio.wait_for(
                     connection.scalar(
                         text("SELECT pg_advisory_unlock(:k1, :k2)"),
                         {"k1": key1, "k2": key2},
                     ),
                     timeout=2,
                 )
+            except Exception:
+                self._lost = True
+            else:
+                if not unlocked:
+                    self._lost = True
         finally:
             if connection is not None:
                 with suppress(Exception):
@@ -627,9 +633,7 @@ def _hold_production_role_life_lock(admin: RedactedDsn) -> None:
 
 
 def _release_production_role_life_lock() -> None:
-    global _ROLE_LIFE_LOCK
     lock = _ROLE_LIFE_LOCK
-    _ROLE_LIFE_LOCK = None
     if lock is not None:
         lock.stop()
 
@@ -835,25 +839,28 @@ async def _cleanup_production_test_rows(admin: RedactedDsn) -> None:
 
 def drop_production_test_role(admin_url: str | RedactedDsn) -> None:
     admin = _as_redacted_dsn(admin_url)
-    lost = _ROLE_LIFE_LOCK is not None and _ROLE_LIFE_LOCK.lost
+    drop_error: BaseException | None = None
     try:
         asyncio.run(_drop_production_test_role(admin))
         asyncio.run(_cleanup_production_test_rows(admin))
     except Exception as exc:
-        if _is_connection_error(exc):
-            if lost:
-                raise RuntimeError(
-                    "se perdió el lock de vida del rol de production-tests"
-                ) from None
-            return
-        raise RuntimeError(
-            "No se pudo borrar el rol de production-tests "
-            f"({type(exc).__name__}). {admin}"
-        ) from None
+        drop_error = exc
     finally:
         _release_production_role_life_lock()
+    lock = _ROLE_LIFE_LOCK
+    lost = lock is not None and lock.lost
     if lost:
-        raise RuntimeError("se perdió el lock de vida del rol de production-tests")
+        raise RuntimeError(
+            "se perdió el lock de vida del rol de production-tests"
+        ) from None
+    if drop_error is None:
+        return
+    if _is_connection_error(drop_error):
+        return
+    raise RuntimeError(
+        "No se pudo borrar el rol de production-tests "
+        f"({type(drop_error).__name__}). {admin}"
+    ) from None
 
 
 def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:

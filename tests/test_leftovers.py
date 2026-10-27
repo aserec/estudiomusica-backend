@@ -7,6 +7,7 @@ import secrets
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 from sqlalchemy import text
@@ -23,6 +24,7 @@ from tests.conftest import (
     _drop_leftover_test_databases,
     _drop_leftover_test_tables,
     _drop_named_production_test_role,
+    _drop_production_test_role,
     _hold_production_role_life_lock,
     _orphan_production_test_role,
     _pg_ident,
@@ -34,6 +36,7 @@ from tests.conftest import (
     drop_production_test_role,
     ensure_database_exists,
     ensure_production_test_role,
+    pytest_sessionfinish,
 )
 
 
@@ -1172,6 +1175,131 @@ def test_killed_lock_connection_fails_teardown(
         assert lock.lost is True
         with pytest.raises(RuntimeError, match="se perdió el lock de vida"):
             drop_production_test_role(require_postgres)
+    finally:
+        lock.stop()
+
+
+@pytest.mark.db
+def test_drop_detects_lost_lock_immediately_after_kill(
+    require_postgres: RedactedDsn,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A: unlock fallido o false cuenta como pérdida, leída tras stop()/join."""
+
+    name = "em_prod_tests_1_kill_lock_now"
+    lock = _SessionAdvisoryLock(require_postgres, name)
+    assert lock.start() is True
+    monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", lock)
+    key1, key2 = _role_advisory_lock_keys(name)
+
+    async def terminate_holder() -> None:
+        engine = _admin_engine(require_postgres)
+        try:
+            async with engine.connect() as connection:
+                rows = (
+                    await connection.execute(
+                        text(
+                            "SELECT pid FROM pg_locks "
+                            "WHERE locktype = 'advisory' "
+                            "AND classid = :k1 AND objid = :k2 "
+                            "AND pid <> pg_backend_pid()"
+                        ),
+                        {"k1": key1, "k2": key2},
+                    )
+                ).all()
+                for (pid,) in rows:
+                    await connection.execute(
+                        text("SELECT pg_terminate_backend(:pid)"),
+                        {"pid": pid},
+                    )
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(terminate_holder())
+        with pytest.raises(RuntimeError, match="se perdió el lock de vida"):
+            drop_production_test_role(require_postgres)
+        assert lock.lost is True
+    finally:
+        lock.stop()
+
+
+def test_sessionfinish_fails_when_life_lock_was_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LOST3: pytest_sessionfinish debe poner rc≠0 si el lock se perdió."""
+
+    class _LostLock:
+        lost = True
+
+    class _Reporter:
+        def write_line(self, _msg: str, **_kwargs: object) -> None:
+            return None
+
+    class _Plugins:
+        def get_plugin(self, _name: str) -> _Reporter:
+            return _Reporter()
+
+    class _Config:
+        pluginmanager = _Plugins()
+
+    class _Session:
+        exitstatus = 0
+        config = _Config()
+
+    monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", _LostLock())
+    session = _Session()
+    pytest_sessionfinish(cast(pytest.Session, session), 0)
+    assert session.exitstatus == 1
+
+
+@pytest.mark.db
+def test_drop_detects_lost_lock_during_sweep(
+    require_postgres: RedactedDsn,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B: el holder muere a mitad del barrido; lost se lee tras stop()."""
+
+    name = "em_prod_tests_1_kill_lock_sweep"
+    lock = _SessionAdvisoryLock(require_postgres, name)
+    assert lock.start() is True
+    monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", lock)
+    key1, key2 = _role_advisory_lock_keys(name)
+    original = _drop_production_test_role
+
+    async def terminate_holder() -> None:
+        engine = _admin_engine(require_postgres)
+        try:
+            async with engine.connect() as connection:
+                rows = (
+                    await connection.execute(
+                        text(
+                            "SELECT pid FROM pg_locks "
+                            "WHERE locktype = 'advisory' "
+                            "AND classid = :k1 AND objid = :k2 "
+                            "AND pid <> pg_backend_pid()"
+                        ),
+                        {"k1": key1, "k2": key2},
+                    )
+                ).all()
+                for (pid,) in rows:
+                    await connection.execute(
+                        text("SELECT pg_terminate_backend(:pid)"),
+                        {"pid": pid},
+                    )
+        finally:
+            await engine.dispose()
+
+    async def slow_drop(admin: RedactedDsn) -> None:
+        await terminate_holder()
+        await asyncio.sleep(0.2)
+        await original(admin)
+
+    monkeypatch.setattr("tests.conftest._drop_production_test_role", slow_drop)
+    try:
+        with pytest.raises(RuntimeError, match="se perdió el lock de vida"):
+            drop_production_test_role(require_postgres)
+        assert lock.lost is True
     finally:
         lock.stop()
 
