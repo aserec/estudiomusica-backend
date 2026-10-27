@@ -1729,6 +1729,31 @@ def test_session_lock_holds_with_unix_socket_query_dsn(
 
 
 @pytest.mark.db
+def test_unix_socket_lock_dsn_keeps_query_credentials() -> None:
+    """SK3: .set(query={}) tiraría user/password que solo viven en la query."""
+
+    raw = (
+        "postgresql+asyncpg://@127.0.0.1:5432/app_test"
+        "?user=sockuser&password=sock-secret"
+    )
+    dsn = _unix_socket_lock_dsn(RedactedDsn(raw), "/var/run/postgresql", "5432")
+    parsed = make_url(dsn)
+    query: dict[str, Any] = dict(parsed.query or {})
+
+    def _query_first(key: str) -> str | None:
+        raw_value = query.get(key)
+        if isinstance(raw_value, (list, tuple)):
+            raw_value = raw_value[0] if raw_value else None
+        return str(raw_value) if raw_value else None
+
+    user = parsed.username or _query_first("user")
+    password = parsed.password or _query_first("password")
+    assert user == "sockuser"
+    assert password == "sock-secret"
+    assert _query_first("host") == "/var/run/postgresql"
+    assert str(_query_first("port")) == "5432"
+
+
 def test_session_lock_holds_with_query_user_password(
     require_postgres: RedactedDsn,
 ) -> None:
