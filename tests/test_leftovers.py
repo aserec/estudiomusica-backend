@@ -6,6 +6,7 @@ import os
 import secrets
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -32,6 +33,8 @@ from tests.conftest import (
     _pg_ident,
     _pg_literal,
     _role_advisory_lock_keys,
+    _SWEEP_ADVISORY_LOCK_KEY1,
+    _SWEEP_ADVISORY_LOCK_KEY2,
     _SessionAdvisoryLock,
     _skip_or_fail_unix_socket_lock,
     drop_database_if_exists,
@@ -796,6 +799,8 @@ def test_orphan_objects_in_non_test_db_are_not_dropped(
         parsed.set(database=dbname).render_as_string(hide_password=False)
     )
     role = _pg_ident(orphan)
+    holder_engine: AsyncEngine | None = None
+    holder_conn: Any = None
     try:
 
         async def plant_role() -> None:
@@ -832,9 +837,40 @@ def test_orphan_objects_in_non_test_db_are_not_dropped(
             finally:
                 await other_engine.dispose()
 
-        asyncio.run(plant_role())
-        _create_probe_database(require_postgres, dbname)
-        asyncio.run(plant_table())
+        async def acquire_sweep_lock() -> None:
+            nonlocal holder_engine, holder_conn
+            holder_engine = _admin_engine(require_postgres)
+            holder_conn = await holder_engine.connect()
+            await holder_conn.scalar(
+                text("SELECT pg_advisory_lock(:k1, :k2)"),
+                {
+                    "k1": _SWEEP_ADVISORY_LOCK_KEY1,
+                    "k2": _SWEEP_ADVISORY_LOCK_KEY2,
+                },
+            )
+
+        async def release_sweep_lock() -> None:
+            if holder_conn is not None:
+                with suppress(Exception):
+                    await holder_conn.scalar(
+                        text("SELECT pg_advisory_unlock(:k1, :k2)"),
+                        {
+                            "k1": _SWEEP_ADVISORY_LOCK_KEY1,
+                            "k2": _SWEEP_ADVISORY_LOCK_KEY2,
+                        },
+                    )
+                with suppress(Exception):
+                    await holder_conn.close()
+            if holder_engine is not None:
+                await holder_engine.dispose()
+
+        asyncio.run(acquire_sweep_lock())
+        try:
+            asyncio.run(plant_role())
+            _create_probe_database(require_postgres, dbname)
+            asyncio.run(plant_table())
+        finally:
+            asyncio.run(release_sweep_lock())
         result = _run_leftover_probe(tmp_path, require_postgres, _CHILD_ORPHAN_SETUP)
         assert result.returncode == 0, result.stdout + result.stderr
         assert asyncio.run(_database_exists(require_postgres, dbname)) == 1
