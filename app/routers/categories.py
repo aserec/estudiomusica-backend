@@ -49,7 +49,7 @@ _MANAGE = require_site_permission(Permission.SITE_MANAGE_COURSES)
 )
 async def get_categories(
     _user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Annotated[AsyncSession, Depends(get_session, scope="function")],
 ) -> list[CategoryResponse]:
     rows = await list_categories(session)
     return [to_category_response(row) for row in rows]
