@@ -4460,10 +4460,24 @@ def test_serializable_concurrent_child_posts_never_500(
         finally:
             await engine.dispose()
 
-    async def _cleanup_user(email: str) -> None:
+    async def _cleanup_user(email: str, category_ids: list[str]) -> None:
         engine = create_async_engine(prod_dsn.secret())
         try:
             async with engine.begin() as connection:
+                if category_ids:
+                    await connection.execute(
+                        text(
+                            "DELETE FROM categories "
+                            "WHERE id = ANY(CAST(:ids AS uuid[]))"
+                        ),
+                        {"ids": category_ids},
+                    )
+                await connection.execute(
+                    text(
+                        "DELETE FROM categories WHERE name LIKE 'SP-%' "
+                        "OR name LIKE 'SC-%'"
+                    )
+                )
                 await connection.execute(
                     text(
                         "DELETE FROM auth_sessions WHERE user_id IN "
@@ -4481,6 +4495,7 @@ def test_serializable_concurrent_child_posts_never_500(
     async def run() -> None:
         await _alter_role_isolation("serializable")
         email = unique_email("ser-cat")
+        created: list[str] = []
         try:
             for key, value in production_settings_env(prod_dsn).items():
                 monkeypatch.setenv(key, value)
@@ -4508,6 +4523,7 @@ def test_serializable_concurrent_child_posts_never_500(
                     if parent.status_code != 201:
                         continue
                     parent_id = parent.json()["id"]
+                    created.append(parent_id)
                     children = await asyncio.gather(
                         *[
                             client.post(
@@ -4523,6 +4539,8 @@ def test_serializable_concurrent_child_posts_never_500(
                     for child in children:
                         assert child.status_code != 500, child.text
                         statuses.append(child.status_code)
+                        if child.status_code == 201:
+                            created.append(child.json()["id"])
                 assert 500 not in statuses
                 assert 201 in statuses
                 listed = await client.get(_LIST)
@@ -4531,7 +4549,7 @@ def test_serializable_concurrent_child_posts_never_500(
             await dispose_engine()
             get_settings.cache_clear()
             get_app.cache_clear()
-            await _cleanup_user(email)
+            await _cleanup_user(email, created)
             await _alter_role_isolation(None)
 
     try:
