@@ -4714,15 +4714,19 @@ def _install_failing_commit(
     return state, restore
 
 
+def _assert_get_commit_maps_to_503(listed: Any, logbuf: Any) -> None:
+    assert listed.status_code == 503, listed.text
+    assert listed.json() == {"error": "transient_db_conflict"}
+    assert listed.headers.get("retry-after") == "1"
+    assert "already started" not in logbuf.getvalue()
+
+
 def test_http_commit_transient_is_retried_and_mapped(
     require_postgres: Any,
     production_test_database_url: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """P9b-g: 40001/40P01 en el COMMIT del reintento; GET scope=function."""
-
-    import logging
-    from io import StringIO
+    """P9b-f: 40001/40P01 en el COMMIT del reintento (GET: test_get_commit)."""
 
     from httpx2 import ASGITransport, AsyncClient
     from sqlalchemy.ext.asyncio import create_async_engine
@@ -4856,20 +4860,6 @@ def test_http_commit_transient_is_retried_and_mapped(
                         )
                     await engine.dispose()
                     assert gone is True
-
-                    logbuf = StringIO()
-                    handler = logging.StreamHandler(logbuf)
-                    logging.getLogger().addHandler(handler)
-                    state, restore = _install_failing_commit(monkeypatch, {1}, code)
-                    try:
-                        listed = await client.get(_LIST)
-                    finally:
-                        restore()
-                        logging.getLogger().removeHandler(handler)
-                    assert listed.status_code == 503, listed.text
-                    assert listed.json() == {"error": "transient_db_conflict"}
-                    assert listed.headers.get("retry-after") == "1"
-                    assert "already started" not in logbuf.getvalue()
         finally:
             await dispose_engine()
             get_settings.cache_clear()
@@ -4951,10 +4941,7 @@ def test_get_commit_fails_before_response(
                     listed = await client.get(_LIST)
                 finally:
                     logging.getLogger().removeHandler(handler)
-                assert listed.status_code == 503, listed.text
-                assert listed.json() == {"error": "transient_db_conflict"}
-                assert listed.headers.get("retry-after") == "1"
-                assert "already started" not in logbuf.getvalue()
+                _assert_get_commit_maps_to_503(listed, logbuf)
         finally:
             await dispose_engine()
             get_settings.cache_clear()
