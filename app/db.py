@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import ssl
 from collections.abc import AsyncIterator, Mapping
 from typing import Annotated, Any, get_origin, get_type_hints
@@ -145,13 +146,17 @@ def _raw_query_after_database(url: str, database: str | None) -> str | None:
 
 
 def _decoded_key_is_tls(key: str) -> bool:
-    """True si la clave (o su prefijo antes de ``=`` / ``&``) es TLS."""
+    """True si algún segmento de la clave decodificada es TLS.
+
+    ``application_name%3Dx%26sslmode%3Dverify-full`` decodifica a una
+    clave con ``=`` / ``&``; cualquier segmento TLS se rechaza.
+    ``a%3Db=c`` no es TLS.
+    """
 
     lowered = key.lower()
     if lowered in _TLS_QUERY_KEYS:
         return True
-    head = lowered.split("=", 1)[0].split("&", 1)[0]
-    return head in _TLS_QUERY_KEYS
+    return any(part in _TLS_QUERY_KEYS for part in re.split(r"[=&]", lowered) if part)
 
 
 def _reject_unknown_ssl_mode(ssl_value: object) -> None:
@@ -197,9 +202,9 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
     contraseña siguen siendo válidos.
     ``SSL`` / ``Ssl`` pasan a ``ssl``. ``sslmode`` pasa a ``ssl``.
     ``parse_qsl(..., keep_blank_values=True)`` sobre la query cruda
-    (primer ``?`` tras ``@`` o el host) rechaza claves TLS vacías y
-    una query percent-encoded entera si la clave decodificada es TLS
-    y contiene ``=`` o ``&``. Un valor de ``ssl`` / ``sslmode``
+    (primer ``?`` tras las credenciales) rechaza claves TLS vacías y
+    una query percent-encoded si algún segmento de la clave
+    decodificada es TLS. Un valor de ``ssl`` / ``sslmode``
     desconocido levanta ``ValueError``.
     """
 

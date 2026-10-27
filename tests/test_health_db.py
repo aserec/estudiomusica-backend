@@ -2378,6 +2378,97 @@ def test_non_tls_encoded_equals_in_query_key_is_kept() -> None:
     assert any("a=b" in str(key) or str(key) == "a=b" for key in query)
 
 
+_ENCODED_TLS_HIDDEN_QUERIES = (
+    "application_name%3Dx%26sslmode%3Dverify-full",
+    "application_name%3Dx%26sslmode%3D",
+    "application_name%3Dx%26ssl%3D",
+    "x%26sslmode=",
+)
+
+
+def test_encoded_query_with_tls_segment_is_rejected() -> None:
+    """BAJA: un segmento TLS en la clave decodificada no acaba en prefer."""
+
+    from app.config.settings import Settings
+    from app.db import _SSL_BLANK_MSG, normalize_asyncpg_ssl_url
+
+    for query in _ENCODED_TLS_HIDDEN_QUERIES:
+        url = f"postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/r92qhc?{query}"
+        with pytest.raises(
+            ValueError, match="claves TLS vacías|percent-encoded"
+        ) as caught:
+            normalize_asyncpg_ssl_url(url)
+        assert str(caught.value) == _SSL_BLANK_MSG
+        with pytest.raises(ValueError):
+            Settings(app_env="production", database_url=url)
+        encoded_db = (
+            f"postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/r92q%68c?{query}"
+        )
+        with pytest.raises(ValueError, match="claves TLS vacías|percent-encoded"):
+            normalize_asyncpg_ssl_url(encoded_db)
+
+
+@pytest.mark.parametrize("query", _ENCODED_TLS_HIDDEN_QUERIES)
+@pytest.mark.parametrize("path", ["get_engine", "alembic-url", "alembic-env", "health"])
+def test_encoded_tls_segment_stays_off_cleartext(
+    query: str, path: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Las 4 rutas no mandan startup en claro con la query encoded+TLS."""
+
+    from pathlib import Path
+
+    from alembic import command
+    from sqlalchemy import text
+
+    from app.config import get_settings
+    from app.db import clear_engine, dispose_engine, get_engine
+    from app.migrations.config import make_alembic_config
+
+    home = Path(str(tmp_path)) / "empty-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("APP_ENV", "development")
+
+    with _sslrequest_n_server() as server:
+        raw = (
+            "postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:"
+            f"{server['port']}/r92qhc?{query}"
+        )
+        monkeypatch.setenv("DATABASE_URL", raw)
+        get_settings.cache_clear()
+        clear_engine()
+        health_service.clear_health_probe()
+        try:
+            if path == "get_engine":
+
+                async def _connect() -> None:
+                    engine = get_engine()
+                    async with engine.connect() as connection:
+                        await connection.execute(text("SELECT 1"))
+
+                with pytest.raises(Exception, match="claves TLS|percent-encoded"):
+                    asyncio.run(_connect())
+            elif path == "alembic-url":
+                with pytest.raises(Exception, match="claves TLS|percent-encoded"):
+                    command.current(make_alembic_config(raw))
+            elif path == "alembic-env":
+                with pytest.raises(Exception, match="claves TLS|percent-encoded"):
+                    command.current(make_alembic_config())
+            else:
+
+                async def _probe() -> DatabaseHealthResponse:
+                    return await health_service.check_database()
+
+                result = asyncio.run(_probe())
+                assert result.db == "down"
+        finally:
+            health_service.clear_health_probe()
+            with suppress(Exception):
+                asyncio.run(dispose_engine())
+            get_settings.cache_clear()
+        assert server["cleartext_startups"] == 0
+
+
 def test_ssl_zero_with_sslrootcert_matches_ssl_zero(tmp_path: Any) -> None:
     """NIT: ``ssl=0&sslrootcert=CA`` no envuelve en SSLContext (igual que ``ssl=0``)."""
 
