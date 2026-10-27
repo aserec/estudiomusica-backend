@@ -55,7 +55,10 @@ _SSL_KNOWN_MODES = frozenset(
         "1",
     }
 )
-_SSL_CONFLICT_MSG = "DATABASE_URL no puede mezclar ni repetir ssl y sslmode"
+_SSL_CONFLICT_MSG = (
+    "DATABASE_URL no puede mezclar ni repetir claves TLS "
+    "(ssl, sslmode, sslrootcert, sslcert, sslkey, sslpassword)"
+)
 _SSL_BLANK_MSG = (
     "DATABASE_URL no admite claves TLS vacías ni una query percent-encoded entera"
 )
@@ -261,6 +264,8 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
                     raise ValueError(_SSL_CONFLICT_MSG)
                 ssl_value = value[0] if value else None
             else:
+                # N15: counts ya rechazó ssl/sslmode repetidos; ssl_value
+                # es None aquí. No hay «primer valor gana».
                 ssl_value = value
             continue
         new_query[key] = value
@@ -363,8 +368,7 @@ def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
             continue
         if lowered in _SSLROOTCERT_KEYS:
             if isinstance(value, (list, tuple)):
-                if len(value) > 1:
-                    raise ValueError(_SSL_CONFLICT_MSG)
+                # B12: _reject_conflicting_ssl_opts ya tumba la tupla.
                 sslrootcert = str(value[0]) if value else None
             else:
                 sslrootcert = str(value) if value else None

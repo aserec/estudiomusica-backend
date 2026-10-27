@@ -135,6 +135,10 @@ def alembic_config(database_url: str | RedactedDsn) -> Config:
     raw = (
         database_url.secret() if isinstance(database_url, RedactedDsn) else database_url
     )
+    os.environ.setdefault(
+        "ALEMBIC_APPLICATION_NAME", f"estudiomusica-alembic-{os.getpid()}"
+    )
+    os.environ.setdefault("ALEMBIC_LOCK_TIMEOUT", "8s")
     return make_alembic_config(raw)
 
 

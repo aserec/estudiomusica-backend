@@ -1,3 +1,5 @@
+import asyncio
+import threading
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any, cast
@@ -118,6 +120,15 @@ async def test_get_session_commits_persistently(
     engine = _create_async_engine(require_postgres.secret(), pool_pre_ping=True)
     probe_table = SessionProbe.__table__
     assert isinstance(probe_table, Table)
+    loop = asyncio.get_running_loop()
+    stop_nudge = threading.Event()
+
+    def _nudge() -> None:
+        while not stop_nudge.wait(0.05):
+            loop.call_soon_threadsafe(lambda: None)
+
+    nudger = threading.Thread(target=_nudge, daemon=True)
+    nudger.start()
     try:
         async with engine.begin() as connection:
             await connection.run_sync(
@@ -136,6 +147,7 @@ async def test_get_session_commits_persistently(
             )
             assert found == "committed"
     finally:
+        stop_nudge.set()
         async with engine.begin() as connection:
             await connection.run_sync(
                 lambda sync_conn: probe_table.drop(sync_conn, checkfirst=True)

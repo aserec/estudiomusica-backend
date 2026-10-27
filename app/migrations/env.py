@@ -5,6 +5,7 @@ si está definido; si no, de ``Settings.resolved_database_url()``.
 """
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -71,6 +72,15 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     url, connect_args = asyncpg_url_and_connect_args(get_database_url())
+    server_settings = dict(connect_args.get("server_settings") or {})
+    app_name = (os.environ.get("ALEMBIC_APPLICATION_NAME") or "").strip()
+    if app_name:
+        server_settings["application_name"] = app_name
+    lock_timeout = (os.environ.get("ALEMBIC_LOCK_TIMEOUT") or "").strip()
+    if lock_timeout:
+        server_settings["lock_timeout"] = lock_timeout
+    if server_settings:
+        connect_args["server_settings"] = server_settings
     connectable = create_async_engine(
         url,
         poolclass=pool.NullPool,

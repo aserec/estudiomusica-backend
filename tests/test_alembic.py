@@ -55,7 +55,7 @@ async def _log_and_terminate_own_backends(connection: AsyncConnection) -> None:
         )
     )
     for row in result.mappings():
-        _logger.info(
+        _logger.warning(
             "alembic test backend before terminate: pid=%s usename=%s "
             "application_name=%s state=%s wait_event=%s/%s query=%s",
             row["pid"],
@@ -515,6 +515,8 @@ def test_0001_downgrade_with_business_trigger_is_clear(
     dsn = RedactedDsn(resolve_alembic_database_url())
     ensure_database_exists(dsn)
     monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    monkeypatch.setenv("ALEMBIC_APPLICATION_NAME", _ALEMBIC_TEST_APP_NAME)
+    monkeypatch.setenv("ALEMBIC_LOCK_TIMEOUT", "8s")
     config = alembic_config(dsn)
     command.upgrade(config, "head")
 
