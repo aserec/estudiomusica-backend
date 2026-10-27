@@ -2,6 +2,7 @@ import ast
 import asyncio
 import importlib
 import importlib.util
+import logging
 import os
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ from alembic.config import Config
 from alembic.operations import ops
 from alembic.script import ScriptDirectory
 from sqlalchemy import String, Table, text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import RedactedDsn
@@ -30,6 +32,50 @@ from tests.conftest import (
 )
 
 pytestmark = pytest.mark.db
+
+_ALEMBIC_TEST_APP_NAME = f"estudiomusica-alembic-{os.getpid()}"
+_logger = logging.getLogger(__name__)
+
+
+def _own_alembic_engine(url: str) -> AsyncEngine:
+    return _create_async_engine(
+        url,
+        connect_args={"server_settings": {"application_name": _ALEMBIC_TEST_APP_NAME}},
+    )
+
+
+async def _log_and_terminate_own_backends(connection: AsyncConnection) -> None:
+    result = await connection.execute(
+        text(
+            "SELECT pid, usename, application_name, state, "
+            "wait_event_type, wait_event, left(query, 120) AS query "
+            "FROM pg_stat_activity "
+            "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+            "ORDER BY pid"
+        )
+    )
+    for row in result.mappings():
+        _logger.info(
+            "alembic test backend before terminate: pid=%s usename=%s "
+            "application_name=%s state=%s wait_event=%s/%s query=%s",
+            row["pid"],
+            row["usename"],
+            row["application_name"],
+            row["state"],
+            row["wait_event_type"],
+            row["wait_event"],
+            row["query"],
+        )
+    await connection.execute(
+        text(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            "WHERE datname = current_database() "
+            "AND usename = current_user "
+            "AND application_name = :app_name "
+            "AND pid <> pg_backend_pid()"
+        ),
+        {"app_name": _ALEMBIC_TEST_APP_NAME},
+    )
 
 
 def _scalar(dsn: RedactedDsn, sql: str) -> object:
@@ -473,17 +519,11 @@ def test_0001_downgrade_with_business_trigger_is_clear(
     command.upgrade(config, "head")
 
     async def add_dependent_trigger() -> None:
-        engine = _create_async_engine(dsn.secret())
+        engine = _own_alembic_engine(dsn.secret())
         try:
             async with engine.begin() as connection:
                 await connection.execute(text("SET LOCAL lock_timeout = '8s'"))
-                await connection.execute(
-                    text(
-                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                        "WHERE datname = current_database() "
-                        "AND pid <> pg_backend_pid()"
-                    )
-                )
+                await _log_and_terminate_own_backends(connection)
                 await connection.execute(text("DROP TABLE IF EXISTS dep_trig"))
                 await connection.execute(
                     text("CREATE TABLE dep_trig (updated_at timestamptz)")
@@ -499,17 +539,11 @@ def test_0001_downgrade_with_business_trigger_is_clear(
     finally:
 
         async def cleanup() -> None:
-            engine = _create_async_engine(dsn.secret())
+            engine = _own_alembic_engine(dsn.secret())
             try:
                 async with engine.begin() as connection:
                     await connection.execute(text("SET LOCAL lock_timeout = '8s'"))
-                    await connection.execute(
-                        text(
-                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                            "WHERE datname = current_database() "
-                            "AND pid <> pg_backend_pid()"
-                        )
-                    )
+                    await _log_and_terminate_own_backends(connection)
                     await connection.execute(text("DROP TABLE IF EXISTS dep_trig"))
                     await connection.execute(
                         text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
