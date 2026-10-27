@@ -1306,6 +1306,23 @@ def test_holds_own_life_lock_is_false_when_missing_or_lost(
 
 
 @pytest.mark.db
+def test_release_clears_holds_own_life_lock(
+    require_postgres: RedactedDsn,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tras liberar, _holds_own_life_lock() queda en False."""
+
+    name = _unique_lock_role("rel_holds")
+    monkeypatch.setattr("tests.conftest.PRODUCTION_TEST_USER", name)
+    monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", None)
+    _hold_production_role_life_lock(require_postgres)
+    assert _holds_own_life_lock() is True
+    released = _release_production_role_life_lock()
+    assert released is not None
+    assert _holds_own_life_lock() is False
+
+
+@pytest.mark.db
 def test_lock_start_is_false_when_already_held(
     require_postgres: RedactedDsn,
 ) -> None:
