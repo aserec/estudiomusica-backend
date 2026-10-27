@@ -78,6 +78,7 @@ _SWEEP_ADVISORY_LOCK_KEY2 = 0x535750  # SWP
 _SWEEP_COMMAND_TIMEOUT = 60.0
 _SAFE_PG_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _log = logging.getLogger(__name__)
+_ORPHAN_OWNED_DB_WARNED: set[tuple[str, str]] = set()
 _DATABASE_OVERRIDE_QUERY_KEYS = frozenset({"database", "dbname", "service", "options"})
 _PING_CONNECT_TIMEOUT = 2.0
 _PING_TOTAL_TIMEOUT = 3.0
@@ -559,7 +560,7 @@ class _SessionAdvisoryLock:
     def stop(self) -> None:
         self._stop.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=6)
 
     def _run(self) -> None:
         try:
@@ -649,9 +650,7 @@ async def _role_life_lock_is_free(connection: Any, name: str) -> bool:
 
 def _holds_own_life_lock() -> bool:
     lock = _ROLE_LIFE_LOCK
-    return (
-        lock is not None and bool(lock.acquired) and lock._name == PRODUCTION_TEST_USER
-    )
+    return lock is not None and bool(lock.acquired) and not lock.lost
 
 
 async def _should_drop_orphan(connection: Any, name: str) -> bool:
@@ -741,10 +740,14 @@ async def _drop_named_production_test_role(
     if exists is None:
         return
     for database in await _databases_owned_by_role(connection, name):
+        key = (name, database)
+        if key in _ORPHAN_OWNED_DB_WARNED:
+            continue
+        _ORPHAN_OWNED_DB_WARNED.add(key)
         _log.warning(
-            "el rol huérfano %s es dueño de la base %s "
-            "(dbid=0; DROP OWNED no borra bases; "
-            "no se tocan las que no acaban en _test)",
+            "el rol %s es dueño de la base %s "
+            "(pg_shdepend dbid=0: DROP OWNED BY no borra bases; "
+            "el DROP ROLE fallará y queda aislado en SAVEPOINT)",
             name,
             database,
         )
@@ -921,10 +924,7 @@ def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
         finally:
             await engine.dispose()
 
-    try:
-        _hold_production_role_life_lock(admin)
-    except Exception:
-        raise
+    _hold_production_role_life_lock(admin)
     try:
         asyncio.run(create_role())
         _ping_postgres(prod_dsn)

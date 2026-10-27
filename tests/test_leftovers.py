@@ -1,7 +1,6 @@
 """L1/L2: las limpiezas de leftovers de conftest son comportamentales."""
 
 import asyncio
-import errno
 import logging
 import os
 import secrets
@@ -27,6 +26,7 @@ from tests.conftest import (
     _drop_named_production_test_role,
     _drop_production_test_role,
     _hold_production_role_life_lock,
+    _holds_own_life_lock,
     _orphan_production_test_role,
     _pg_ident,
     _pg_literal,
@@ -979,6 +979,9 @@ def _run_child_script(
     env.pop("PYTEST_ADDOPTS", None)
     env["TEST_DATABASE_URL"] = require_postgres.secret()
     env["EM_SHARED_ROLE"] = shared
+    env["PYTHONPATH"] = (
+        f"{ROOT}{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else str(ROOT)
+    )
     return subprocess.run(
         [sys.executable, str(script)],
         cwd=ROOT,
@@ -1183,25 +1186,38 @@ def test_production_test_role_name_is_unique() -> None:
     assert _orphan_production_test_role(first) is True
 
 
-def test_orphan_role_eperm_is_not_orphan(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_orphan_role_eperm_is_not_orphan() -> None:
     """os.kill ya no decide la vida: un nombre sin pid no es candidato."""
 
-    def boom(_pid: int, _sig: int) -> None:
-        raise PermissionError(errno.EPERM, "Operation not permitted")
-
-    monkeypatch.setattr(os, "kill", boom)
     assert _orphan_production_test_role("em_prod_tests") is False
     assert _orphan_production_test_role("em_prod_tests_1") is True
 
 
-def test_orphan_production_test_role_captures_overflow(
+def test_orphan_production_test_role_captures_overflow() -> None:
+    assert _orphan_production_test_role("em_prod_tests_99999999999") is False
+
+
+def test_holds_own_life_lock_is_false_when_missing_or_lost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def boom(_pid: int, _sig: int) -> None:
-        raise OverflowError("to_int:int too big to convert")
+    """_holds_own_life_lock no lee lock._name y no es True si lost."""
 
-    monkeypatch.setattr(os, "kill", boom)
-    assert _orphan_production_test_role("em_prod_tests_99999999999") is False
+    monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", None)
+    assert _holds_own_life_lock() is False
+
+    class _Held:
+        acquired = True
+        lost = False
+
+    monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", _Held())
+    assert _holds_own_life_lock() is True
+
+    class _Lost:
+        acquired = True
+        lost = True
+
+    monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", _Lost())
+    assert _holds_own_life_lock() is False
 
 
 @pytest.mark.db
@@ -1299,7 +1315,7 @@ def test_lock_stop_joins_with_cleanup_timeout(
     lock.stop()
     assert seen
     assert seen[0] is not None
-    assert seen[0] >= 3
+    assert seen[0] >= 6
 
 
 @pytest.mark.db

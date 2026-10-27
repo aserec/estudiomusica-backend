@@ -78,7 +78,7 @@ Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](
 `POST /api/v1/auth/logout` → 204 (revoca la sesión y borra la cookie).
 `GET /api/v1/auth/me` → 200 `{user, systemRole, isAdmin}` (cookie o `Authorization: Bearer`).
 
-Errores de negocio (slugs en snake_case, convención #91): `email_taken` (409), `invalid_credentials` (401), `account_suspended` (403). Sin sesión o token caducado/manipulado: `unauthorized` (401).
+Errores de negocio (slugs en snake_case, convención #91): `email_taken` (409), `invalid_credentials` (401), `account_suspended` (403). Sin sesión o token caducado/manipulado: `unauthorized` (401). Una contraseña (o name/email) con TAB u otro control Cc, o un no-carácter Unicode, da **400** `validation`.
 
 El secreto `AUTH_SECRET` firma un JWT HS256. El valor por defecto solo vale en `development`. La cookie es HttpOnly, SameSite=Lax y Secure fuera de development. Logout escribe `revoked_at` en `auth_sessions` para que el JWT no se pueda reutilizar.
 
