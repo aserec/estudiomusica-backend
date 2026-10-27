@@ -750,14 +750,17 @@ async def _drop_named_production_test_role(
     if exists is None:
         return
     for database in await _databases_owned_by_role(connection, name):
+        warned = (name, database)
+        if warned in _ORPHAN_OWNED_DB_WARNED:
+            continue
+        _ORPHAN_OWNED_DB_WARNED.add(warned)
         _log.warning(
             "el rol %s es dueño de la base %s "
             "(pg_shdepend dbid=0: DROP OWNED BY no borra bases; "
             "el DROP ROLE fallará y queda aislado en SAVEPOINT)",
             name,
             database,
-        ) if (name, database) not in _ORPHAN_OWNED_DB_WARNED else None
-        _ORPHAN_OWNED_DB_WARNED.add((name, database))
+        )
     if admin is not None:
         for database in await _other_owned_databases(connection, name):
             if _is_test_database_name(database):

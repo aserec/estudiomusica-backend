@@ -786,6 +786,54 @@ def test_failed_orphan_drop_keeps_sweep_transaction_healthy(
 
 
 @pytest.mark.db
+def test_owned_database_warning_is_logged_once(
+    require_postgres: RedactedDsn,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """WARN1: el aviso de rol dueño de base se emite una sola vez."""
+
+    blocker = _orphan_role_name()
+    dbname = _non_test_probe_database("orphan_owner")
+    role = _pg_ident(blocker)
+    monkeypatch.setattr(
+        "tests.conftest.PRODUCTION_TEST_USER", _unique_lock_role("warn1_not_ours")
+    )
+    monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", None)
+    monkeypatch.setattr("tests.conftest._ORPHAN_OWNED_DB_WARNED", set())
+    try:
+
+        async def plant() -> None:
+            engine = _admin_engine(require_postgres)
+            try:
+                async with engine.connect() as connection:
+                    await connection.execute(
+                        text(
+                            f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                            f"PASSWORD {_pg_literal('orphan-warn1-blocker')}"
+                        )
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(plant())
+        _create_probe_database(require_postgres, dbname, owner=blocker)
+        caplog.set_level(logging.WARNING, logger="tests.conftest")
+        asyncio.run(_drop_production_test_role(require_postgres))
+        asyncio.run(_drop_production_test_role(require_postgres))
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if "dueño de la base" in record.getMessage() and dbname in record.getMessage()
+        ]
+        assert len(messages) == 1
+        assert asyncio.run(_role_exists(require_postgres, blocker)) == 1
+    finally:
+        _drop_probe_database(require_postgres, dbname)
+        _cleanup_named_roles(require_postgres, [blocker])
+
+
+@pytest.mark.db
 def test_orphan_objects_in_non_test_db_are_not_dropped(
     require_postgres: RedactedDsn,
     tmp_path: Path,
