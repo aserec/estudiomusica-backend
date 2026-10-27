@@ -435,14 +435,11 @@ def test_asyncpg_connection_parameters_password_redacted_in_traceback(
 ) -> None:
     """Un fallo real de asyncpg no imprime la contraseña en --tb=long -l."""
 
-    plugin = tmp_path / "hook_only.py"
-    plugin.write_text("from tests.conftest import pytest_runtest_logreport\n")
     probe = tmp_path / "test_asyncpg_params_leak.py"
     probe.write_text(
         "import asyncio\n"
+        "import os\n"
         "import asyncpg\n"
-        "\n"
-        f"SENTINEL = {SENTINEL!r}\n"
         "\n"
         "def test_connect_prints_params():\n"
         "    async def go() -> None:\n"
@@ -450,7 +447,7 @@ def test_asyncpg_connection_parameters_password_redacted_in_traceback(
         "            host='127.0.0.1',\n"
         "            port=1,\n"
         "            user='leaky_user',\n"
-        "            password=SENTINEL,\n"
+        "            password=os.environ['LEAK_PASSWORD'],\n"
         "            database='no_such_db_test',\n"
         "            timeout=0.2,\n"
         "        )\n"
@@ -458,9 +455,7 @@ def test_asyncpg_connection_parameters_password_redacted_in_traceback(
     )
     env = os.environ.copy()
     env.pop("PYTEST_ADDOPTS", None)
-    env["PYTHONPATH"] = (
-        f"{plugin.parent}{os.pathsep}{env.get('PYTHONPATH', '')}"
-    ).rstrip(os.pathsep)
+    env["LEAK_PASSWORD"] = SENTINEL
     result = subprocess.run(
         [
             sys.executable,
@@ -472,8 +467,7 @@ def test_asyncpg_connection_parameters_password_redacted_in_traceback(
             "-p",
             "no:cacheprovider",
             "-p",
-            plugin.stem,
-            "--noconftest",
+            "tests.conftest",
             str(probe),
         ],
         cwd=ROOT,

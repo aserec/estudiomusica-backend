@@ -1686,12 +1686,33 @@ def _redact_pytest_longrepr(value: object) -> object:
     extraline = getattr(value, "extraline", None)
     if isinstance(extraline, str):
         _set_longrepr_attr(value, "extraline", _redact_pytest_report_text(extraline))
+    args = getattr(value, "args", None)
+    if isinstance(args, list | tuple):
+        rewritten_args: list[object] = []
+        for item in args:
+            if isinstance(item, tuple) and len(item) == 2:
+                name, raw = item
+                if str(name).lower() in {"password", "sslpassword"}:
+                    rewritten_args.append((name, "'***'"))
+                    continue
+                if isinstance(raw, str):
+                    rewritten_args.append((name, _redact_pytest_report_text(raw)))
+                    continue
+                rewritten_args.append((name, raw))
+            else:
+                rewritten_args.append(_redact_pytest_longrepr(item))
+        _set_longrepr_attr(
+            value,
+            "args",
+            tuple(rewritten_args) if isinstance(args, tuple) else rewritten_args,
+        )
     for attr in (
         "reprcrash",
         "reprtraceback",
         "reprlocals",
         "reprfuncargs",
         "reprfileloc",
+        "reprentries",
         "sections",
         "chain",
     ):
