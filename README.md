@@ -2,7 +2,7 @@
 
 Backend FastAPI de EstudioMusica. Sustituye los almacenes JSON del frontend Next.js.
 
-Este repositorio es el esqueleto FastAPI más las convenciones transversales de la API (errores, paginación, OpenAPI y CORS). No incluye base de datos ni lógica de negocio: Postgres + SQLAlchemy 2 async + Alembic (incluido `GET /api/v1/health/db`) llegará en otra PR.
+Este repositorio es el esqueleto FastAPI, las convenciones transversales de la API (errores, paginación, OpenAPI y CORS) y la persistencia: Postgres, SQLAlchemy 2 async y Alembic. No incluye modelos de negocio.
 
 ## Requisitos
 
@@ -61,7 +61,97 @@ Debe devolver HTTP 200 y:
 
 `GET /health` en la raíz es el mismo chequeo, expuesto como liveness para sondas. El contrato de la API es `GET /api/v1/health`.
 
+La sonda de Postgres es `GET /api/v1/health/db` (también hay alias en `GET /health/db`):
+
+```bash
+curl -i http://127.0.0.1:8000/api/v1/health/db
+```
+
+Con la BD disponible responde HTTP 200 y `{"db":"ok"}`. Si Postgres no responde o la sonda supera `DB_HEALTH_TIMEOUT` (2 s por defecto), HTTP 503 y `{"db":"down"}`, sin credenciales ni el sobre `{error, code, fields}` de las rutas de negocio. La sonda abre **una** conexión asyncpg propia (sin el pool de la app ni `pre_ping`; el `SELECT 1` es el ping), con los parámetros del DSN del dialecto (`create_connect_args`, sin las claves del adaptador `prepared_statement_cache_size` / `prepared_statement_name_func` / `async_creator_fn`) más `timeout` / `command_timeout` / `application_name`. Una clave extra (`?foo=bar`) tumba la sonda igual que la app. Las peticiones concurrentes esperan esa sonda (`asyncio.shield`) con su propio `DB_HEALTH_TIMEOUT`. El resultado se cachea `DB_HEALTH_CACHE_TTL` segundos (1 s por defecto, tope 60 s; `0` lo desactiva). Un connect/SELECT/close congelado se abandona con `Connection.terminate`. `GET /health/db` en la raíz es el alias de sonda; no aparece en OpenAPI.
+
 Documentación interactiva (OpenAPI / Swagger UI): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+
+## Postgres, migraciones y tests con BD
+
+El DSN se lee de `DATABASE_URL` (pydantic-settings). El valor por defecto coincide con `docker-compose.yml`:
+
+```text
+postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica
+```
+
+### Arrancar Postgres en local
+
+```bash
+docker compose up -d
+```
+
+Eso levanta Postgres 17 solo en `127.0.0.1:5432` y crea `estudiomusica` (desarrollo), `estudiomusica_test` y `estudiomusica_alembic_test`. Fuera de `development` Settings exige usuario, contraseña y base **explícitos** en el DSN (no se heredan de `PGUSER` / `PGPASSWORD` / `PGDATABASE`; asyncpg usaría el usuario como nombre de base) y rechaza la contraseña por defecto, el usuario por defecto (`estudiomusica`, p. ej. `estudiomusica:otra@…`) y las bases `*_test` (sin distinguir mayúsculas, p. ej. `x_TEST`). También rechaza `.pgpass` (`passfile` en la query o `PGPASSFILE`) y certificado de cliente (`sslcert` / `sslkey` / `sslpassword` en la query, o `PGSSLCERT` / `PGSSLKEY`). `sslrootcert` en la query se traduce a un `SSLContext` con `cafile` (asyncpg no tiene ese kwarg); `PGSSLROOTCERT` es la alternativa por entorno. Ambos se permiten (`verify-full`) y aceptan una CA sin `keyUsage`, como libpq (Python 3.13+ activa `VERIFY_X509_STRICT` en `create_default_context`). Un `sslrootcert` que solo contenga una intermedia no basta: no se activa `VERIFY_X509_PARTIAL_CHAIN` (igual que libpq/asyncpg). `ssl=require` + `sslrootcert` verifica CA y hostname a propósito: es más estricto que libpq (`require` no comprueba ni CA ni hostname; libpq trata `require`+`root.crt` como `verify-ca`). `ssl=allow` + `sslrootcert` también verifica la CA (sin hostname): más estricto que libpq, que en `allow` no exige certificado. El cliente no puede rechazar autenticación peer: eso lo decide `pg_hba.conf`. No se validan `PGSSLMODE`, `PGSSLPASSWORD`, `?service=` / `PGSERVICEFILE` ni los certificados por defecto de `~/.postgresql`. Los overrides de query (`password`, `user`, `database`, `dbname`) se aplican antes de validar. `sslmode=` de la query se traduce a `ssl=` (asyncpg no acepta `sslmode` como kwarg). `ssl` y `sslmode` juntos o repetidos (también `SSL` / `SSLMODE`) y cualquier clave TLS repetida (`sslrootcert`, `sslcert`, `sslkey`, `sslpassword`) levantan `ValueError`; libpq acepta la repetición y se queda con la última clave. Un valor de `ssl` / `sslmode` desconocido (`ssl=bogus`) también levanta `ValueError` (no acaba en `prefer`). `ssl=REQUIRE` / `TRUE` / `1` se normalizan a `require`; `ssl=0` / `false` a `disable` (asyncpg no acepta el alias en crudo). Una clave TLS vacía (`ssl=`, `sslmode=`) o una query percent-encoded entera (`sslmode%3Dverify-full%26ssl%3Ddisable`, también si empieza por una clave que no es TLS: `application_name%3Dx%26sslmode%3Dverify-full`) también levantan `ValueError` (libpq las rechaza; sin esto quedarían como `prefer`). Una clave que no es TLS con `=` codificado (`a%3Db=c`) se conserva. En development un DSN sin credenciales sí puede heredar `PGUSER`/`PGPASSWORD`. Los errores de validación no muestran el DSN (`hide_input_in_errors`; tampoco en `.errors()` / `.json()`). Espera a que el healthcheck esté sano:
+
+```bash
+docker compose ps
+```
+
+Aplica las migraciones sobre la base de desarrollo:
+
+```bash
+uv run alembic upgrade head
+```
+
+Para revertirlas del todo:
+
+```bash
+uv run alembic downgrade base
+```
+
+Las revisiones viven en `app/migrations/versions/` (`script_location = app:migrations`). Van en el wheel con el paquete `app`. La fuente de verdad es `app/alembic.ini`. El `alembic.ini` de la raíz es un fichero regular (no un symlink) con las mismas claves operativas para que `uv run alembic` funcione en el repo y el sdist no lleve enlaces.
+
+Desde el paquete instalado, en un directorio **sin** un `app/` local (`python -c` y `python -m alembic` importan el `app/` del CWD):
+
+```bash
+python -c "from alembic import command; from app.migrations.config import make_alembic_config; command.upgrade(make_alembic_config(), 'head')"
+```
+
+En el repo, o con el wheel, también vale `alembic -c app/alembic.ini upgrade head` (o `-c` apuntando al `alembic.ini` de `site-packages/app`).
+
+`0001` solo crea la función `set_updated_at()` (`clock_timestamp()`), no el trigger. No instala `pgcrypto`: en Postgres >= 13 `gen_random_uuid()` es nativa. El trigger de cada tabla `PersistentModel` lo montan las revisiones que la crean (`op_create_updated_at_trigger` / hook de autogenerate); `after_create` solo cubre `create_all` en tests. Nueva revisión, cuando exista un modelo:
+
+```bash
+uv run alembic revision -m "descripcion" --autogenerate
+```
+
+Los modelos de negocio heredan `PersistentModel` (`app/models/base.py`): `id` UUID, `created_at`, `updated_at` y borrado lógico `deleted_at`. `updated_at` va con `clock_timestamp()` y un trigger `BEFORE UPDATE` montado por las migraciones; no hay índice genérico en `deleted_at` (añadir uno parcial `WHERE deleted_at IS NULL` en cada tabla que liste vigentes).
+
+`env.py` usa `sqlalchemy.url` de Alembic si está definido; si no, `DATABASE_URL`.
+
+Las rutas inyectan la sesión con **`SessionDep`** (`Depends` + `scope="function"`). `get_session` ya no es pública: el scope por defecto de FastAPI 0.162 (`request`) hacía commit *después* de responder (201 con la fila aún no visible). Las ramas #93–#97 deben importar `SessionDep`. Un `StreamingResponse` que consulte la sesión usa **`SessionStreamingDep`** (scope `request`).
+
+### Tests con base aislada
+
+Los tests de persistencia **no** usan los JSON de `.data/` del frontend. Usan `estudiomusica_test` y envuelven cada caso en una transacción que se revierte al terminar. `ALEMBIC_TEST_DATABASE_URL` se deriva de `TEST_DATABASE_URL` (`<stem>_alembic_test`, p. ej. `estudiomusica_alembic_test`) y solo se usa en upgrade/downgrade de Alembic. El nombre efectivo de ambas bases debe terminar en `_test`; se rechazan query params que puedan cambiar el destino (`database`, `dbname`, `service`, `options`). Si no, pytest aborta (el mensaje nunca incluye la contraseña).
+
+`docker/postgres/init-test-db.sql` solo corre la primera vez que se crea el volumen `postgres_data`. Si el volumen ya existía, `pytest` crea las bases `*_test` conectando a la BD de mantenimiento `postgres`. Para recrearlas a mano: `docker compose down -v && docker compose up -d`.
+
+```bash
+docker compose up -d
+uv run pytest
+```
+
+Si Postgres no está en `127.0.0.1:5432`, apunta `TEST_DATABASE_URL` a tu DSN async:
+
+```bash
+export TEST_DATABASE_URL=postgresql+asyncpg://estudiomusica:estudiomusica@127.0.0.1:5432/estudiomusica_test
+uv run pytest
+```
+
+`uv run pytest` sin Postgres en marcha **salta** los tests de BD solo si el error es de conexión (refused, host desconocido, timeout). Un fallo de autenticación o una migración rota **falla**. En CI: `REQUIRE_POSTGRES=1 uv run pytest` (también `true`/`yes`/`on`, como Pydantic) convierte el skip en fallo; un valor desconocido aborta. Los mensajes y `--showlocals` no incluyen la contraseña. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
+
+Los tests de `?sslrootcert=` (`tls_postgres`) levantan un Postgres TLS efímero con Docker. Si `docker` no está en el `PATH`, se saltan, salvo `REQUIRE_TLS_TESTS=1` (entonces fallan). Para reutilizar un servidor TLS ya levantado:
+
+```bash
+export TLS_TEST_DATABASE_URL=postgresql+asyncpg://tlsprobe:tlsprobe-secret@127.0.0.1:55433/tlsprobe_test
+export TLS_TEST_CAFILE=/ruta/al/ca.pem
+uv run pytest
+```
 
 ## Tests, lint y types
 
@@ -158,23 +248,27 @@ La issue de convenciones es [aserec/estudioMusica-webapp#391](https://github.com
 
 ```text
 app/
-  main.py            # Factoría FastAPI: CORS, handlers, api_router /api/v1
+  main.py            # Factoría FastAPI perezosa: get_app(), CORS, api_router
+  db.py              # Motor async SQLAlchemy 2 y fábrica de sesiones
   middleware.py      # ASGI: versión, 500, tope de cuerpo, preflight rechazado
   errors.py          # Sobre de error y handlers (validación, HTTP)
   exceptions.py      # AccessDenied, NotFound, Validation, PayloadTooLarge
   config/            # Ajustes por variables de entorno (pydantic-settings)
-  routers/           # Rutas HTTP (health y examples; health también en la raíz)
+  routers/           # Rutas HTTP (health, health/db y examples)
   schemas/           # Modelos Pydantic (camelCase, errores, paginación)
   services/          # Lógica de aplicación (salud + lista fija de examples)
-  models/            # Reservado para modelos SQLAlchemy
-tests/               # Tests de pytest por convención
+  models/            # Base SQLAlchemy y mixin PersistentModel
+  migrations/        # Alembic (env.py async + versions/ + config programático)
+  alembic.ini        # Fuente de verdad empaquetada
+docker/postgres/     # init-test-db.sql (bases *_test; solo al crear el volumen)
+tests/               # Tests de pytest (convenciones + BD aislada)
+docker-compose.yml   # Postgres 17 en 127.0.0.1:5432 (sin container_name fijo)
+alembic.ini          # CLI del repo (copia regular; no es un symlink)
 .env.example         # Plantilla de variables de entorno
 pyproject.toml       # Dependencias, ruff, pytest y mypy
 uv.lock              # Lockfile reproducible de uv
 .python-version      # Python 3.15 (desarrollo)
 ```
-
-`GET /api/v1/health/db` se añadirá cuando exista la base de datos.
 
 ## Versiones fijadas
 
@@ -185,7 +279,12 @@ uv.lock              # Lockfile reproducible de uv
 | FastAPI | 0.162.0 |
 | uvicorn | 0.54.0 |
 | pydantic-settings | 2.16.1 |
+| SQLAlchemy | 2.1.6 (extra asyncio) |
+| asyncpg | 0.32.0 |
+| Alembic | 1.20.1 |
+| pytest-asyncio | 1.4.0 |
 | pytest | 9.1.1 |
+| pytest-timeout | 2.4.0 |
 | ruff | 0.17.2 |
 | mypy | 2.4.0 |
 

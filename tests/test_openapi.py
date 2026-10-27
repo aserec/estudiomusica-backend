@@ -32,10 +32,16 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     spec = response.json()
     paths = spec["paths"]
     assert "/api/v1/health" in paths
+    assert "/api/v1/health/db" in paths
     assert "/api/v1/examples" in paths
     assert "/api/v1/examples/denied" in paths
     assert "/api/v1/examples/too-large" in paths
     assert "/health" not in paths
+    assert "/health/db" not in paths
+
+    db_health = paths["/api/v1/health/db"]["get"]
+    assert "200" in db_health["responses"]
+    assert "503" in db_health["responses"]
 
     examples_get = paths["/api/v1/examples"]["get"]
     param_names = {param["name"] for param in examples_get["parameters"]}

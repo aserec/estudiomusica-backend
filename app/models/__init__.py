@@ -1,7 +1,29 @@
-"""Modelos de persistencia.
+"""Modelos de persistencia SQLAlchemy 2 (async).
 
-Reservado para SQLAlchemy 2 (async) en una issue posterior.
-No hay modelos de dominio en este esqueleto.
+No hay tablas de negocio en este ticket. ``PersistentModel`` fija el
+id UUID, ``created_at`` / ``updated_at`` y el borrado lógico ``deleted_at``.
 """
 
-__all__: list[str] = []
+from app.models.base import (
+    Base,
+    PersistentMixin,
+    PersistentModel,
+    attach_updated_at_trigger,
+    qualify_table,
+    quote_ident,
+    updated_at_drop_trigger_sql,
+    updated_at_trigger_name,
+    updated_at_trigger_sql,
+)
+
+__all__ = [
+    "Base",
+    "PersistentMixin",
+    "PersistentModel",
+    "attach_updated_at_trigger",
+    "qualify_table",
+    "quote_ident",
+    "updated_at_drop_trigger_sql",
+    "updated_at_trigger_name",
+    "updated_at_trigger_sql",
+]

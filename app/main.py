@@ -1,6 +1,8 @@
 import functools
 import logging
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
 from app.config import get_settings
+from app.db import dispose_engine
 from app.errors import register_exception_handlers
 from app.middleware import (
     ApiErrorMiddleware,
@@ -32,10 +35,16 @@ Backend FastAPI de EstudioMusica.
 - Listados: `{ "items": [...], "page": 1, "pageSize": 20, "total": 0 }`.
 - Versión de API: prefijo `/api/v1` y cabecera `X-API-Version: v1`.
 - CORS: orígenes en `CORS_ORIGINS` (por defecto el Next.js local).
+- Postgres: `GET /api/v1/health/db` → `{"db":"ok"}` o `503` `{"db":"down"}`.
 """
 
 OPENAPI_TAGS = [
-    {"name": "health", "description": "Liveness. Contrato: `/api/v1/health`."},
+    {
+        "name": "health",
+        "description": (
+            "Liveness (`/api/v1/health`) y readiness de Postgres (`/api/v1/health/db`)."
+        ),
+    },
     {
         "name": "examples",
         "description": "Demostración de convenciones. No es lógica de negocio.",
@@ -51,6 +60,12 @@ def _package_version() -> str:
         return version("estudiomusica-backend")
     except PackageNotFoundError:
         return "0.0.0"
+
+
+@asynccontextmanager
+async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+    yield
+    await dispose_engine()
 
 
 def _cors_origin_regex(origins: list[str]) -> str | None:
@@ -92,6 +107,7 @@ def create_app() -> FastAPI:
         title=settings.app_name,
         version=_package_version(),
         description=OPENAPI_DESCRIPTION,
+        lifespan=lifespan,
         contact={
             "name": "EstudioMusica",
             "url": "https://estudiomusica.com",
@@ -124,6 +140,10 @@ def create_app() -> FastAPI:
 
     # Liveness en la raíz para sondas. El contrato de la API es GET /api/v1/health.
     application.include_router(health_router, include_in_schema=False)
+
+    from app.db import reject_invalid_streaming_session_routes
+
+    reject_invalid_streaming_session_routes(application)
 
     def custom_openapi() -> dict[str, Any]:
         if application.openapi_schema:

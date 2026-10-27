@@ -20,4 +20,6 @@ def test_openapi_includes_versioned_health_only(client: TestClient) -> None:
     paths = client.get("/openapi.json").json()["paths"]
 
     assert "/api/v1/health" in paths
+    assert "/api/v1/health/db" in paths
     assert "/health" not in paths
+    assert "/health/db" not in paths
