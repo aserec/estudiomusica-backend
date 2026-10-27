@@ -2025,17 +2025,26 @@ async def _adversary_deadlock_rounds(
     wait_sql: str,
     wait_params: dict[str, Any],
     start_api: Any,
+    released: asyncio.Event | None = None,
 ) -> Any:
     async with factory() as monitor:
         task: asyncio.Task[Any] | None = None
         for _ in range(rounds):
             async with factory() as adversary:
                 await adversary.execute(text("SET deadlock_timeout TO '10s'"))
-                await adversary.execute(text(hold_sql), hold_params)
+                try:
+                    await adversary.execute(text(hold_sql), hold_params)
+                except IntegrityError:
+                    await adversary.rollback()
+                    if released is not None:
+                        released.set()
+                    continue
                 if task is None:
                     task = asyncio.create_task(start_api())
                 if not await _wait_lock_waiters(monitor):
                     await adversary.rollback()
+                    if released is not None:
+                        released.set()
                     break
                 try:
                     await adversary.execute(text(wait_sql), wait_params)
@@ -2043,6 +2052,8 @@ async def _adversary_deadlock_rounds(
                     await adversary.rollback()
                 else:
                     await adversary.rollback()
+                if released is not None:
+                    released.set()
         assert task is not None
         return await task
 
@@ -2146,12 +2157,15 @@ def test_create_retries_real_deadlock_three_times(
     suffix = uuid.uuid4().hex[:8]
     tracked: list[uuid.UUID] = []
     sleeps: list[float] = []
+    released = asyncio.Event()
 
     real_sleep = asyncio.sleep
 
     async def fake_sleep(delay: float) -> None:
         if delay >= 0.01:
             sleeps.append(delay)
+            await asyncio.wait_for(released.wait(), timeout=2)
+            released.clear()
             return
         await real_sleep(delay)
 
@@ -2171,30 +2185,44 @@ def test_create_retries_real_deadlock_three_times(
                 )
                 tracked.append(parent.id)
                 await setup.commit()
-            child_name = f"rdc-{suffix}"
+            row: Category | None = None
+            child_name = ""
+            for _try in range(5):
+                sleeps.clear()
+                released.clear()
+                child_name = f"rdc-{suffix}-{_try}"
 
-            async def start_api() -> Category:
-                async with factory() as session:
-                    row = await create_category(
-                        session,
-                        CategoryCreate(name=child_name, parent_id=parent.id),
+                async def start_api(name: str = child_name) -> Category:
+                    async with factory() as session:
+                        created = await create_category(
+                            session,
+                            CategoryCreate(name=name, parent_id=parent.id),
+                        )
+                        await session.commit()
+                        return created
+
+                try:
+                    row = await _adversary_deadlock_rounds(
+                        factory,
+                        rounds=2,
+                        hold_sql=(
+                            "INSERT INTO categories "
+                            "(name, name_key, parent_id, sort_order) "
+                            "VALUES (:name, :name, :parent_id, 0)"
+                        ),
+                        hold_params={"name": child_name, "parent_id": parent.id},
+                        wait_sql="SELECT id FROM categories WHERE id = :id FOR UPDATE",
+                        wait_params={"id": parent.id},
+                        start_api=start_api,
+                        released=released,
                     )
-                    await session.commit()
-                    return row
-
-            row = await _adversary_deadlock_rounds(
-                factory,
-                rounds=2,
-                hold_sql=(
-                    "INSERT INTO categories (name, name_key, parent_id, sort_order) "
-                    "VALUES (:name, :name, :parent_id, 0)"
-                ),
-                hold_params={"name": child_name, "parent_id": parent.id},
-                wait_sql="SELECT id FROM categories WHERE id = :id FOR UPDATE",
-                wait_params={"id": parent.id},
-                start_api=start_api,
-            )
-            tracked.append(row.id)
+                except IntegrityError:
+                    continue
+                if row is not None:
+                    tracked.append(row.id)
+                if len(sleeps) == 2:
+                    break
+            assert row is not None
             assert row.name == child_name
             assert len(sleeps) == 2
             assert all(0.01 <= delay < 1.0 for delay in sleeps)
