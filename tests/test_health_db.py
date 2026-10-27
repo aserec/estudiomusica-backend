@@ -2052,6 +2052,14 @@ def _mix_dsn(base: str, query: str, *, shape: str = "plain") -> str:
         password = f"Hq#{password}"
     elif shape == "qm":
         password = f"Hq?{password}"
+    if shape == "dbenc":
+        return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/r92q%68c?{query}"
+    if shape == "nobase":
+        joiner = "&" if query else ""
+        return (
+            f"postgresql+asyncpg://{user}:{password}@{host}:{port}"
+            f"/?database=r92qhc{joiner}{query}"
+        )
     return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{database}?{query}"
 
 
@@ -2191,7 +2199,7 @@ def test_blank_tls_keys_and_encoded_query_raise() -> None:
         ) as caught:
             normalize_asyncpg_ssl_url(url)
         assert str(caught.value) == _SSL_BLANK_MSG
-    for shape in ("plain", "hash", "qm"):
+    for shape in ("plain", "hash", "qm", "dbenc", "nobase"):
         url = _mix_dsn(
             "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test",
             "sslmode=",
@@ -2206,6 +2214,98 @@ def test_blank_tls_keys_and_encoded_query_raise() -> None:
         )
         with pytest.raises(ValueError, match="claves TLS vacías|percent-encoded"):
             normalize_asyncpg_ssl_url(encoded)
+
+
+def test_encoded_database_and_query_database_reject_blank_and_mix() -> None:
+    """BAJA: base ``%68`` o ``?database=`` no saltan el detector ni el conteo."""
+
+    from app.config.settings import Settings
+    from app.db import _SSL_BLANK_MSG, _SSL_CONFLICT_MSG, normalize_asyncpg_ssl_url
+
+    blanks = (
+        "postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/r92q%68c?sslmode=",
+        "postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/r92q%68c?ssl=",
+        "postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/r92q%68c?"
+        "sslmode%3Dverify-full%26ssl%3Ddisable",
+        "postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/?database=r92qhc&ssl=",
+        "postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/?database=r92qhc&sslmode=",
+    )
+    for url in blanks:
+        with pytest.raises(
+            ValueError, match="claves TLS vacías|percent-encoded"
+        ) as blank:
+            normalize_asyncpg_ssl_url(url)
+        assert str(blank.value) == _SSL_BLANK_MSG
+        with pytest.raises(ValueError):
+            Settings(app_env="production", database_url=url)
+
+    mixes = (
+        "postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/r92q%68c"
+        "?sslmode=disable&sslmode=require",
+        "postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/r92q%68c"
+        "?ssl=disable&sslmode=require",
+        "postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/"
+        "?database=r92qhc&sslmode=disable&sslmode=require",
+        "postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/r92q%68c"
+        "?sslrootcert=/a.pem&sslrootcert=/b.pem",
+    )
+    for url in mixes:
+        with pytest.raises(ValueError, match="mezclar ni repetir") as caught:
+            normalize_asyncpg_ssl_url(url)
+        assert str(caught.value) == _SSL_CONFLICT_MSG
+
+
+def test_normalize_rejects_conflicts_when_raw_query_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N1-N5/D*: el conteo de normalize no depende del detector crudo."""
+
+    from app.db import _SSL_CONFLICT_MSG, normalize_asyncpg_ssl_url
+
+    monkeypatch.setattr("app.db._raw_query_after_database", lambda *_a, **_k: None)
+    cases = (
+        "sslmode=disable&sslmode=require",
+        "ssl=disable&ssl=require",
+        "ssl=disable&sslmode=require",
+        "SSL=disable&ssl=require",
+        "sslmode=verify-full&SSLMODE=disable",
+        "%73slmode=verify-full&ssl=disable",
+        "sslrootcert=/a.pem&sslrootcert=/b.pem",
+        "ssl=disable&sslmode=require&sslmode=verify-full",
+    )
+    bases = (
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test",
+        "postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/r92q%68c",
+        "postgresql+asyncpg://r92qhc:s3cretOK@127.0.0.1:1/",
+    )
+    for base in bases:
+        for query in cases:
+            if base.endswith("/"):
+                url = f"{base}?database=r92qhc&{query}"
+            else:
+                url = f"{base}?{query}"
+            with pytest.raises(ValueError, match="mezclar ni repetir") as caught:
+                normalize_asyncpg_ssl_url(url)
+            assert str(caught.value) == _SSL_CONFLICT_MSG
+
+
+def test_prepare_rejects_repeated_tls_keys_and_uppercase_ssl() -> None:
+    """B11/N16: sslcert repetido y ``SSL=`` en prepare no se escapan."""
+
+    from app.db import _SSL_CONFLICT_MSG, prepare_asyncpg_connect_kwargs
+
+    with pytest.raises(ValueError, match="mezclar ni repetir") as certs:
+        prepare_asyncpg_connect_kwargs(
+            {"host": "127.0.0.1", "sslcert": ("/a.pem", "/b.pem")}
+        )
+    assert str(certs.value) == _SSL_CONFLICT_MSG
+    with pytest.raises(ValueError, match="mezclar ni repetir"):
+        prepare_asyncpg_connect_kwargs(
+            {"host": "127.0.0.1", "sslcert": "/a.pem", "SSLCERT": "/b.pem"}
+        )
+    prepared = prepare_asyncpg_connect_kwargs({"host": "127.0.0.1", "SSL": "disable"})
+    assert prepared.get("ssl") is False
+    assert "SSL" not in prepared
 
 
 def test_ssl_zero_with_sslrootcert_matches_ssl_zero(tmp_path: Any) -> None:

@@ -118,16 +118,30 @@ def _query_scalar(query: Mapping[Any, Any], *keys: str) -> str | None:
     return None
 
 
-def _raw_query_after_database(url: str, database: str | None) -> str | None:
-    """Query cruda tras ``/{database}?``. No usa ``urlparse`` (``[`` / ``]``)."""
+def _authority_start(url: str) -> int:
+    """Índice tras ``@`` de las credenciales, o tras ``scheme://`` si no hay."""
 
-    if not database:
-        return None
-    marker = f"/{database}?"
-    index = url.find(marker)
+    at = url.find("@")
+    if at >= 0:
+        return at + 1
+    scheme = url.find("://")
+    if scheme >= 0:
+        return scheme + 3
+    return 0
+
+
+def _raw_query_after_database(url: str, database: str | None) -> str | None:
+    """Query cruda: primer ``?`` tras las credenciales (``@``) o el host.
+
+    No usa el nombre de base (puede ir percent-encoded o solo en
+    ``?database=``) ni ``urlparse`` (``[`` / ``]`` en la contraseña).
+    """
+
+    del database
+    index = url.find("?", _authority_start(url))
     if index < 0:
         return None
-    return url[index + len(marker) :]
+    return url[index + 1 :]
 
 
 def _reject_blank_and_encoded_query(url: str, database: str | None) -> None:
@@ -170,9 +184,10 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
     contraseña siguen siendo válidos.
     ``SSL`` / ``Ssl`` pasan a ``ssl``. ``sslmode`` pasa a ``ssl``.
     ``parse_qsl(..., keep_blank_values=True)`` sobre la query cruda
-    rechaza claves TLS vacías y una query percent-encoded entera
-    (clave decodificada con ``=`` o ``&``). Un valor de ``ssl`` /
-    ``sslmode`` desconocido levanta ``ValueError``.
+    (primer ``?`` tras ``@`` o el host) rechaza claves TLS vacías y
+    una query percent-encoded entera (clave decodificada con ``=``
+    o ``&``). Un valor de ``ssl`` / ``sslmode`` desconocido levanta
+    ``ValueError``.
     """
 
     try:
