@@ -169,12 +169,21 @@ def _decoded_key_is_tls(key: str) -> bool:
     return any(part in _TLS_QUERY_KEYS for part in re.split(r"[=&]", lowered) if part)
 
 
-def _reject_unknown_ssl_mode(ssl_value: object) -> None:
+def _canonical_ssl_token(ssl_value: object) -> object:
+    """Minúsculas; ``0``/``false`` → ``False``, ``1``/``true`` → ``require``."""
+
     if ssl_value is None or isinstance(ssl_value, (bool, ssl.SSLContext)):
-        return
-    if isinstance(ssl_value, str) and ssl_value.lower() in _SSL_KNOWN_MODES:
-        return
-    raise ValueError(_SSL_UNKNOWN_MSG)
+        return ssl_value
+    if not isinstance(ssl_value, str):
+        raise ValueError(_SSL_UNKNOWN_MSG)
+    if ssl_value.lower() not in _SSL_KNOWN_MODES:
+        raise ValueError(_SSL_UNKNOWN_MSG)
+    lowered = ssl_value.lower()
+    if lowered in {"false", "0"}:
+        return False
+    if lowered in {"true", "1"}:
+        return "require"
+    return lowered
 
 
 def _reject_blank_and_encoded_query(url: str, database: str | None) -> None:
@@ -215,7 +224,8 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
     (primer ``?`` tras las credenciales) rechaza claves TLS vacías y
     una query percent-encoded si algún segmento de la clave
     decodificada es TLS. Un valor de ``ssl`` / ``sslmode``
-    desconocido levanta ``ValueError``.
+    desconocido levanta ``ValueError``. ``REQUIRE`` / ``true`` /
+    ``1`` / ``0`` se normalizan (``require`` / ``disable``).
     """
 
     try:
@@ -255,8 +265,8 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
             continue
         new_query[key] = value
     if ssl_value is not None:
-        _reject_unknown_ssl_mode(ssl_value)
-        new_query["ssl"] = str(ssl_value)
+        token = _canonical_ssl_token(ssl_value)
+        new_query["ssl"] = "disable" if token is False else str(token)
     return parsed.set(query=new_query).render_as_string(hide_password=False)
 
 
@@ -304,7 +314,11 @@ def ssl_context_from_rootcert(cafile: str, ssl_value: object = None) -> ssl.SSLC
 def _ssl_is_disabled(ssl_value: object) -> bool:
     if ssl_value is False:
         return True
-    return isinstance(ssl_value, str) and ssl_value.lower() in {"disable", "false"}
+    return isinstance(ssl_value, str) and ssl_value.lower() in {
+        "disable",
+        "false",
+        "0",
+    }
 
 
 def asyncpg_ssl_connect_arg(ssl_value: object, cafile: str | None) -> object:
@@ -359,7 +373,7 @@ def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
     if sslmode is not None and "ssl" not in kwargs:
         kwargs["ssl"] = sslmode
     if "ssl" in kwargs:
-        _reject_unknown_ssl_mode(kwargs["ssl"])
+        kwargs["ssl"] = _canonical_ssl_token(kwargs["ssl"])
     if sslrootcert or "ssl" in kwargs:
         kwargs["ssl"] = asyncpg_ssl_connect_arg(kwargs.get("ssl"), sslrootcert)
     return kwargs

@@ -2505,22 +2505,51 @@ def test_ssl_zero_with_sslrootcert_matches_ssl_zero(tmp_path: Any) -> None:
     )
 
     cafile = _write_unrelated_ca(Path(str(tmp_path)) / "unit-ca.pem")
-    assert asyncpg_ssl_connect_arg("0", None) == "0"
-    assert asyncpg_ssl_connect_arg("0", str(cafile)) == "0"
+    assert asyncpg_ssl_connect_arg("0", None) is False
+    assert asyncpg_ssl_connect_arg("0", str(cafile)) is False
     bare = prepare_asyncpg_connect_kwargs({"host": "127.0.0.1", "ssl": "0"})
     with_ca = prepare_asyncpg_connect_kwargs(
         {"host": "127.0.0.1", "ssl": "0", "sslrootcert": str(cafile)}
     )
-    assert bare.get("ssl") == with_ca.get("ssl") == "0"
-    assert not isinstance(with_ca.get("ssl"), ssl_mod.SSLContext)
+    assert bare.get("ssl") is False
+    assert with_ca.get("ssl") is False
     _bare_url, bare_args = asyncpg_url_and_connect_args(
         "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?ssl=0"
     )
     _ca_url, ca_args = asyncpg_url_and_connect_args(
         f"postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?ssl=0&sslrootcert={cafile}"
     )
-    assert bare_args.get("ssl") == ca_args.get("ssl") == "0"
+    assert bare_args.get("ssl") is False
+    assert ca_args.get("ssl") is False
     assert not isinstance(ca_args.get("ssl"), ssl_mod.SSLContext)
+
+
+def test_ssl_aliases_normalize_to_asyncpg_tokens() -> None:
+    """REQUIRE/true/1 → require; 0/false → disable (asyncpg no acepta el alias)."""
+
+    from sqlalchemy.engine.url import make_url
+
+    from app.db import (
+        normalize_asyncpg_ssl_url,
+        prepare_asyncpg_connect_kwargs,
+    )
+
+    to_require = ("REQUIRE", "True", "TRUE", "1")
+    to_disable = ("0", "false", "FALSE", "False")
+    for raw in to_require:
+        url = normalize_asyncpg_ssl_url(
+            f"postgresql+asyncpg://u:p@127.0.0.1:1/db_test?ssl={raw}"
+        )
+        assert make_url(url).query.get("ssl") == "require"
+        prepared = prepare_asyncpg_connect_kwargs({"host": "127.0.0.1", "ssl": raw})
+        assert prepared.get("ssl") == "require"
+    for raw in to_disable:
+        url = normalize_asyncpg_ssl_url(
+            f"postgresql+asyncpg://u:p@127.0.0.1:1/db_test?ssl={raw}"
+        )
+        assert make_url(url).query.get("ssl") == "disable"
+        prepared = prepare_asyncpg_connect_kwargs({"host": "127.0.0.1", "ssl": raw})
+        assert prepared.get("ssl") is False
 
 
 @pytest.mark.parametrize(
