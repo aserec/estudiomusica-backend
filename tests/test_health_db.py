@@ -794,19 +794,74 @@ async def test_waiter_timeout_bounds_injected_hanging_probe(
     health_service.clear_health_probe()
     hanging = asyncio.create_task(_hang())
     health_service._probe_task = hanging
+    loop = asyncio.get_running_loop()
+    stop_nudge = threading.Event()
+
+    def _nudge() -> None:
+        while not stop_nudge.wait(0.05):
+            loop.call_soon_threadsafe(lambda: None)
+
+    nudger = threading.Thread(target=_nudge, daemon=True)
+    nudger.start()
     try:
-        started = time.monotonic()
+        started = loop.time()
         result = await health_service.check_database()
-        elapsed = time.monotonic() - started
+        elapsed = loop.time() - started
         timeout = get_settings().db_health_timeout
         assert result.db == "down"
-        assert 0.9 * timeout <= elapsed < timeout + 0.25
+        assert 0.9 * timeout <= elapsed < timeout + 0.15
     finally:
+        stop_nudge.set()
         health_service.clear_health_probe()
         if not hanging.done():
             hanging.cancel()
             with suppress(asyncio.CancelledError):
                 await hanging
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_run_probe_timeout_bounds_hanging_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W10: el timeout interno de ``_run_probe`` acota un connect colgado."""
+
+    import asyncpg
+
+    from app.config import get_settings
+    from app.db import clear_engine
+
+    async def _hang(*_args: object, **_kwargs: object) -> object:
+        await asyncio.Event().wait()
+        raise RuntimeError("unreachable")
+
+    _probe_settings(
+        monkeypatch, "postgresql+asyncpg://probe:secret@127.0.0.1:1/probe_db"
+    )
+    monkeypatch.setenv("DB_HEALTH_TIMEOUT", "0.6")
+    monkeypatch.setattr(asyncpg, "connect", _hang)
+    get_settings.cache_clear()
+    clear_engine()
+    health_service.clear_health_probe()
+    loop = asyncio.get_running_loop()
+    stop_nudge = threading.Event()
+
+    def _nudge() -> None:
+        while not stop_nudge.wait(0.05):
+            loop.call_soon_threadsafe(lambda: None)
+
+    nudger = threading.Thread(target=_nudge, daemon=True)
+    nudger.start()
+    try:
+        started = loop.time()
+        result = await health_service._run_probe()
+        elapsed = loop.time() - started
+        timeout = get_settings().db_health_timeout
+        assert result.db == "down"
+        assert 0.9 * timeout <= elapsed < timeout + 0.15
+    finally:
+        stop_nudge.set()
+        health_service.clear_health_probe()
         get_settings.cache_clear()
 
 
@@ -2280,8 +2335,9 @@ def test_normalize_rejects_conflicts_when_raw_query_is_absent(
     )
     for base in bases:
         for query in cases:
+            joiner = "&" if base.endswith("/") else "?"
             if base.endswith("/"):
-                url = f"{base}?database=r92qhc&{query}"
+                url = f"{base}?database=r92qhc{joiner}{query}"
             else:
                 url = f"{base}?{query}"
             with pytest.raises(ValueError, match="mezclar ni repetir") as caught:
@@ -2306,6 +2362,20 @@ def test_prepare_rejects_repeated_tls_keys_and_uppercase_ssl() -> None:
     prepared = prepare_asyncpg_connect_kwargs({"host": "127.0.0.1", "SSL": "disable"})
     assert prepared.get("ssl") is False
     assert "SSL" not in prepared
+
+
+def test_non_tls_encoded_equals_in_query_key_is_kept() -> None:
+    """NIT: ``a%3Db=c`` no es clave TLS; no se rechaza."""
+
+    from sqlalchemy.engine.url import make_url
+
+    from app.db import normalize_asyncpg_ssl_url
+
+    url = "postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?a%3Db=c&ssl=require"
+    normalized = normalize_asyncpg_ssl_url(url)
+    query = {str(key): value for key, value in make_url(normalized).query.items()}
+    assert query.get("ssl") == "require"
+    assert any("a=b" in str(key) or str(key) == "a=b" for key in query)
 
 
 def test_ssl_zero_with_sslrootcert_matches_ssl_zero(tmp_path: Any) -> None:

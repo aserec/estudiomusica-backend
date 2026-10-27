@@ -4,6 +4,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -176,7 +177,19 @@ def test_ping_postgres_enforces_total_timeout(
 ) -> None:
     class _HangAfterConnect:
         async def execute(self, *_args: object, **_kwargs: object) -> None:
-            await asyncio.Event().wait()
+            loop = asyncio.get_running_loop()
+            stop_nudge = threading.Event()
+
+            def _nudge() -> None:
+                while not stop_nudge.wait(0.05):
+                    loop.call_soon_threadsafe(lambda: None)
+
+            nudger = threading.Thread(target=_nudge, daemon=True)
+            nudger.start()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stop_nudge.set()
 
         async def __aenter__(self) -> _HangAfterConnect:
             return self

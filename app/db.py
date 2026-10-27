@@ -144,15 +144,36 @@ def _raw_query_after_database(url: str, database: str | None) -> str | None:
     return url[index + 1 :]
 
 
+def _decoded_key_is_tls(key: str) -> bool:
+    """True si la clave (o su prefijo antes de ``=`` / ``&``) es TLS."""
+
+    lowered = key.lower()
+    if lowered in _TLS_QUERY_KEYS:
+        return True
+    head = lowered.split("=", 1)[0].split("&", 1)[0]
+    return head in _TLS_QUERY_KEYS
+
+
+def _reject_unknown_ssl_mode(ssl_value: object) -> None:
+    if ssl_value is None or isinstance(ssl_value, (bool, ssl.SSLContext)):
+        return
+    if isinstance(ssl_value, str) and ssl_value.lower() in _SSL_KNOWN_MODES:
+        return
+    raise ValueError(_SSL_UNKNOWN_MSG)
+
+
 def _reject_blank_and_encoded_query(url: str, database: str | None) -> None:
-    """``keep_blank_values``: TLS vacía o clave con ``=`` / ``&`` → ValueError."""
+    """``keep_blank_values``: TLS vacía o clave TLS con ``=`` / ``&``.
+
+    Una clave que no es TLS (p. ej. ``a%3Db=c``) no se rechaza.
+    """
 
     raw = _raw_query_after_database(url, database)
     if raw is None:
         return
     tls_counts: dict[str, int] = {}
     for key, value in parse_qsl(raw, keep_blank_values=True):
-        if "=" in key or "&" in key:
+        if ("=" in key or "&" in key) and _decoded_key_is_tls(key):
             raise ValueError(_SSL_BLANK_MSG)
         lowered = key.lower()
         if lowered not in _TLS_QUERY_KEYS:
@@ -166,14 +187,6 @@ def _reject_blank_and_encoded_query(url: str, database: str | None) -> None:
         raise ValueError(_SSL_CONFLICT_MSG)
 
 
-def _reject_unknown_ssl_mode(ssl_value: object) -> None:
-    if ssl_value is None or isinstance(ssl_value, (bool, ssl.SSLContext)):
-        return
-    if isinstance(ssl_value, str) and ssl_value.lower() in _SSL_KNOWN_MODES:
-        return
-    raise ValueError(_SSL_UNKNOWN_MSG)
-
-
 def normalize_asyncpg_ssl_url(url: str) -> str:
     """Una sola regla para ``ssl`` / ``sslmode`` (Settings, engine, Alembic).
 
@@ -185,9 +198,9 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
     ``SSL`` / ``Ssl`` pasan a ``ssl``. ``sslmode`` pasa a ``ssl``.
     ``parse_qsl(..., keep_blank_values=True)`` sobre la query cruda
     (primer ``?`` tras ``@`` o el host) rechaza claves TLS vacías y
-    una query percent-encoded entera (clave decodificada con ``=``
-    o ``&``). Un valor de ``ssl`` / ``sslmode`` desconocido levanta
-    ``ValueError``.
+    una query percent-encoded entera si la clave decodificada es TLS
+    y contiene ``=`` o ``&``. Un valor de ``ssl`` / ``sslmode``
+    desconocido levanta ``ValueError``.
     """
 
     try:
