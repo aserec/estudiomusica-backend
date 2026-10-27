@@ -33,7 +33,7 @@ from tests.conftest import (
     _pg_literal,
     _role_advisory_lock_keys,
     _SessionAdvisoryLock,
-    _skip_or_fail_postgres,
+    _skip_or_fail_unix_socket_lock,
     drop_database_if_exists,
     drop_production_test_role,
     ensure_database_exists,
@@ -1496,13 +1496,39 @@ def test_drop_detects_lost_lock_during_sweep(
         lock.stop()
 
 
+def _unix_socket_lock_dsn(admin: RedactedDsn, directory: str, port: str) -> str:
+    """DSN ``?host=/socket&port=`` conservando user/password (authority o query)."""
+
+    parsed = make_url(admin.secret())
+    # Conservar user/password (authority o query). .set(query={}) los tira.
+    return (
+        parsed.set(host=None, port=None)
+        .update_query_dict({"host": directory, "port": port})
+        .render_as_string(hide_password=False)
+    )
+
+
+async def _postgres_system_identifier(dsn: RedactedDsn) -> str | None:
+    engine = _admin_engine(dsn)
+    try:
+        async with engine.connect() as connection:
+            value = await connection.scalar(
+                text("SELECT system_identifier FROM pg_control_system()")
+            )
+    except Exception:
+        return None
+    finally:
+        await engine.dispose()
+    return None if value is None else str(value)
+
+
 @pytest.mark.db
 def test_session_lock_holds_with_unix_socket_query_dsn(
     require_postgres: RedactedDsn,
 ) -> None:
     """MEDIA 3: ?host=/socket&port= debe abrir el lock por la ruta del engine."""
 
-    async def socket_params() -> tuple[str, str]:
+    async def socket_params() -> tuple[str, str, str | None]:
         engine = _admin_engine(require_postgres)
         try:
             async with engine.connect() as connection:
@@ -1510,25 +1536,33 @@ def test_session_lock_holds_with_unix_socket_query_dsn(
                     text("SHOW unix_socket_directories")
                 )
                 port = await connection.scalar(text("SHOW port"))
+                ident = await connection.scalar(
+                    text("SELECT system_identifier FROM pg_control_system()")
+                )
         finally:
             await engine.dispose()
         if not directories:
             raise RuntimeError("Postgres no publica unix_socket_directories")
-        return str(directories).split(",")[0].strip(), str(port)
+        return (
+            str(directories).split(",")[0].strip(),
+            str(port),
+            None if ident is None else str(ident),
+        )
 
-    directory, port = asyncio.run(socket_params())
-    if not Path(directory).is_dir():
-        _skip_or_fail_postgres(
-            f"el directorio del socket Unix {directory} no existe en el cliente "
+    directory, port, tcp_ident = asyncio.run(socket_params())
+    socket_path = Path(directory) / f".s.PGSQL.{port}"
+    if not socket_path.is_socket():
+        _skip_or_fail_unix_socket_lock(
+            f"el socket Unix {socket_path} no está en el cliente "
             "(en compose el socket vive dentro del contenedor)"
         )
-    parsed = make_url(require_postgres.secret())
-    # Conservar user/password (authority o query). .set(query={}) los tira.
-    socket_url = (
-        parsed.set(host=None, port=None)
-        .update_query_dict({"host": directory, "port": port})
-        .render_as_string(hide_password=False)
-    )
+    socket_url = _unix_socket_lock_dsn(require_postgres, directory, port)
+    socket_ident = asyncio.run(_postgres_system_identifier(RedactedDsn(socket_url)))
+    if tcp_ident is None or socket_ident != tcp_ident:
+        _skip_or_fail_unix_socket_lock(
+            f"el socket Unix {socket_path} no es el mismo servidor que el DSN TCP "
+            "(system_identifier distinto; limitación de topología)"
+        )
     lock = _SessionAdvisoryLock(RedactedDsn(socket_url), _unique_lock_role("dsn_sock"))
     try:
         assert lock.start() is True

@@ -240,6 +240,16 @@ def validate_require_tls_tests() -> None:
 
 
 @pytest.fixture(scope="session", autouse=True)
+def validate_require_unix_socket_lock_test() -> None:
+    """Un REQUIRE_UNIX_SOCKET_LOCK_TEST desconocido aborta siempre."""
+
+    try:
+        _unix_socket_lock_test_required()
+    except pytest.UsageError as exc:
+        pytest.exit(str(exc), returncode=2)
+
+
+@pytest.fixture(scope="session", autouse=True)
 def isolate_settings_env(reject_non_test_database: None) -> Iterator[None]:
     """Fija todas las variables de Settings durante la sesión de tests.
 
@@ -1109,6 +1119,12 @@ def _tls_required() -> bool:
     return _env_flag("REQUIRE_TLS_TESTS")
 
 
+def _unix_socket_lock_test_required() -> bool:
+    """Opt-in: exigir el lock por socket Unix aunque la topología no lo tenga."""
+
+    return _env_flag("REQUIRE_UNIX_SOCKET_LOCK_TEST")
+
+
 class _MissingDatabase(RuntimeError):
     """La instancia responde pero la base de test no existe."""
 
@@ -1121,6 +1137,19 @@ def _skip_or_fail_postgres(message: str) -> None:
 
 def _skip_or_fail_tls(message: str) -> None:
     if _tls_required():
+        raise pytest.fail.Exception(message) from None
+    raise pytest.skip.Exception(message) from None
+
+
+def _skip_or_fail_unix_socket_lock(message: str) -> None:
+    """Salta si el socket no es usable aquí. REQUIRE_POSTGRES no lo exige.
+
+    Compose y un runner con Postgres parado no tienen el socket del servidor.
+    Eso es una limitación de topología, no un fallo de CI. Solo
+    ``REQUIRE_UNIX_SOCKET_LOCK_TEST`` convierte el skip en fallo.
+    """
+
+    if _unix_socket_lock_test_required():
         raise pytest.fail.Exception(message) from None
     raise pytest.skip.Exception(message) from None
 

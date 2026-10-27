@@ -20,7 +20,9 @@ from tests.conftest import (
     _postgres_required,
     _skip_or_fail_postgres,
     _skip_or_fail_tls,
+    _skip_or_fail_unix_socket_lock,
     _tls_required,
+    _unix_socket_lock_test_required,
     apply_test_migrations,
 )
 
@@ -488,6 +490,38 @@ def test_skip_or_fail_postgres_fails_when_tls_is_required(
     with pytest.raises(BaseException, match="no está disponible") as caught:
         _skip_or_fail_postgres("Postgres de test no está disponible")
     assert type(caught.value) is pytest.fail.Exception
+
+
+def test_unix_socket_lock_skip_ignores_require_postgres(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REQUIRE_POSTGRES", "1")
+    monkeypatch.setenv("REQUIRE_TLS_TESTS", "1")
+    monkeypatch.delenv("REQUIRE_UNIX_SOCKET_LOCK_TEST", raising=False)
+    with pytest.raises(pytest.skip.Exception, match="socket Unix"):
+        _skip_or_fail_unix_socket_lock(
+            "el socket Unix no está en el cliente "
+            "(en compose el socket vive dentro del contenedor)"
+        )
+
+
+def test_unix_socket_lock_fails_when_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REQUIRE_UNIX_SOCKET_LOCK_TEST", "1")
+    with pytest.raises(pytest.fail.Exception, match="socket Unix"):
+        _skip_or_fail_unix_socket_lock(
+            "el socket Unix no está en el cliente "
+            "(en compose el socket vive dentro del contenedor)"
+        )
+
+
+def test_unix_socket_lock_test_required_unknown_value_aborts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REQUIRE_UNIX_SOCKET_LOCK_TEST", "maybe")
+    with pytest.raises(pytest.UsageError, match="REQUIRE_UNIX_SOCKET_LOCK_TEST"):
+        _unix_socket_lock_test_required()
 
 
 @pytest.mark.timeout(90)

@@ -164,6 +164,8 @@ uv run pytest
 
 `uv run pytest` sin Postgres en marcha **salta** los tests de BD solo si el error es de conexión (refused, host desconocido, timeout). Un fallo de autenticación o una migración rota **falla**. En CI: `REQUIRE_POSTGRES=1 uv run pytest` (también `true`/`yes`/`on`, como Pydantic) convierte el skip en fallo; un valor desconocido aborta. Los mensajes y `--showlocals` no incluyen la contraseña. Los tests de convenciones (errores, paginación, CORS, `/health`) no necesitan la base.
 
+El test del lock por socket Unix (`?host=/ruta`) solo corre si `Path(ruta) / f".s.PGSQL.{port}"` es un socket **y** `pg_control_system().system_identifier` coincide con el del DSN TCP (mismo servidor). Si el socket vive dentro de un contenedor (compose/CI) o el directorio existe vacío (Postgres instalado y parado), se salta aunque `REQUIRE_POSTGRES` o `REQUIRE_TLS_TESTS` estén activos: es una limitación de topología, no un fallo del servidor. Para exigirlo: `REQUIRE_UNIX_SOCKET_LOCK_TEST=1` (mismos booleanos; un valor desconocido aborta).
+
 El fixture `production_client` crea el rol `em_prod_tests_<pid>` (LOGIN, **sin** SUPERUSER / CREATEDB / CREATEROLE) con contraseña aleatoria por ejecución y lo borra al terminar la suite, también si falla. El sufijo es el pid del pytest padre: un hijo (p. ej. `test_leftovers`) que ejecute `migrated_test_database` no borra el rol del padre. Grants mínimos, los mismos que un rol de producción:
 
 - `CONNECT` en la base de test
