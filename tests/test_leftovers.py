@@ -355,7 +355,7 @@ def _cleanup_named_roles(admin: RedactedDsn, names: list[str]) -> None:
 
 
 async def _role_exists(dsn: RedactedDsn, name: str) -> object:
-    engine = _create_async_engine(dsn.secret())
+    engine = _admin_engine(dsn)
     try:
         async with engine.connect() as connection:
             return await connection.scalar(
@@ -1033,6 +1033,7 @@ def test_same_pid_peer_role_is_not_dropped_without_life_lock(
 
 
 @pytest.mark.db
+@pytest.mark.timeout(20)
 def test_ensure_fails_without_sweeping_when_life_lock_is_busy(
     require_postgres: RedactedDsn,
     tmp_path: Path,
@@ -1068,6 +1069,7 @@ def test_ensure_fails_without_sweeping_when_life_lock_is_busy(
             tmp_path, require_postgres, _CHILD_SAME_PID_ENSURE, shared
         )
         assert result.returncode == 0, result.stdout + result.stderr
+        lock.stop()
         assert asyncio.run(_role_exists(require_postgres, shared)) == 1
     finally:
         lock.stop()
