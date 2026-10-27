@@ -2566,6 +2566,7 @@ def test_fix_and_api_have_no_deadlock_e_and_h(
                 before = await deadlocks(count)
 
             async with factory() as writer:
+                await writer.begin()
                 created = await create_category(
                     writer, CategoryCreate.model_validate({"name": "Nueva raíz"})
                 )
@@ -2825,6 +2826,7 @@ def test_fix_does_not_clobber_concurrent_put_or_post(
                 await setup.commit()
 
             async with factory() as writer:
+                await writer.begin()
                 await update_category(
                     writer,
                     by_name["y"],
@@ -2862,6 +2864,7 @@ def test_fix_does_not_clobber_concurrent_put_or_post(
                 await setup.commit()
 
             async with factory() as writer:
+                await writer.begin()
                 created = await create_category(
                     writer, CategoryCreate.model_validate({"name": "z (dup 1)"})
                 )
@@ -3347,6 +3350,7 @@ def test_fix_exclusive_lock_released_after_commit(
                 await setup.commit()
 
             async with factory() as holder:
+                await holder.begin()
                 born = await create_category(
                     holder,
                     CategoryCreate(name=f"lockn-{suffix}", parent_id=parent.id),
