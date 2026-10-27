@@ -4050,6 +4050,9 @@ async def _cleanup_ids(database_url: str, ids: list[uuid.UUID]) -> None:
     try:
         async with factory() as session:
             if ids:
+                await session.execute(
+                    delete(Category).where(Category.parent_id.in_(ids))
+                )
                 await session.execute(delete(Category).where(Category.id.in_(ids)))
             leftover = await session.scalar(
                 text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'")
