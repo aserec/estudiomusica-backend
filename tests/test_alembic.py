@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from alembic import command
@@ -1059,3 +1060,53 @@ def test_autogenerate_discards_empty_revision(
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     finally:
         drop_database_if_exists(dsn)
+
+
+def test_alembic_migration_engine_gets_app_name_and_lock_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    """NIT: env.py aplica ALEMBIC_* al engine de la migración."""
+
+    import sqlalchemy.ext.asyncio as sa_asyncio
+    from sqlalchemy import event
+
+    seen: dict[str, str] = {}
+    captured: dict[str, object] = {}
+    real_create = sa_asyncio.create_async_engine
+
+    def spy_create(*args: object, **kwargs: object) -> object:
+        captured["connect_args"] = kwargs.get("connect_args")
+        engine = real_create(*args, **kwargs)  # type: ignore[arg-type]
+
+        def _on_connect(dbapi_conn: Any, _record: object) -> None:
+            cursor = dbapi_conn.cursor()
+            try:
+                cursor.execute("SHOW application_name")
+                seen["application_name"] = str(cursor.fetchone()[0])
+                cursor.execute("SHOW lock_timeout")
+                seen["lock_timeout"] = str(cursor.fetchone()[0])
+            finally:
+                cursor.close()
+
+        event.listen(engine.sync_engine, "connect", _on_connect)
+        return engine
+
+    monkeypatch.setattr(sa_asyncio, "create_async_engine", spy_create)
+    monkeypatch.setenv("ALEMBIC_APPLICATION_NAME", "r92-mig-engine")
+    monkeypatch.setenv("ALEMBIC_LOCK_TIMEOUT", "8s")
+
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    command.upgrade(alembic_config(dsn), "head")
+
+    connect_args = captured.get("connect_args")
+    assert isinstance(connect_args, dict)
+    server = connect_args.get("server_settings")
+    assert isinstance(server, dict)
+    assert server.get("application_name") == "r92-mig-engine"
+    assert server.get("lock_timeout") == "8s"
+    assert seen.get("application_name") == "r92-mig-engine"
+    lock = (seen.get("lock_timeout") or "").lower().replace(" ", "")
+    assert lock in {"8s", "8000ms", "8sec"}
