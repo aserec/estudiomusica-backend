@@ -1369,6 +1369,42 @@ def test_killed_lock_connection_fails_teardown(
         lock.stop()
 
 
+def test_unlock_returning_false_marks_lock_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LOST8: unlock → False cuenta como pérdida del lock de vida."""
+
+    class _FakeConnection:
+        async def scalar(self, statement: object, _params: object = None) -> object:
+            sql = str(statement)
+            if "pg_try_advisory_lock" in sql:
+                return True
+            if "pg_advisory_unlock" in sql:
+                return False
+            return 1
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeEngine:
+        async def connect(self) -> _FakeConnection:
+            return _FakeConnection()
+
+        async def dispose(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "tests.conftest._create_async_engine",
+        lambda *_args, **_kwargs: _FakeEngine(),
+    )
+    dummy = RedactedDsn("postgresql+asyncpg://u:p@127.0.0.1:1/app_test")
+    lock = _SessionAdvisoryLock(dummy, _unique_lock_role("lost8"))
+    assert lock.start() is True
+    lock.stop()
+    assert lock.lost is True
+    assert lock._thread.is_alive() is False
+
+
 @pytest.mark.db
 def test_drop_detects_lost_lock_immediately_after_kill(
     require_postgres: RedactedDsn,
