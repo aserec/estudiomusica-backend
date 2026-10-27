@@ -6,7 +6,6 @@ import os
 import secrets
 import subprocess
 import sys
-from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -850,78 +849,87 @@ def test_orphan_objects_in_non_test_db_are_not_dropped(
         parsed.set(database=dbname).render_as_string(hide_password=False)
     )
     role = _pg_ident(orphan)
-    holder_engine: AsyncEngine | None = None
-    holder_conn: Any = None
     try:
 
-        async def plant_role() -> None:
-            engine = _admin_engine(require_postgres)
+        async def plant_under_sweep_lock() -> None:
+            holder = _admin_engine(require_postgres)
             try:
-                async with engine.connect() as connection:
-                    await connection.execute(
-                        text(
-                            f"CREATE ROLE {role} LOGIN NOSUPERUSER "
-                            f"PASSWORD {_pg_literal('orphan-nontest-secret')}"
-                        )
-                    )
-            finally:
-                await engine.dispose()
-
-        async def plant_table() -> None:
-            engine = _admin_engine(require_postgres)
-            try:
-                async with engine.connect() as connection:
-                    await connection.execute(
-                        text(f"GRANT CONNECT ON DATABASE {_pg_ident(dbname)} TO {role}")
-                    )
-            finally:
-                await engine.dispose()
-            other_engine = _admin_engine(other)
-            try:
-                async with other_engine.connect() as connection:
-                    await connection.execute(
-                        text("CREATE TABLE orphan_nontest_owned (id int)")
-                    )
-                    await connection.execute(
-                        text(f"ALTER TABLE orphan_nontest_owned OWNER TO {role}")
-                    )
-            finally:
-                await other_engine.dispose()
-
-        async def acquire_sweep_lock() -> None:
-            nonlocal holder_engine, holder_conn
-            holder_engine = _admin_engine(require_postgres)
-            holder_conn = await holder_engine.connect()
-            await holder_conn.scalar(
-                text("SELECT pg_advisory_lock(:k1, :k2)"),
-                {
-                    "k1": _SWEEP_ADVISORY_LOCK_KEY1,
-                    "k2": _SWEEP_ADVISORY_LOCK_KEY2,
-                },
-            )
-
-        async def release_sweep_lock() -> None:
-            if holder_conn is not None:
-                with suppress(Exception):
-                    await holder_conn.scalar(
-                        text("SELECT pg_advisory_unlock(:k1, :k2)"),
+                async with holder.connect() as lock_conn:
+                    await lock_conn.scalar(
+                        text("SELECT pg_advisory_lock(:k1, :k2)"),
                         {
                             "k1": _SWEEP_ADVISORY_LOCK_KEY1,
                             "k2": _SWEEP_ADVISORY_LOCK_KEY2,
                         },
                     )
-                with suppress(Exception):
-                    await holder_conn.close()
-            if holder_engine is not None:
-                await holder_engine.dispose()
+                    try:
+                        engine = _admin_engine(require_postgres)
+                        try:
+                            async with engine.connect() as connection:
+                                secret = _pg_literal("orphan-nontest-secret")
+                                await connection.execute(
+                                    text(
+                                        f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                                        f"PASSWORD {secret}"
+                                    )
+                                )
+                        finally:
+                            await engine.dispose()
+                        if not _is_allowed_probe_database(dbname):
+                            raise RuntimeError(f"base sonda no permitida: {dbname}")
+                        maint = _maintenance_engine(require_postgres)
+                        try:
+                            async with maint.connect() as connection:
+                                exists = await connection.scalar(
+                                    text(
+                                        "SELECT 1 FROM pg_database "
+                                        "WHERE datname = :name"
+                                    ),
+                                    {"name": dbname},
+                                )
+                                if exists is None:
+                                    await connection.execute(
+                                        text(f"CREATE DATABASE {_pg_ident(dbname)}")
+                                    )
+                        finally:
+                            await maint.dispose()
+                        engine = _admin_engine(require_postgres)
+                        try:
+                            async with engine.connect() as connection:
+                                await connection.execute(
+                                    text(
+                                        f"GRANT CONNECT ON DATABASE "
+                                        f"{_pg_ident(dbname)} TO {role}"
+                                    )
+                                )
+                        finally:
+                            await engine.dispose()
+                        other_engine = _admin_engine(other)
+                        try:
+                            async with other_engine.connect() as connection:
+                                await connection.execute(
+                                    text("CREATE TABLE orphan_nontest_owned (id int)")
+                                )
+                                await connection.execute(
+                                    text(
+                                        "ALTER TABLE orphan_nontest_owned "
+                                        f"OWNER TO {role}"
+                                    )
+                                )
+                        finally:
+                            await other_engine.dispose()
+                    finally:
+                        await lock_conn.scalar(
+                            text("SELECT pg_advisory_unlock(:k1, :k2)"),
+                            {
+                                "k1": _SWEEP_ADVISORY_LOCK_KEY1,
+                                "k2": _SWEEP_ADVISORY_LOCK_KEY2,
+                            },
+                        )
+            finally:
+                await holder.dispose()
 
-        asyncio.run(acquire_sweep_lock())
-        try:
-            asyncio.run(plant_role())
-            _create_probe_database(require_postgres, dbname)
-            asyncio.run(plant_table())
-        finally:
-            asyncio.run(release_sweep_lock())
+        asyncio.run(plant_under_sweep_lock())
         result = _run_leftover_probe(tmp_path, require_postgres, _CHILD_ORPHAN_SETUP)
         assert result.returncode == 0, result.stdout + result.stderr
         assert asyncio.run(_database_exists(require_postgres, dbname)) == 1
