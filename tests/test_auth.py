@@ -257,6 +257,36 @@ def test_signup_request_rejects_control_and_noncharacters() -> None:
         assert "name" in {err["loc"][-1] for err in caught.value.errors()}
 
 
+@pytest.mark.parametrize(
+    "raw",
+    (
+        "a\tb",
+        "a\x7fb",
+        "a\x80b",
+        "a\x9fb",
+        "a\ufdd0b",
+        "a\U0001fffeb",
+        "a\U00010fffeb",
+    ),
+)
+def test_signup_request_rejects_tab_del_c1_and_plane_noncharacters(raw: str) -> None:
+    """CC3-CC6: TAB, DEL, C1, U+FDD0 y U+xFFFE de otro plano."""
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as caught:
+        SignUpRequest.model_validate(
+            {"name": raw, "email": "ada@example.com", "password": PASSWORD}
+        )
+    assert "name" in {err["loc"][-1] for err in caught.value.errors()}
+
+    with pytest.raises(ValidationError) as caught_password:
+        SignUpRequest.model_validate(
+            {"name": "Ada", "email": "ada@example.com", "password": f"pass{raw}12"}
+        )
+    assert "password" in {err["loc"][-1] for err in caught_password.value.errors()}
+
+
 def test_signup_request_normalizes_email() -> None:
     body = SignUpRequest.model_validate(
         {"name": "  Ada  ", "email": " Ada@Example.COM ", "password": PASSWORD}

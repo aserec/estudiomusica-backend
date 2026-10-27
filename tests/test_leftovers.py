@@ -549,6 +549,82 @@ def test_orphan_objects_in_other_test_db_do_not_fail_production(
         asyncio.run(cleanup_role())
 
 
+@pytest.mark.db
+def test_orphan_objects_in_mixed_case_test_db_are_dropped(
+    require_postgres: RedactedDsn,
+    tmp_path: Path,
+) -> None:
+    """CF3: el DROP OWNED cruzado acepta un sufijo _TEST (casefold)."""
+
+    orphan = _orphan_role_name()
+    other_name = f"orphan_cf3_{os.getpid()}_{secrets.token_hex(3)}_TEST"
+    assert other_name not in _LEFTOVER_TEST_DATABASES
+    parsed = make_url(require_postgres.secret())
+    other = RedactedDsn(
+        parsed.set(database=other_name).render_as_string(hide_password=False)
+    )
+    role = _pg_ident(orphan)
+    ensure_database_exists(other)
+
+    async def plant() -> None:
+        engine = _admin_engine(require_postgres)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(
+                    text(
+                        f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                        f"PASSWORD {_pg_literal('orphan-cf3-secret')}"
+                    )
+                )
+                await connection.execute(
+                    text(f"GRANT CONNECT ON DATABASE {_pg_ident(other_name)} TO {role}")
+                )
+        finally:
+            await engine.dispose()
+        other_engine = _admin_engine(other)
+        try:
+            async with other_engine.connect() as connection:
+                await connection.execute(
+                    text("CREATE TABLE IF NOT EXISTS orphan_cf3_owned (id int)")
+                )
+                await connection.execute(
+                    text(f"ALTER TABLE orphan_cf3_owned OWNER TO {role}")
+                )
+        finally:
+            await other_engine.dispose()
+
+    try:
+        asyncio.run(plant())
+        result = _run_leftover_probe(tmp_path, require_postgres, _CHILD_ORPHAN_SETUP)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert asyncio.run(_role_exists(require_postgres, orphan)) is None
+    finally:
+        if asyncio.run(_database_exists(require_postgres, other_name)) is not None:
+
+            async def cleanup_other() -> None:
+                other_engine = _admin_engine(other)
+                try:
+                    async with other_engine.connect() as connection:
+                        await connection.execute(
+                            text("DROP TABLE IF EXISTS orphan_cf3_owned")
+                        )
+                finally:
+                    await other_engine.dispose()
+
+            asyncio.run(cleanup_other())
+        drop_database_if_exists(other)
+
+        async def cleanup_role() -> None:
+            engine = _admin_engine(require_postgres)
+            try:
+                async with engine.connect() as connection:
+                    await _drop_named_production_test_role(connection, orphan)
+            finally:
+                await engine.dispose()
+
+        asyncio.run(cleanup_role())
+
+
 def _non_test_probe_database(kind: str) -> str:
     token = secrets.token_hex(2)
     return f"{kind}_{os.getpid()}_{token}_probe"
@@ -1086,6 +1162,14 @@ def test_is_test_database_name_ignores_case() -> None:
     assert _is_test_database_name("foo_prod") is False
 
 
+def test_drop_database_if_exists_accepts_mixed_case_test_suffix() -> None:
+    """CF2: drop_database_if_exists no rechaza un sufijo _TEST."""
+
+    dsn = RedactedDsn("postgresql+asyncpg://u:p@127.0.0.1:1/cf2_mixed_TEST")
+    with pytest.raises(ConnectionError):
+        drop_database_if_exists(dsn)
+
+
 def test_production_test_role_name_is_unique() -> None:
     from tests.conftest import _production_test_role_name
 
@@ -1189,6 +1273,31 @@ def test_lock_stop_finishes_quickly_and_reaps_thread(
     lock.stop()
     assert time.monotonic() - started < 3
     assert lock._thread.is_alive() is False
+
+
+@pytest.mark.db
+def test_lock_stop_joins_with_cleanup_timeout(
+    require_postgres: RedactedDsn,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TMO2: stop() hace join con timeout, no un join() indefinido."""
+
+    import threading
+
+    seen: list[float | None] = []
+    real_join = threading.Thread.join
+
+    def spy_join(self: threading.Thread, timeout: float | None = None) -> None:
+        seen.append(timeout)
+        real_join(self, timeout=timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", spy_join)
+    lock = _SessionAdvisoryLock(require_postgres, _unique_lock_role("tmo2"))
+    assert lock.start() is True
+    lock.stop()
+    assert seen
+    assert seen[0] is not None
+    assert seen[0] >= 3
 
 
 @pytest.mark.db

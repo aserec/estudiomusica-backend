@@ -29,6 +29,13 @@ def test_require_test_database_url_accepts_test_name() -> None:
     assert require_test_database_url(url) == url
 
 
+def test_require_test_database_url_accepts_mixed_case_test_suffix() -> None:
+    """CF4: el guard del DSN usa casefold, no endswith('_test') literal."""
+
+    url = _dsn("estudiomusica_TEST")
+    assert require_test_database_url(url) == url
+
+
 def test_require_test_database_url_rejects_dev_name() -> None:
     with pytest.raises(pytest.UsageError, match="_test") as caught:
         require_test_database_url(_dsn("estudiomusica"))
