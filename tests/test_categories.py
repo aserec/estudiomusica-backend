@@ -4440,3 +4440,89 @@ def test_serializable_concurrent_child_posts_never_500(
         asyncio.run(run())
     finally:
         asyncio.run(_alter_role_isolation(None))
+
+
+def test_concurrent_writes_do_not_exhaust_pool(
+    require_postgres: Any,
+    production_test_database_url: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Con pool_size=2 y sin overflow, 6 escrituras concurrentes no dan 500."""
+
+    from httpx2 import ASGITransport, AsyncClient
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.config import get_settings
+    from app.db import dispose_engine
+    from app.main import create_app, get_app
+    from tests.conftest import production_settings_env
+    from tests.test_auth import signup_body
+
+    prod_dsn = production_test_database_url
+    created: list[str] = []
+    email = unique_email("pool-cat")
+
+    async def run() -> None:
+        for key, value in production_settings_env(prod_dsn).items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("DB_POOL_SIZE", "2")
+        monkeypatch.setenv("DB_MAX_OVERFLOW", "0")
+        monkeypatch.setenv("DB_POOL_TIMEOUT", "3")
+        monkeypatch.setattr("app.config.settings.allow_test_database", lambda: True)
+        get_settings.cache_clear()
+        get_app.cache_clear()
+        await dispose_engine()
+        try:
+            application = create_app()
+            transport = ASGITransport(app=application)
+            async with AsyncClient(
+                transport=transport, base_url="https://test"
+            ) as client:
+                signed = await client.post(
+                    "/api/v1/auth/signup", json=signup_body(email=email)
+                )
+                assert signed.status_code == 201, signed.text
+                engine = create_async_engine(prod_dsn.secret())
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text(
+                            "UPDATE users SET system_role_id='admin', "
+                            "is_admin=true WHERE email=:e"
+                        ),
+                        {"e": email},
+                    )
+                await engine.dispose()
+                rs = await asyncio.gather(
+                    *[
+                        client.post(_ADMIN, json={"name": f"PL-{uuid.uuid4().hex[:8]}"})
+                        for _ in range(6)
+                    ]
+                )
+                created.extend(r.json()["id"] for r in rs if r.status_code == 201)
+                assert [r.status_code for r in rs] == [201] * 6, (
+                    signed.headers.get("set-cookie"),
+                    rs[0].text,
+                )
+        finally:
+            await dispose_engine()
+            get_settings.cache_clear()
+            get_app.cache_clear()
+            engine = create_async_engine(prod_dsn.secret())
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text("DELETE FROM categories WHERE id = ANY(CAST(:ids AS uuid[]))"),
+                    {"ids": created},
+                )
+                await conn.execute(
+                    text(
+                        "DELETE FROM auth_sessions WHERE user_id IN "
+                        "(SELECT id FROM users WHERE email=:e)"
+                    ),
+                    {"e": email},
+                )
+                await conn.execute(
+                    text("DELETE FROM users WHERE email=:e"), {"e": email}
+                )
+            await engine.dispose()
+
+    asyncio.run(run())

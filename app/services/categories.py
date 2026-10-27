@@ -104,7 +104,12 @@ async def _run_with_transient_retry[T](
     last: TransientDbConflict | None = None
     for attempt in range(_TRANSIENT_ATTEMPTS):
         try:
-            return await operation()
+            result = await operation()
+            try:
+                await session.commit()
+            except DBAPIError as exc:
+                _raise_from_db(exc)
+            return result
         except TransientDbConflict as exc:
             last = exc
             await session.rollback()

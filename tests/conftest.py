@@ -265,6 +265,9 @@ def _mount_probes(application: FastAPI) -> None:
             async def rollback(self) -> None:
                 return None
 
+            async def commit(self) -> None:
+                return None
+
         state = {"n": 0}
 
         async def flaky() -> dict[str, int]:
@@ -285,6 +288,9 @@ def _mount_probes(application: FastAPI) -> None:
                 return False
 
             async def rollback(self) -> None:
+                return None
+
+            async def commit(self) -> None:
                 return None
 
         async def boom() -> None:
