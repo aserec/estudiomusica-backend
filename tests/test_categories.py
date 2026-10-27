@@ -4735,7 +4735,9 @@ def test_http_commit_transient_is_retried_and_mapped(
 
     prod_dsn = production_test_database_url
     email = unique_email("p9-cat")
+    prefix = f"p9-{uuid.uuid4().hex[:8]}"
     created: list[str] = []
+    names: list[str] = []
 
     async def run() -> None:
         for key, value in production_settings_env(prod_dsn).items():
@@ -4765,7 +4767,8 @@ def test_http_commit_transient_is_retried_and_mapped(
                     )
                 await engine.dispose()
                 for code in ("40001", "40P01"):
-                    name = f"p9b-{uuid.uuid4().hex[:8]}"
+                    name = f"{prefix}-b-{uuid.uuid4().hex[:8]}"
+                    names.append(name)
                     state, restore = _install_failing_commit(monkeypatch, {2}, code)
                     try:
                         posted = await client.post(_ADMIN, json={"name": name})
@@ -4785,7 +4788,8 @@ def test_http_commit_transient_is_retried_and_mapped(
                     assert len(rows) == 1
                     assert rows[0][0] == posted.json()["id"]
 
-                    new_name = f"p9c-{uuid.uuid4().hex[:8]}"
+                    new_name = f"{prefix}-c-{uuid.uuid4().hex[:8]}"
+                    names.append(new_name)
                     state, restore = _install_failing_commit(monkeypatch, {2}, code)
                     try:
                         updated = await client.put(
@@ -4811,7 +4815,8 @@ def test_http_commit_transient_is_retried_and_mapped(
                     assert updated.json()["name"] == new_name
                     assert updated.json()["sortOrder"] == 7
 
-                    exhausted = f"p9d-{uuid.uuid4().hex[:8]}"
+                    exhausted = f"{prefix}-d-{uuid.uuid4().hex[:8]}"
+                    names.append(exhausted)
                     state, restore = _install_failing_commit(
                         monkeypatch, {2, 3, 4}, code
                     )
@@ -4871,14 +4876,19 @@ def test_http_commit_transient_is_retried_and_mapped(
             get_app.cache_clear()
             engine = create_async_engine(prod_dsn.secret())
             async with engine.begin() as conn:
-                if created:
-                    await conn.execute(
-                        text(
-                            "DELETE FROM categories "
-                            "WHERE id = ANY(CAST(:ids AS uuid[]))"
-                        ),
-                        {"ids": created},
-                    )
+                await conn.execute(
+                    text(
+                        "DELETE FROM categories "
+                        "WHERE name = ANY(:names) "
+                        "OR name LIKE :prefix "
+                        "OR id = ANY(CAST(:ids AS uuid[]))"
+                    ),
+                    {
+                        "names": names,
+                        "prefix": f"{prefix}-%",
+                        "ids": created,
+                    },
+                )
                 await conn.execute(
                     text(
                         "DELETE FROM auth_sessions WHERE user_id IN "
