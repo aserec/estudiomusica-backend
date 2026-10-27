@@ -2102,6 +2102,33 @@ async def _deadlock_this_session(
     raise RuntimeError("el adversario fue la víctima del deadlock")
 
 
+def _skip_without_deadlock_timeout(database_url: str) -> None:
+    """Los tests de deadlock real bajan deadlock_timeout; hace falta GRANT."""
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    async def probe() -> None:
+        engine = create_async_engine(
+            database_url,
+            connect_args={"server_settings": {"deadlock_timeout": "20ms"}},
+        )
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text("SELECT 1"))
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(probe())
+    except Exception as exc:
+        message = str(exc).lower()
+        if "deadlock_timeout" in message or "permission denied" in message:
+            pytest.skip(
+                "el rol de tests no tiene GRANT SET ON PARAMETER deadlock_timeout"
+            )
+        raise
+
+
 def test_create_retries_real_deadlock_three_times(
     require_postgres: Any,
     migrated_test_database: None,
@@ -2114,6 +2141,7 @@ def test_create_retries_real_deadlock_three_times(
     from app.db import RedactedDsn
 
     dsn = require_postgres
+    _skip_without_deadlock_timeout(dsn.secret())
     assert isinstance(dsn, RedactedDsn)
     suffix = uuid.uuid4().hex[:8]
     tracked: list[uuid.UUID] = []
@@ -2194,6 +2222,7 @@ def test_update_and_delete_retry_real_deadlock(
 
     dsn = require_postgres
     assert isinstance(dsn, RedactedDsn)
+    _skip_without_deadlock_timeout(dsn.secret())
     suffix = uuid.uuid4().hex[:8]
     tracked: list[uuid.UUID] = []
     sleeps: list[float] = []
