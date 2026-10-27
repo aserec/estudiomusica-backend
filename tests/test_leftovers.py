@@ -472,7 +472,8 @@ def test_orphan_objects_in_other_test_db_do_not_fail_production(
     """Un huérfano con objetos en otra *_test no tumba el barrido."""
 
     orphan = _orphan_role_name()
-    other_name = "orphan_crossdb_probe_test"
+    other_name = f"orphan_crossdb_{os.getpid()}_{secrets.token_hex(3)}_test"
+    assert other_name not in _LEFTOVER_TEST_DATABASES
     parsed = make_url(require_postgres.secret())
     other = RedactedDsn(
         parsed.set(database=other_name).render_as_string(hide_password=False)
