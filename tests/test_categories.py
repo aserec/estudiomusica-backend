@@ -2105,6 +2105,8 @@ def _skip_without_deadlock_timeout(database_url: str) -> None:
 
     from sqlalchemy.ext.asyncio import create_async_engine
 
+    from tests.conftest import _skip_or_fail_postgres
+
     async def probe() -> None:
         engine = create_async_engine(
             database_url,
@@ -2120,8 +2122,8 @@ def _skip_without_deadlock_timeout(database_url: str) -> None:
         asyncio.run(probe())
     except Exception as exc:
         message = str(exc).lower()
-        if "deadlock_timeout" in message or "permission denied" in message:
-            pytest.skip(
+        if "deadlock_timeout" in message:
+            _skip_or_fail_postgres(
                 "el rol de tests no tiene GRANT SET ON PARAMETER deadlock_timeout"
             )
         raise
