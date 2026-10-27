@@ -4382,6 +4382,42 @@ def seed_one(database_url: str, name: str, tracked: list[uuid.UUID]) -> uuid.UUI
     return asyncio.run(run())
 
 
+async def test_name_taken_409_is_not_retried(
+    session_client: Any, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """r-reintenta-nametaken: un 409 no pasa por el bucle de reintento."""
+
+    from app.services import categories as categories_svc
+
+    await _admin(session_client, db_session)
+    first = await session_client.post(_ADMIN, json={"name": "Dup409"})
+    assert first.status_code == 201, first.text
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("app.services.categories.asyncio.sleep", fake_sleep)
+    calls = {"n": 0}
+    original = categories_svc._name_taken
+
+    async def counting(
+        session: AsyncSession,
+        name: str,
+        parent_id: uuid.UUID | None,
+        *,
+        exclude_id: uuid.UUID | None = None,
+    ) -> bool:
+        calls["n"] += 1
+        return await original(session, name, parent_id, exclude_id=exclude_id)
+
+    monkeypatch.setattr(categories_svc, "_name_taken", counting)
+    dup = await session_client.post(_ADMIN, json={"name": "dup409"})
+    assert dup.status_code == 409
+    assert calls["n"] == 1
+    assert sleeps == []
+
+
 def test_serializable_concurrent_child_posts_never_500(
     require_postgres: Any,
     production_test_database_url: Any,
