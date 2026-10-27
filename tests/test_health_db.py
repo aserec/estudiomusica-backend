@@ -2464,13 +2464,16 @@ def _sslrequest_n_server() -> Iterator[dict[str, int]]:
         thread.join(timeout=5)
 
 
-@pytest.mark.parametrize("path", ["get_engine", "alembic-env", "health"])
+@pytest.mark.parametrize("path", ["get_engine", "alembic-url", "alembic-env", "health"])
 def test_sslmode_require_fails_when_server_refuses_ssl(
     path: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    """require no manda startup en claro (get_engine, env.py, sonda)."""
+    """require no manda startup en claro (get_engine, alembic-url, env.py, sonda).
+
+    F10: ``make_alembic_config(raw)`` también tiene que fallar sin CLARO.
+    """
 
     from pathlib import Path
 
@@ -2509,6 +2512,9 @@ def test_sslmode_require_fails_when_server_refuses_ssl(
 
                 with suppress(Exception):
                     asyncio.run(_connect())
+            elif path == "alembic-url":
+                with suppress(Exception):
+                    command.current(make_alembic_config(raw))
             elif path == "alembic-env":
                 with suppress(Exception):
                     command.current(make_alembic_config())
