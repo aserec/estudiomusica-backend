@@ -4852,6 +4852,78 @@ def test_http_commit_transient_is_retried_and_mapped(
     asyncio.run(run())
 
 
+def test_get_commit_fails_before_response(
+    require_postgres: Any,
+    production_test_database_url: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """d208709: GET con scope=function mapea el COMMIT a 503, sin already started."""
+
+    import logging
+    from io import StringIO
+
+    from httpx2 import ASGITransport, AsyncClient
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.config import get_settings
+    from app.db import dispose_engine
+    from app.main import create_app, get_app
+    from tests.conftest import production_settings_env
+    from tests.test_auth import signup_body
+
+    prod_dsn = production_test_database_url
+    email = unique_email("d208-cat")
+
+    async def run() -> None:
+        for key, value in production_settings_env(prod_dsn).items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setattr("app.config.settings.allow_test_database", lambda: True)
+        get_settings.cache_clear()
+        get_app.cache_clear()
+        await dispose_engine()
+        application = create_app()
+        transport = ASGITransport(app=application, raise_app_exceptions=False)
+        try:
+            async with AsyncClient(
+                transport=transport, base_url="https://test"
+            ) as client:
+                signed = await client.post(
+                    "/api/v1/auth/signup", json=signup_body(email=email)
+                )
+                assert signed.status_code == 201, signed.text
+                logbuf = StringIO()
+                handler = logging.StreamHandler(logbuf)
+                logging.getLogger().addHandler(handler)
+                _install_failing_commit(monkeypatch, {1}, "40001")
+                try:
+                    listed = await client.get(_LIST)
+                finally:
+                    logging.getLogger().removeHandler(handler)
+                assert listed.status_code == 503, listed.text
+                assert listed.json() == {"error": "transient_db_conflict"}
+                assert listed.headers.get("retry-after") == "1"
+                assert "already started" not in logbuf.getvalue()
+        finally:
+            await dispose_engine()
+            get_settings.cache_clear()
+            get_app.cache_clear()
+            engine = create_async_engine(prod_dsn.secret())
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "DELETE FROM auth_sessions WHERE user_id IN "
+                        "(SELECT id FROM users WHERE email=:e)"
+                    ),
+                    {"e": email},
+                )
+                await conn.execute(
+                    text("DELETE FROM users WHERE email=:e"), {"e": email}
+                )
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
 def test_http_post_retries_real_deadlock(
     require_postgres: Any,
     migrated_test_database: None,
