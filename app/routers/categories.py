@@ -80,7 +80,7 @@ async def post_category(
 ) -> CategoryResponse:
     # auth solo lee: cerrar su transacción para que el reintento sea dueño de la sesión
     await session.commit()
-    row = await create_category(session, body)
+    row = await create_category(session, body, commit=True)
     await session.commit()
     return to_category_response(row)
 
@@ -113,7 +113,7 @@ async def put_category(
 ) -> CategoryResponse:
     # auth solo lee: cerrar su transacción para que el reintento sea dueño de la sesión
     await session.commit()
-    row = await update_category(session, category_id, body)
+    row = await update_category(session, category_id, body, commit=True)
     await session.commit()
     return to_category_response(row)
 
@@ -142,6 +142,6 @@ async def remove_category(
 ) -> Response:
     # auth solo lee: cerrar su transacción para que el reintento sea dueño de la sesión
     await session.commit()
-    await delete_category(session, category_id)
+    await delete_category(session, category_id, commit=True)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

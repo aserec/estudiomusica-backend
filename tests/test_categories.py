@@ -1737,7 +1737,7 @@ async def test_create_retries_transient_then_succeeds(
 
     monkeypatch.setattr(categories_svc, "_name_taken", flaky)
     row = await create_category(
-        db_session, CategoryCreate.model_validate({"name": "Retryok"})
+        db_session, CategoryCreate.model_validate({"name": "Retryok"}), commit=True
     )
     assert row.name == "Retryok"
     assert calls["n"] == 2
@@ -1761,7 +1761,9 @@ async def test_create_exhausts_transient_and_session_stays_clean(
     monkeypatch.setattr(categories_svc, "_name_taken", always)
     with pytest.raises(TransientDbConflict):
         await create_category(
-            db_session, CategoryCreate.model_validate({"name": "Retryfail"})
+            db_session,
+            CategoryCreate.model_validate({"name": "Retryfail"}),
+            commit=True,
         )
     rows = await list_categories(db_session)
     assert isinstance(rows, list)
@@ -1839,7 +1841,7 @@ def test_retry_keeps_prior_uncommitted_work(
                 calls["n"] = 0
                 async with factory() as write:
                     second = await create_category(
-                        write, CategoryCreate(name=f"p6b-{suffix}")
+                        write, CategoryCreate(name=f"p6b-{suffix}"), commit=True
                     )
                     tracked.append(second.id)
                     await write.commit()
@@ -2182,6 +2184,7 @@ def test_create_retries_real_deadlock_three_times(
                         created = await create_category(
                             session,
                             CategoryCreate(name=name, parent_id=parent.id),
+                            commit=True,
                         )
                         await session.commit()
                         return created
@@ -2298,7 +2301,7 @@ def test_update_and_delete_retry_real_deadlock(
             try:
                 async with factory() as session:
                     updated = await update_category(
-                        session, lo.id, CategoryUpdate(parent_id=hi.id)
+                        session, lo.id, CategoryUpdate(parent_id=hi.id), commit=True
                     )
                     await session.commit()
             finally:
@@ -2327,7 +2330,7 @@ def test_update_and_delete_retry_real_deadlock(
             categories_svc._has_active_children = deadlock_children
             with pytest.raises(TransientDbConflict):
                 async with factory() as session:
-                    await delete_category(session, extra.id)
+                    await delete_category(session, extra.id, commit=True)
             assert calls["n"] == 3
             assert len(sleeps) == 2
             assert all(0.01 <= delay < 1.0 for delay in sleeps)
@@ -4646,3 +4649,333 @@ def test_concurrent_writes_do_not_exhaust_pool(
             await engine.dispose()
 
     asyncio.run(run())
+
+
+def _install_failing_commit(
+    monkeypatch: pytest.MonkeyPatch, fail_on: set[int], code: str
+) -> tuple[dict[str, int], Any]:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    original = AsyncSession.commit
+    state = {"n": 0}
+
+    class _PgError(Exception):
+        sqlstate = code
+
+    async def failing(self: AsyncSession) -> None:
+        state["n"] += 1
+        if state["n"] in fail_on:
+            raise DBAPIError("COMMIT", None, _PgError())
+        return await original(self)
+
+    monkeypatch.setattr(AsyncSession, "commit", failing)
+
+    def restore() -> None:
+        monkeypatch.setattr(AsyncSession, "commit", original)
+
+    return state, restore
+
+
+def test_http_commit_transient_is_retried_and_mapped(
+    require_postgres: Any,
+    production_test_database_url: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P9b-g: 40001/40P01 en el COMMIT del reintento; GET scope=function."""
+
+    import logging
+    from io import StringIO
+
+    from httpx2 import ASGITransport, AsyncClient
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.config import get_settings
+    from app.db import dispose_engine
+    from app.main import create_app, get_app
+    from tests.conftest import production_settings_env
+    from tests.test_auth import signup_body
+
+    prod_dsn = production_test_database_url
+    email = unique_email("p9-cat")
+    created: list[str] = []
+
+    async def run() -> None:
+        for key, value in production_settings_env(prod_dsn).items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setattr("app.config.settings.allow_test_database", lambda: True)
+        get_settings.cache_clear()
+        get_app.cache_clear()
+        await dispose_engine()
+        application = create_app()
+        transport = ASGITransport(app=application, raise_app_exceptions=False)
+        try:
+            async with AsyncClient(
+                transport=transport, base_url="https://test"
+            ) as client:
+                signed = await client.post(
+                    "/api/v1/auth/signup", json=signup_body(email=email)
+                )
+                assert signed.status_code == 201, signed.text
+                engine = create_async_engine(prod_dsn.secret())
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text(
+                            "UPDATE users SET system_role_id='admin', "
+                            "is_admin=true WHERE email=:e"
+                        ),
+                        {"e": email},
+                    )
+                await engine.dispose()
+                for code in ("40001", "40P01"):
+                    name = f"p9b-{uuid.uuid4().hex[:8]}"
+                    state, restore = _install_failing_commit(monkeypatch, {2}, code)
+                    try:
+                        posted = await client.post(_ADMIN, json={"name": name})
+                    finally:
+                        restore()
+                    assert posted.status_code == 201, (code, posted.text, state)
+                    created.append(posted.json()["id"])
+                    engine = create_async_engine(prod_dsn.secret())
+                    async with engine.connect() as conn:
+                        rows = (
+                            await conn.execute(
+                                text("SELECT id::text FROM categories WHERE name=:n"),
+                                {"n": name},
+                            )
+                        ).all()
+                    await engine.dispose()
+                    assert len(rows) == 1
+                    assert rows[0][0] == posted.json()["id"]
+
+                    new_name = f"p9c-{uuid.uuid4().hex[:8]}"
+                    state, restore = _install_failing_commit(monkeypatch, {2}, code)
+                    try:
+                        updated = await client.put(
+                            f"{_ADMIN}/{posted.json()['id']}",
+                            json={"name": new_name, "sortOrder": 7},
+                        )
+                    finally:
+                        restore()
+                    assert updated.status_code == 200, (code, updated.text, state)
+                    engine = create_async_engine(prod_dsn.secret())
+                    async with engine.connect() as conn:
+                        row = (
+                            await conn.execute(
+                                text(
+                                    "SELECT name, sort_order FROM categories "
+                                    "WHERE id = CAST(:i AS uuid)"
+                                ),
+                                {"i": posted.json()["id"]},
+                            )
+                        ).one()
+                    await engine.dispose()
+                    assert row == (new_name, 7)
+                    assert updated.json()["name"] == new_name
+                    assert updated.json()["sortOrder"] == 7
+
+                    exhausted = f"p9d-{uuid.uuid4().hex[:8]}"
+                    state, restore = _install_failing_commit(
+                        monkeypatch, {2, 3, 4}, code
+                    )
+                    try:
+                        failed = await client.post(_ADMIN, json={"name": exhausted})
+                    finally:
+                        restore()
+                    assert failed.status_code == 503, failed.text
+                    assert failed.json() == {"error": "transient_db_conflict"}
+                    assert failed.headers.get("retry-after") == "1"
+                    engine = create_async_engine(prod_dsn.secret())
+                    async with engine.connect() as conn:
+                        count = await conn.scalar(
+                            text("SELECT count(*) FROM categories WHERE name=:n"),
+                            {"n": exhausted},
+                        )
+                    await engine.dispose()
+                    assert int(count or 0) == 0
+                    again = await client.post(_ADMIN, json={"name": exhausted})
+                    assert again.status_code == 201, again.text
+                    created.append(again.json()["id"])
+
+                    state, restore = _install_failing_commit(monkeypatch, {2}, code)
+                    try:
+                        deleted = await client.delete(f"{_ADMIN}/{posted.json()['id']}")
+                    finally:
+                        restore()
+                    assert deleted.status_code == 204, (code, deleted.text, state)
+                    engine = create_async_engine(prod_dsn.secret())
+                    async with engine.connect() as conn:
+                        gone = await conn.scalar(
+                            text(
+                                "SELECT deleted_at IS NOT NULL FROM categories "
+                                "WHERE id = CAST(:i AS uuid)"
+                            ),
+                            {"i": posted.json()["id"]},
+                        )
+                    await engine.dispose()
+                    assert gone is True
+
+                    logbuf = StringIO()
+                    handler = logging.StreamHandler(logbuf)
+                    logging.getLogger().addHandler(handler)
+                    state, restore = _install_failing_commit(monkeypatch, {1}, code)
+                    try:
+                        listed = await client.get(_LIST)
+                    finally:
+                        restore()
+                        logging.getLogger().removeHandler(handler)
+                    assert listed.status_code == 503, listed.text
+                    assert listed.json() == {"error": "transient_db_conflict"}
+                    assert listed.headers.get("retry-after") == "1"
+                    assert "already started" not in logbuf.getvalue()
+        finally:
+            await dispose_engine()
+            get_settings.cache_clear()
+            get_app.cache_clear()
+            engine = create_async_engine(prod_dsn.secret())
+            async with engine.begin() as conn:
+                if created:
+                    await conn.execute(
+                        text(
+                            "DELETE FROM categories "
+                            "WHERE id = ANY(CAST(:ids AS uuid[]))"
+                        ),
+                        {"ids": created},
+                    )
+                await conn.execute(
+                    text(
+                        "DELETE FROM auth_sessions WHERE user_id IN "
+                        "(SELECT id FROM users WHERE email=:e)"
+                    ),
+                    {"e": email},
+                )
+                await conn.execute(
+                    text("DELETE FROM users WHERE email=:e"), {"e": email}
+                )
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_http_post_retries_real_deadlock(
+    require_postgres: Any,
+    migrated_test_database: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST HTTP reintenta un 40P01 real y deja una sola fila."""
+
+    from httpx2 import ASGITransport, AsyncClient
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.config import get_settings
+    from app.db import RedactedDsn, dispose_engine
+    from app.main import create_app, get_app
+    from tests.test_auth import signup_body
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    _skip_without_deadlock_timeout(dsn.secret())
+    email = unique_email("p9h-cat")
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+    released = asyncio.Event()
+
+    async def run() -> None:
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.setenv("EXPOSE_ERRORS", "false")
+        monkeypatch.setenv("DATABASE_URL", dsn.secret())
+        monkeypatch.setenv("ENABLE_EXAMPLE_ROUTES", "false")
+        get_settings.cache_clear()
+        get_app.cache_clear()
+        await dispose_engine()
+        application = create_app()
+        transport = ASGITransport(app=application, raise_app_exceptions=False)
+        engine = create_async_engine(
+            dsn.secret(),
+            pool_size=6,
+            connect_args={"server_settings": {"deadlock_timeout": "20ms"}},
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as setup:
+                parent = await create_category(
+                    setup, CategoryCreate(name=f"p9hp-{suffix}")
+                )
+                tracked.append(parent.id)
+                await setup.commit()
+            async with AsyncClient(
+                transport=transport, base_url="https://test"
+            ) as client:
+                signed = await client.post(
+                    "/api/v1/auth/signup", json=signup_body(email=email)
+                )
+                assert signed.status_code == 201, signed.text
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text(
+                            "UPDATE users SET system_role_id='admin', "
+                            "is_admin=true WHERE email=:e"
+                        ),
+                        {"e": email},
+                    )
+                child_name = f"p9hc-{suffix}"
+
+                async def start_api() -> Any:
+                    return await client.post(
+                        _ADMIN,
+                        json={"name": child_name, "parentId": str(parent.id)},
+                    )
+
+                posted = await _adversary_deadlock_rounds(
+                    factory,
+                    rounds=2,
+                    hold_sql=(
+                        "INSERT INTO categories "
+                        "(name, name_key, parent_id, sort_order) "
+                        "VALUES (:name, :name, :parent_id, 0)"
+                    ),
+                    hold_params={"name": child_name, "parent_id": parent.id},
+                    wait_sql="SELECT id FROM categories WHERE id = :id FOR UPDATE",
+                    wait_params={"id": parent.id},
+                    start_api=start_api,
+                    released=released,
+                )
+                assert posted.status_code == 201, posted.text
+                tracked.append(uuid.UUID(posted.json()["id"]))
+                async with engine.connect() as conn:
+                    rows = (
+                        await conn.execute(
+                            text(
+                                "SELECT id::text FROM categories "
+                                "WHERE parent_id = :p AND name = :n "
+                                "AND deleted_at IS NULL"
+                            ),
+                            {"p": parent.id, "n": child_name},
+                        )
+                    ).all()
+                assert len(rows) == 1
+                assert rows[0][0] == posted.json()["id"]
+        finally:
+            await dispose_engine()
+            get_settings.cache_clear()
+            get_app.cache_clear()
+            await engine.dispose()
+            admin = create_async_engine(dsn.secret())
+            try:
+                async with admin.begin() as conn:
+                    await conn.execute(
+                        text(
+                            "DELETE FROM auth_sessions WHERE user_id IN "
+                            "(SELECT id FROM users WHERE email=:e)"
+                        ),
+                        {"e": email},
+                    )
+                    await conn.execute(
+                        text("DELETE FROM users WHERE email=:e"), {"e": email}
+                    )
+            finally:
+                await admin.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))

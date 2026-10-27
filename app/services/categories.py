@@ -82,18 +82,39 @@ def _raise_from_db(exc: DBAPIError) -> NoReturn:
     raise exc
 
 
+async def _run_unit[T](
+    session: AsyncSession,
+    operation: Callable[[], Awaitable[T]],
+    *,
+    commit: bool,
+) -> T:
+    """Contrato dual del servicio (relevante para #97).
+
+    ``commit=True`` (router HTTP): la sesión no debe tener transacción
+    abierta; reintenta y hace COMMIT. Un ``rollback`` del caller no
+    deshace la fila. ``commit=False`` (UoW / ``db_session``): ejecuta
+    ``once()`` sin commit ni reintento; el caller es dueño de la
+    transacción.
+    """
+
+    if commit:
+        assert not session.in_transaction(), (
+            "commit=True exige sesión sin transacción "
+            "(el router cierra la lectura de auth antes)"
+        )
+        return await _run_with_transient_retry(session, operation)
+    return await operation()
+
+
 async def _run_with_transient_retry[T](
     session: AsyncSession, operation: Callable[[], Awaitable[T]]
 ) -> T:
     """Reintenta la unidad de trabajo hasta 2 veces si Postgres aborta.
 
-    El router commitea la lectura de auth antes de llamar: esta sesión
-    no tiene transacción abierta. ``create``/``update``/``delete`` no
-    pasan por aquí si el caller ya está en transacción (p. ej. el
-    ``db_session`` de tests); ejecutan ``once()`` sin rollback. Un
-    savepoint no arregla ``40001`` serializable: la instantánea es la
-    misma. El COMMIT de la unidad va dentro del bucle para reintentar
-    un 40001 de serialización.
+    El router commitea la lectura de auth y llama con ``commit=True``:
+    esta sesión no tiene transacción abierta. Un savepoint no arregla
+    ``40001`` serializable: la instantánea es la misma. El COMMIT de
+    la unidad va dentro del bucle para reintentar un 40001.
     """
 
     last: TransientDbConflict | None = None
@@ -244,7 +265,9 @@ async def list_categories(session: AsyncSession) -> list[Category]:
         _raise_from_db(exc)
 
 
-async def create_category(session: AsyncSession, body: CategoryCreate) -> Category:
+async def create_category(
+    session: AsyncSession, body: CategoryCreate, *, commit: bool = False
+) -> Category:
     async def once() -> Category:
         try:
             parent_id = body.parent_id
@@ -273,13 +296,15 @@ async def create_category(session: AsyncSession, body: CategoryCreate) -> Catego
         except DBAPIError as exc:
             _raise_from_db(exc)
 
-    if session.in_transaction():
-        return await once()
-    return await _run_with_transient_retry(session, once)
+    return await _run_unit(session, once, commit=commit)
 
 
 async def update_category(
-    session: AsyncSession, category_id: UUID, body: CategoryUpdate
+    session: AsyncSession,
+    category_id: UUID,
+    body: CategoryUpdate,
+    *,
+    commit: bool = False,
 ) -> Category:
     fields = body.model_fields_set
     next_name_update = body.name
@@ -333,12 +358,12 @@ async def update_category(
         except DBAPIError as exc:
             _raise_from_db(exc)
 
-    if session.in_transaction():
-        return await once()
-    return await _run_with_transient_retry(session, once)
+    return await _run_unit(session, once, commit=commit)
 
 
-async def delete_category(session: AsyncSession, category_id: UUID) -> None:
+async def delete_category(
+    session: AsyncSession, category_id: UUID, *, commit: bool = False
+) -> None:
     async def once() -> None:
         try:
             row = await _lock_category(session, category_id)
@@ -351,10 +376,7 @@ async def delete_category(session: AsyncSession, category_id: UUID) -> None:
         except DBAPIError as exc:
             _raise_from_db(exc)
 
-    if session.in_transaction():
-        await once()
-        return
-    await _run_with_transient_retry(session, once)
+    await _run_unit(session, once, commit=commit)
 
 
 @dataclass(frozen=True)
