@@ -29,6 +29,7 @@ from tests.conftest import (
     _pg_literal,
     _role_advisory_lock_keys,
     _SessionAdvisoryLock,
+    _skip_or_fail_postgres,
     drop_database_if_exists,
     drop_production_test_role,
     ensure_database_exists,
@@ -1195,10 +1196,15 @@ def test_session_lock_holds_with_unix_socket_query_dsn(
         return str(directories).split(",")[0].strip(), str(port)
 
     directory, port = asyncio.run(socket_params())
+    if not Path(directory).is_dir():
+        _skip_or_fail_postgres(
+            f"el directorio del socket Unix {directory} no existe en el cliente "
+            "(en compose el socket vive dentro del contenedor)"
+        )
     parsed = make_url(require_postgres.secret())
+    # Conservar user/password (authority o query). .set(query={}) los tira.
     socket_url = (
         parsed.set(host=None, port=None)
-        .set(query={})
         .update_query_dict({"host": directory, "port": port})
         .render_as_string(hide_password=False)
     )
@@ -1217,8 +1223,16 @@ def test_session_lock_holds_with_query_user_password(
     """MEDIA 3: user/password en la query no deben romper el lock."""
 
     parsed = make_url(require_postgres.secret())
-    user = parsed.username
-    password = parsed.password
+    query = parsed.query or {}
+
+    def _query_first(key: str) -> str | None:
+        raw = query.get(key)
+        if isinstance(raw, (list, tuple)):
+            raw = raw[0] if raw else None
+        return str(raw) if raw else None
+
+    user = parsed.username or _query_first("user")
+    password = parsed.password or _query_first("password")
     assert user and password
     query_url = (
         parsed.set(username=None, password=None)
