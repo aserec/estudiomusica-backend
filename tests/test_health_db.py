@@ -2469,6 +2469,29 @@ def test_encoded_tls_segment_stays_off_cleartext(
         assert server["cleartext_startups"] == 0
 
 
+def test_query_value_with_question_or_at_still_finds_blank_tls() -> None:
+    """B9b/A1: ``?`` / ``@`` en un valor no ocultan ``sslmode=`` vacío."""
+
+    from alembic import command
+
+    from app.db import _SSL_BLANK_MSG, normalize_asyncpg_ssl_url
+    from app.migrations.config import make_alembic_config
+
+    cases = (
+        "postgresql+asyncpg://u:p@127.0.0.1:1/db_test?sslmode=&passfile=/tmp/no?x",
+        "postgresql+asyncpg://u:p@127.0.0.1:1/db_test?sslmode=&passfile=/tmp/a@b",
+        "postgresql+asyncpg://u@x:p?y@127.0.0.1:1/r92qhc?sslmode=",
+    )
+    for url in cases:
+        with pytest.raises(
+            ValueError, match="claves TLS vacías|percent-encoded"
+        ) as caught:
+            normalize_asyncpg_ssl_url(url)
+        assert str(caught.value) == _SSL_BLANK_MSG
+        with pytest.raises(Exception, match="claves TLS|percent-encoded"):
+            command.current(make_alembic_config(url))
+
+
 def test_ssl_zero_with_sslrootcert_matches_ssl_zero(tmp_path: Any) -> None:
     """NIT: ``ssl=0&sslrootcert=CA`` no envuelve en SSLContext (igual que ``ssl=0``)."""
 

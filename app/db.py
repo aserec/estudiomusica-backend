@@ -120,15 +120,25 @@ def _query_scalar(query: Mapping[Any, Any], *keys: str) -> str | None:
 
 
 def _authority_start(url: str) -> int:
-    """Índice tras ``@`` de las credenciales, o tras ``scheme://`` si no hay."""
+    """Índice tras el ``@`` de las credenciales (último antes del path).
 
-    at = url.find("@")
-    if at >= 0:
-        return at + 1
+    Un ``@`` en el usuario (``u@x:…@host/db``) no cuenta. Un ``@`` en
+    un valor de query (``passfile=/tmp/a@b``) queda tras el ``/`` y
+    tampoco cuenta. Sin path, el último ``@`` antes del último ``?``.
+    """
+
     scheme = url.find("://")
-    if scheme >= 0:
-        return scheme + 3
-    return 0
+    start = scheme + 3 if scheme >= 0 else 0
+    slash = url.find("/", start)
+    if slash >= 0:
+        window_end = slash
+    else:
+        query = url.rfind("?")
+        window_end = query if query >= start else len(url)
+    at = url.rfind("@", start, window_end)
+    if at >= start:
+        return at + 1
+    return start
 
 
 def _raw_query_after_database(url: str, database: str | None) -> str | None:
