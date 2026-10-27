@@ -39,6 +39,9 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert "/api/v1/auth/me" in paths
     assert "/api/v1/admin/system-roles" in paths
     assert "/api/v1/admin/system-roles/{role_id}" in paths
+    assert "/api/v1/categories" in paths
+    assert "/api/v1/admin/categories" in paths
+    assert "/api/v1/admin/categories/{category_id}" in paths
     assert "/api/v1/courses/{course_id}/me/permissions" in paths
     assert "/api/v1/examples" in paths
     assert "/api/v1/examples/denied" in paths
@@ -138,3 +141,85 @@ def test_openapi_documents_errors_and_pagination(client: TestClient) -> None:
     assert set(patch_props) == {"name", "active", "sortOrder"}
     perms_props = schemas["CoursePermissionsResponse"]["properties"]
     assert set(perms_props) >= {"courseRole", "permissions"}
+
+    categories_get = paths["/api/v1/categories"]["get"]
+    assert "200" in categories_get["responses"]
+    assert "401" in categories_get["responses"]
+    categories_post = paths["/api/v1/admin/categories"]["post"]
+    assert "201" in categories_post["responses"]
+    assert "400" in categories_post["responses"]
+    assert "401" in categories_post["responses"]
+    assert "403" in categories_post["responses"]
+    assert "409" in categories_post["responses"]
+    assert "503" in categories_post["responses"]
+    assert "patch" not in paths["/api/v1/admin/categories/{category_id}"]
+    categories_put = paths["/api/v1/admin/categories/{category_id}"]["put"]
+    assert "200" in categories_put["responses"]
+    assert "400" in categories_put["responses"]
+    assert "404" in categories_put["responses"]
+    assert "409" in categories_put["responses"]
+    assert "503" in categories_put["responses"]
+    categories_delete = paths["/api/v1/admin/categories/{category_id}"]["delete"]
+    assert "204" in categories_delete["responses"]
+    assert "409" in categories_delete["responses"]
+    assert "503" in categories_delete["responses"]
+    assert "CategoryResponse" in schemas
+    assert "CategoryCreate" in schemas
+    assert "CategoryUpdate" in schemas
+    category_props = schemas["CategoryResponse"]["properties"]
+    assert set(category_props) >= {
+        "id",
+        "name",
+        "parentId",
+        "description",
+        "sortOrder",
+        "createdAt",
+        "updatedAt",
+    }
+    create_props = schemas["CategoryCreate"]["properties"]
+    assert set(create_props) == {"name", "parentId", "description", "sortOrder"}
+    update_props = schemas["CategoryUpdate"]["properties"]
+    assert set(update_props) == {"name", "parentId", "description", "sortOrder"}
+    for key in ("name", "sortOrder"):
+        schema = update_props[key]
+        assert schema.get("nullable") is not True
+        if "anyOf" in schema:
+            assert not any(item.get("type") == "null" for item in schema["anyOf"])
+        else:
+            assert schema.get("type") in {"string", "integer"}
+    assert create_props["name"].get("minLength") == 1
+    assert create_props["name"].get("maxLength") == 120
+    assert "NFC" in str(create_props["name"].get("description", ""))
+    assert update_props["name"].get("minLength") == 1
+    assert update_props["name"].get("maxLength") == 120
+    assert "NFC" in str(update_props["name"].get("description", ""))
+
+    def _int_bound(schema: dict[str, Any], key: str) -> object:
+        if key in schema:
+            return schema[key]
+        for item in schema.get("anyOf", []):
+            if isinstance(item, dict) and item.get("type") == "integer":
+                return item.get(key)
+        return None
+
+    assert _int_bound(create_props["sortOrder"], "minimum") == 0
+    assert _int_bound(update_props["sortOrder"], "minimum") == 0
+
+    def _string_max_length(schema: dict[str, Any]) -> int | None:
+        if schema.get("type") == "string":
+            raw = schema.get("maxLength")
+            return raw if isinstance(raw, int) else None
+        for item in schema.get("anyOf", []):
+            if isinstance(item, dict) and item.get("type") == "string":
+                raw = item.get("maxLength")
+                if isinstance(raw, int):
+                    return raw
+        return None
+
+    assert _string_max_length(create_props["description"]) == 2000
+    assert _string_max_length(update_props["description"]) == 2000
+    assert "NFC" in str(create_props["description"].get("description", "")) or any(
+        "NFC" in str(item.get("description", ""))
+        for item in create_props["description"].get("anyOf", [])
+        if isinstance(item, dict)
+    )

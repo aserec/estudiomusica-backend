@@ -2,6 +2,9 @@ import logging
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import DBAPIError
+
+from app.exceptions import pg_sqlstate
 
 
 def test_pydantic_validation_returns_400_validation_fields(
@@ -122,6 +125,51 @@ def test_domain_validation_stays_400_not_422(probe_client: TestClient) -> None:
     assert response.status_code == 400
     assert response.status_code != 422
     assert response.json() == {"error": "validation", "fields": ["email"]}
+
+
+def test_pg_sqlstate_reads_orig_not_cause() -> None:
+    class _PgError(Exception):
+        sqlstate = "40P01"
+
+    class _Cause(Exception):
+        sqlstate = "40001"
+
+    wrapped = DBAPIError("SELECT 1", {}, _PgError())
+    assert pg_sqlstate(wrapped) == "40P01"
+    orphan = Exception("plain")
+    orphan.__cause__ = _Cause()
+    assert pg_sqlstate(orphan) == ""
+
+
+def test_pg_deadlock_and_serialization_are_503_not_500(
+    probe_client: TestClient,
+) -> None:
+    deadlock = probe_client.get("/api/v1/_test/pg-deadlock")
+    assert deadlock.status_code == 503
+    assert deadlock.json() == {"error": "transient_db_conflict"}
+    assert deadlock.headers.get("retry-after") == "1"
+    serial = probe_client.get("/api/v1/_test/pg-serialization")
+    assert serial.status_code == 503
+    assert serial.json() == {"error": "transient_db_conflict"}
+    assert serial.headers.get("retry-after") == "1"
+    raw_deadlock = probe_client.get("/api/v1/_test/pg-raw-deadlock")
+    assert raw_deadlock.status_code == 503
+    assert raw_deadlock.json() == {"error": "transient_db_conflict"}
+    assert raw_deadlock.headers.get("retry-after") == "1"
+    raw_serial = probe_client.get("/api/v1/_test/pg-raw-serialization")
+    assert raw_serial.status_code == 503
+    assert raw_serial.json() == {"error": "transient_db_conflict"}
+    assert raw_serial.headers.get("retry-after") == "1"
+
+
+def test_transient_retry_succeeds_and_exhaust_is_503(probe_client: TestClient) -> None:
+    ok = probe_client.get("/api/v1/_test/pg-transient-retry")
+    assert ok.status_code == 200
+    assert ok.json() == {"attempts": 2}
+    exhausted = probe_client.get("/api/v1/_test/pg-transient-exhaust")
+    assert exhausted.status_code == 503
+    assert exhausted.json() == {"error": "transient_db_conflict"}
+    assert exhausted.headers.get("retry-after") == "1"
 
 
 def test_unhandled_error_is_500_without_message(client: TestClient) -> None:

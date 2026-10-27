@@ -61,6 +61,9 @@ def _wipe_alembic_schema(dsn: RedactedDsn) -> None:
                 await connection.execute(
                     text("DROP TABLE IF EXISTS course_memberships CASCADE")
                 )
+                await connection.execute(
+                    text("DROP TABLE IF EXISTS categories CASCADE")
+                )
                 await connection.execute(text("DROP TABLE IF EXISTS users CASCADE"))
                 await connection.execute(
                     text("DROP TABLE IF EXISTS system_roles CASCADE")
@@ -74,6 +77,12 @@ def _wipe_alembic_schema(dsn: RedactedDsn) -> None:
                 )
                 await connection.execute(text('DROP TABLE IF EXISTS "order" CASCADE'))
                 await connection.execute(text("DROP SCHEMA IF EXISTS catalogo CASCADE"))
+                await connection.execute(
+                    text(
+                        "DROP FUNCTION IF EXISTS "
+                        "public.category_name_key(public.citext)"
+                    )
+                )
                 await connection.execute(text("DROP EXTENSION IF EXISTS citext"))
                 await connection.execute(
                     text("DROP FUNCTION IF EXISTS set_updated_at() CASCADE")
@@ -112,6 +121,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
         _scalar(dsn, "SELECT to_regclass('public.course_memberships')")
         == "course_memberships"
     )
+    assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
     assert (
         _scalar(dsn, "SELECT extname FROM pg_extension WHERE extname = 'citext'")
         == "citext"
@@ -137,6 +147,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
         "auth_sessions",
         "system_roles",
         "course_memberships",
+        "categories",
     ):
         name = updated_at_trigger_name(table)
         assert (
@@ -152,20 +163,25 @@ def test_alembic_upgrade_head_and_downgrade_base(
     command.downgrade(config, "-1")
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == parent
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
-    assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") is None
-    assert _scalar(dsn, "SELECT to_regclass('public.course_memberships')") is None
+    assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+    assert _scalar(dsn, "SELECT to_regclass('public.categories')") is None
+    assert (
+        _scalar(dsn, "SELECT to_regclass('public.course_memberships')")
+        == "course_memberships"
+    )
     assert (
         _scalar(
             dsn,
             "SELECT 1 FROM information_schema.columns "
             "WHERE table_name = 'users' AND column_name = 'system_role_id'",
         )
-        is None
+        == 1
     )
 
     command.upgrade(config, "head")
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+    assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
     _assert_is_admin_check_rejects_incoherent_and_null(dsn)
 
     command.downgrade(config, "0001_initial")
@@ -193,6 +209,7 @@ def test_alembic_upgrade_head_and_downgrade_base(
     assert _scalar(dsn, "SELECT version_num FROM alembic_version") == head
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
     assert _scalar(dsn, "SELECT to_regclass('public.system_roles')") == "system_roles"
+    assert _scalar(dsn, "SELECT to_regclass('public.categories')") == "categories"
 
 
 def _assert_is_admin_check_rejects_incoherent_and_null(dsn: RedactedDsn) -> None:
@@ -357,6 +374,87 @@ def test_0002_downgrade_keeps_preinstalled_citext(
     assert _scalar(dsn, "SELECT to_regclass('public.users')") == "users"
 
 
+def test_0004_does_not_import_app_schemas() -> None:
+    path = ROOT / "app/migrations/versions/0004_course_categories.py"
+    source = path.read_text(encoding="utf-8")
+    assert "app.schemas" not in source
+    assert "CREATE FUNCTION" not in source
+    assert "DROP FUNCTION IF EXISTS public.category_name_key(public.citext)" in source
+    assert "78b08eaf" in source
+    assert "8924e0a0" in source
+    assert "510acf77" in source
+
+
+def test_name_key_column_is_not_null_without_default() -> None:
+    from app.models.category import Category
+
+    column = Category.__table__.c.name_key
+    assert column.nullable is False
+    assert column.server_default is None
+    assert column.default is None
+
+    model_source = (ROOT / "app/models/category.py").read_text(encoding="utf-8")
+    expected_model = "name_key: Mapped[str] = mapped_column(CITEXT(), nullable=False)"
+    assert expected_model in model_source
+
+    migration = (ROOT / "app/migrations/versions/0004_course_categories.py").read_text(
+        encoding="utf-8"
+    )
+    name_key_columns = [
+        line.strip()
+        for line in migration.splitlines()
+        if "name_key" in line and "sa.Column" in line
+    ]
+    assert name_key_columns == ['sa.Column("name_key", CITEXT(), nullable=False),']
+
+
+def test_downgrade_0004_drops_legacy_name_key_function(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = alembic_config(dsn)
+    command.upgrade(config, "head")
+
+    async def install_legacy() -> None:
+        engine = create_async_engine(dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "CREATE FUNCTION public.category_name_key(value public.citext) "
+                        "RETURNS public.citext LANGUAGE sql IMMUTABLE AS $$ "
+                        "SELECT value $$"
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(install_legacy())
+    assert (
+        _scalar(
+            dsn,
+            "SELECT 1 FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'public' AND p.proname = 'category_name_key'",
+        )
+        == 1
+    )
+    command.downgrade(config, "0003_system_roles")
+    assert (
+        _scalar(
+            dsn,
+            "SELECT 1 FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'public' AND p.proname = 'category_name_key'",
+        )
+        is None
+    )
+
+
 def test_alembic_revision_chain_is_linear() -> None:
     config = alembic_config(resolve_alembic_database_url())
     script = ScriptDirectory.from_config(config)
@@ -364,16 +462,62 @@ def test_alembic_revision_chain_is_linear() -> None:
     bases = script.get_bases()
     assert len(heads) == 1
     assert len(bases) == 1
-    current: str | list[str] | tuple[str, ...] | None = heads[0]
-    seen: list[str] = []
+    chain = list(script.walk_revisions())
+    assert chain[0].revision == heads[0]
+    assert chain[-1].revision == bases[0]
+    assert chain[-1].down_revision is None
+    for child, parent in zip(chain, chain[1:], strict=False):
+        down = child.down_revision
+        if isinstance(down, list | tuple):
+            raise AssertionError(f"revisión ramificada: {down}")
+        assert down == parent.revision
+    followed: list[str] = []
+    current: str | None = heads[0]
     while current is not None:
-        if isinstance(current, list | tuple):
-            raise AssertionError(f"revisión ramificada: {current}")
-        assert current not in seen
-        seen.append(current)
-        current = script.get_revision(current).down_revision
-    assert seen[-1] == bases[0]
-    assert script.get_revision(bases[0]).down_revision is None
+        if current in followed:
+            raise AssertionError(f"ciclo en revisiones: {current}")
+        followed.append(current)
+        down = script.get_revision(current).down_revision
+        if isinstance(down, list | tuple):
+            raise AssertionError(f"revisión ramificada: {down}")
+        current = down
+    assert followed == [revision.revision for revision in chain]
+    assert followed == [
+        "0004_course_categories",
+        "0003_system_roles",
+        "0002_auth_users",
+        "0001_initial",
+    ]
+    assert len(chain) == len({revision.revision for revision in chain})
+
+
+def test_alembic_check_has_no_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    require_postgres: RedactedDsn,
+) -> None:
+    """`alembic check` exit 0. Si el modelo pasa citext→varchar, falla."""
+
+    dsn = RedactedDsn(resolve_alembic_database_url())
+    ensure_database_exists(dsn)
+    _wipe_alembic_schema(dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn.secret())
+    config = alembic_config(dsn)
+    command.upgrade(config, "head")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = dsn.secret()
+    env.pop("PYTEST_ADDOPTS", None)
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, output
+    assert "IndexError" not in output
+    assert "No new upgrade operations detected." in output
 
 
 class MigratedTriggerProbe(PersistentModel):
@@ -382,6 +526,49 @@ class MigratedTriggerProbe(PersistentModel):
     __tablename__ = "migrated_trigger_probes"
 
     label: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class _AutogenOpts:
+    def __init__(self, autogenerate: bool) -> None:
+        self.autogenerate = autogenerate
+
+
+class _AutogenConfig:
+    def __init__(self, autogenerate: bool) -> None:
+        self.cmd_opts = _AutogenOpts(autogenerate)
+
+
+class _AutogenContext:
+    def __init__(self, autogenerate: bool) -> None:
+        self.config = _AutogenConfig(autogenerate)
+
+
+def test_autogenerate_hook_keeps_empty_revision_for_check() -> None:
+    """`alembic check` no es --autogenerate: el directive vacío debe quedarse."""
+
+    class _Script:
+        def __init__(self) -> None:
+            self.upgrade_ops = ops.UpgradeOps([])
+            self.downgrade_ops = None
+
+    script = _Script()
+    directives: list[object] = [script]
+    process_revision_directives(_AutogenContext(False), None, directives)  # type: ignore[arg-type]
+    assert directives == [script]
+    process_revision_directives(None, None, directives)  # type: ignore[arg-type]
+    assert directives == [script]
+
+
+def test_autogenerate_hook_drops_empty_revision() -> None:
+    class _Script:
+        def __init__(self) -> None:
+            self.upgrade_ops = ops.UpgradeOps([])
+            self.downgrade_ops = None
+
+    script = _Script()
+    directives: list[object] = [script]
+    process_revision_directives(_AutogenContext(True), None, directives)  # type: ignore[arg-type]
+    assert directives == []
 
 
 def test_autogenerate_hook_adds_updated_at_trigger() -> None:

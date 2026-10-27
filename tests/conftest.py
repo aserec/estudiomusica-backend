@@ -17,7 +17,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.db import (
     RedactedDsn,
@@ -221,6 +226,91 @@ def _mount_probes(application: FastAPI) -> None:
     @application.get("/api/v1/_test/boom")
     def raise_boom() -> None:
         raise RuntimeError("secret-leak")
+
+    @application.get("/api/v1/_test/pg-deadlock")
+    def raise_pg_deadlock() -> None:
+        from sqlalchemy.exc import DBAPIError
+
+        from app.services.categories import _raise_from_db
+
+        class _PgError(Exception):
+            sqlstate = "40P01"
+
+        _raise_from_db(DBAPIError("SELECT 1", {}, _PgError()))
+
+    @application.get("/api/v1/_test/pg-serialization")
+    def raise_pg_serialization() -> None:
+        from sqlalchemy.exc import DBAPIError
+
+        from app.services.categories import _raise_from_db
+
+        class _PgError(Exception):
+            sqlstate = "40001"
+
+        _raise_from_db(DBAPIError("SELECT 1", {}, _PgError()))
+
+    @application.get("/api/v1/_test/pg-raw-deadlock")
+    def raise_raw_pg_deadlock() -> None:
+        from sqlalchemy.exc import DBAPIError
+
+        class _PgError(Exception):
+            sqlstate = "40P01"
+
+        raise DBAPIError("SELECT 1", {}, _PgError())
+
+    @application.get("/api/v1/_test/pg-raw-serialization")
+    def raise_raw_pg_serialization() -> None:
+        from sqlalchemy.exc import DBAPIError
+
+        class _PgError(Exception):
+            sqlstate = "40001"
+
+        raise DBAPIError("SELECT 1", {}, _PgError())
+
+    @application.get("/api/v1/_test/pg-transient-retry")
+    async def retry_transient_then_ok() -> dict[str, int]:
+        from app.exceptions import TransientDbConflict
+        from app.services.categories import _run_with_transient_retry
+
+        class _Session:
+            def in_transaction(self) -> bool:
+                return False
+
+            async def rollback(self) -> None:
+                return None
+
+            async def commit(self) -> None:
+                return None
+
+        state = {"n": 0}
+
+        async def flaky() -> dict[str, int]:
+            state["n"] += 1
+            if state["n"] < 2:
+                raise TransientDbConflict()
+            return {"attempts": state["n"]}
+
+        return await _run_with_transient_retry(_Session(), flaky)  # type: ignore[arg-type]
+
+    @application.get("/api/v1/_test/pg-transient-exhaust")
+    async def exhaust_transient() -> None:
+        from app.exceptions import TransientDbConflict
+        from app.services.categories import _run_with_transient_retry
+
+        class _Session:
+            def in_transaction(self) -> bool:
+                return False
+
+            async def rollback(self) -> None:
+                return None
+
+            async def commit(self) -> None:
+                return None
+
+        async def boom() -> None:
+            raise TransientDbConflict()
+
+        await _run_with_transient_retry(_Session(), boom)  # type: ignore[arg-type]
 
     @application.get("/api/v1/_test/validation")
     def raise_validation() -> None:
@@ -497,6 +587,14 @@ async def _cleanup_production_test_rows(admin: RedactedDsn) -> None:
                         "('alumno', 'profesor', 'profesor_adjunto', 'admin')"
                     )
                 )
+            categories = await connection.scalar(
+                text("SELECT to_regclass('public.categories')")
+            )
+            if categories is not None:
+                await connection.execute(
+                    text("DELETE FROM categories WHERE name LIKE :prefix"),
+                    {"prefix": "Prod-%"},
+                )
     finally:
         await engine.dispose()
 
@@ -563,13 +661,6 @@ def ensure_production_test_role(admin_url: str | RedactedDsn) -> RedactedDsn:
                         f"TO {role}"
                     )
                 )
-                citext = await connection.scalar(
-                    text("SELECT 1 FROM pg_type WHERE typname = 'citext'")
-                )
-                if citext is not None:
-                    await connection.execute(
-                        text(f"GRANT USAGE ON TYPE citext TO {role}")
-                    )
         finally:
             await engine.dispose()
 
@@ -1043,6 +1134,8 @@ _LEFTOVER_TEST_DATABASES = (
     "autogen_hook_probe_test",
     "schema_autogen_probe_test",
     "autogen_empty_probe_test",
+    "name_key_restore_custom_test",
+    "name_key_restore_plain_test",
 )
 
 
@@ -1151,6 +1244,12 @@ async def db_session(
                 expire_on_commit=False,
                 join_transaction_mode="create_savepoint",
             )
+            test_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+                bind=connection,
+                expire_on_commit=False,
+                join_transaction_mode="create_savepoint",
+            )
+            monkeypatch.setattr("app.db.get_session_factory", lambda: test_factory)
 
             async def _override_session() -> AsyncIterator[AsyncSession]:
                 yield session

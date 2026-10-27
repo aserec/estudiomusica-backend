@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import ForeignKey, Index, String, text
+from sqlalchemy import CheckConstraint, ForeignKey, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import PersistentModel
@@ -17,6 +17,10 @@ class CourseMembership(PersistentModel):
 
     __tablename__ = "course_memberships"
     __table_args__ = (
+        CheckConstraint(
+            "course_role IN ('student', 'assistant', 'teacher')",
+            name="course_role",
+        ),
         Index(
             "uq_course_memberships_user_course_active",
             "user_id",

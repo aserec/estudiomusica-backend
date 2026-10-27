@@ -105,3 +105,43 @@ class RoleNotAssignable(Conflict):
     """409 {error: role_not_assignable}."""
 
     error = "role_not_assignable"
+
+
+class CategoryNotEmpty(Conflict):
+    """409 {error: category_not_empty}."""
+
+    error = "category_not_empty"
+
+
+class CategoryNameTaken(Conflict):
+    """409 {error: category_name_taken}."""
+
+    error = "category_name_taken"
+
+
+class TransientDbConflict(DomainError):
+    """503 {error: transient_db_conflict} con Retry-After."""
+
+    status_code = 503
+    error = "transient_db_conflict"
+
+
+def pg_sqlstate(exc: BaseException) -> str:
+    """Lee ``sqlstate``/``pgcode`` de asyncpg en el error o en ``orig``."""
+
+    for current in (exc, getattr(exc, "orig", None)):
+        if current is None:
+            continue
+        for attr in ("sqlstate", "pgcode"):
+            value = getattr(current, attr, None)
+            if isinstance(value, str) and value:
+                return value
+    return ""
+
+
+def conflict_from_sqlstate(state: str) -> TransientDbConflict | None:
+    """40P01/40001 son transitorios: el caller reintenta o responde 503."""
+
+    if state in {"40P01", "40001"}:
+        return TransientDbConflict()
+    return None

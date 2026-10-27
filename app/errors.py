@@ -7,10 +7,11 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import Settings
-from app.exceptions import DomainError
+from app.exceptions import DomainError, conflict_from_sqlstate, pg_sqlstate
 from app.schemas.errors import ErrorResponse
 
 STATUS_ERROR_CODES: dict[int, str] = {
@@ -23,6 +24,7 @@ STATUS_ERROR_CODES: dict[int, str] = {
     413: "payload_too_large",
     422: "validation",
     500: "internal_error",
+    503: "service_unavailable",
 }
 
 STARLETTE_DETAIL_SLUGS: dict[str, str] = {
@@ -41,6 +43,8 @@ KNOWN_ERROR_SLUGS = {
     "bad_request",
     "conflict",
     "internal_error",
+    "transient_db_conflict",
+    "service_unavailable",
 }
 MACHINE_SLUG = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)+$")
 SAFE_FIELD = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
@@ -234,6 +238,7 @@ def _detail_as_error(
 def register_exception_handlers(application: FastAPI, settings: Settings) -> None:
     @application.exception_handler(DomainError)
     async def domain_error_handler(_request: Request, exc: DomainError) -> JSONResponse:
+        headers = {"Retry-After": "1"} if exc.error == "transient_db_conflict" else None
         return JSONResponse(
             status_code=exc.status_code,
             content=error_body(
@@ -242,6 +247,18 @@ def register_exception_handlers(application: FastAPI, settings: Settings) -> Non
                 code=exc.code,
                 message=_maybe_message(exc.message, settings.expose_errors),
             ),
+            headers=headers,
+        )
+
+    @application.exception_handler(DBAPIError)
+    async def dbapi_error_handler(_request: Request, exc: DBAPIError) -> JSONResponse:
+        mapped = conflict_from_sqlstate(pg_sqlstate(exc))
+        if mapped is None:
+            raise exc
+        return JSONResponse(
+            status_code=mapped.status_code,
+            content=error_body(mapped.error),
+            headers={"Retry-After": "1"},
         )
 
     @application.exception_handler(RequestValidationError)

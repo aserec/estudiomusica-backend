@@ -12,6 +12,7 @@ from app.models.base import (
     updated_at_trigger_name,
     updated_at_trigger_sql,
 )
+from app.models.category import Category
 from app.models.course_membership import CourseMembership
 from app.models.system_role import SystemRoleRow
 from app.models.user import SystemRole, User
@@ -19,6 +20,7 @@ from app.models.user import SystemRole, User
 __all__ = [
     "AuthSession",
     "Base",
+    "Category",
     "CourseMembership",
     "PersistentMixin",
     "PersistentModel",
