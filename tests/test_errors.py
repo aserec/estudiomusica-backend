@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -320,10 +322,10 @@ def test_get_session_rollbacks_on_error(monkeypatch: pytest.MonkeyPatch) -> None
         async def __aexit__(self, *_exc: object) -> None:
             return None
 
-    monkeypatch.setattr("app.db.get_session_factory", lambda: (lambda: _Ctx()))
+    monkeypatch.setattr("app.db.get_session_factory", lambda: lambda: _Ctx())
 
     async def run() -> None:
-        gen = get_session()
+        gen = cast(AsyncGenerator[object], get_session())
         await gen.__anext__()
         with pytest.raises(RuntimeError, match="boom"):
             await gen.athrow(RuntimeError("boom"))

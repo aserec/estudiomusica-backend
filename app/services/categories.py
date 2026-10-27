@@ -313,7 +313,9 @@ async def update_category(
                         raise Validation(fields=["parentId"])
                     _parent_is_root(parent, category_id)
                 next_parent = body.parent_id
-            if await _name_taken(session, next_name, next_parent, exclude_id=category_id):
+            if await _name_taken(
+                session, next_name, next_parent, exclude_id=category_id
+            ):
                 raise CategoryNameTaken()
             if "name" in fields:
                 row.name = next_name
