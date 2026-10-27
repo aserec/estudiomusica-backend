@@ -386,7 +386,7 @@ def test_tls_postgres_call_site_fails_when_docker_missing(
     dummy = RedactedDsn("postgresql+asyncpg://u:p@127.0.0.1/db_test")
     wrapped = cast(
         Callable[[pytest.TempPathFactory, RedactedDsn], Iterator[object]],
-        getattr(tls_postgres, "__wrapped__"),
+        getattr(tls_postgres, "__wrapped__"),  # noqa: B009
     )
     with pytest.raises(BaseException, match="docker no está en PATH") as caught:
         next(wrapped(tmp_path_factory, dummy))

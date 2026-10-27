@@ -7,7 +7,7 @@ import secrets
 import subprocess
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import text
@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.db import RedactedDsn
 from tests.conftest import (
+    _LEFTOVER_TEST_DATABASES,
     _LEFTOVER_TEST_TABLES,
     PRODUCTION_TEST_USER,
     ROOT,
@@ -774,8 +775,7 @@ def test_failed_orphan_drop_keeps_sweep_transaction_healthy(
         assert asyncio.run(_role_exists(require_postgres, victim)) is None
         messages = [record.getMessage() for record in caplog.records]
         assert any(
-            "dueño de la base" in message and dbname in message
-            for message in messages
+            "dueño de la base" in message and dbname in message for message in messages
         )
     finally:
         _drop_probe_database(require_postgres, dbname)
@@ -1541,7 +1541,7 @@ def test_session_lock_holds_with_query_user_password(
     """MEDIA 3: user/password en la query no deben romper el lock."""
 
     parsed = make_url(require_postgres.secret())
-    query = parsed.query or {}
+    query: dict[str, Any] = dict(parsed.query or {})
 
     def _query_first(key: str) -> str | None:
         raw = query.get(key)
