@@ -114,22 +114,6 @@ async def _run_with_transient_retry[T](
     raise last
 
 
-async def _run_category_write[T](
-    session: AsyncSession,
-    operation: Callable[[AsyncSession], Awaitable[T]],
-) -> T:
-    """Reintenta solo si la sesión no tiene transacción abierta.
-
-    Si ya hay transacción (trabajo previo o el User de auth), ejecuta la
-    unidad en esa sesión sin rollback: el reintento HTTP usa una sesión
-    nueva en el router, no esta.
-    """
-
-    if session.in_transaction():
-        return await operation(session)
-    return await _run_with_transient_retry(session, lambda: operation(session))
-
-
 async def _lock_category(session: AsyncSession, category_id: UUID) -> Category | None:
     try:
         return await session.scalar(
@@ -261,18 +245,18 @@ async def list_categories(session: AsyncSession) -> list[Category]:
 
 
 async def create_category(session: AsyncSession, body: CategoryCreate) -> Category:
-    async def once(write: AsyncSession) -> Category:
+    async def once() -> Category:
         try:
             parent_id = body.parent_id
             if parent_id is not None:
-                parent = await _assert_parent_is_root(write, parent_id)
+                parent = await _assert_parent_is_root(session, parent_id)
                 parent_id = parent.id
-            if await _name_taken(write, body.name, parent_id):
+            if await _name_taken(session, body.name, parent_id):
                 raise CategoryNameTaken()
             sort_order = (
                 body.sort_order
                 if body.sort_order is not None
-                else await _next_sort_order(write, parent_id)
+                else await _next_sort_order(session, parent_id)
             )
             row = Category(
                 name=body.name,
@@ -281,15 +265,17 @@ async def create_category(session: AsyncSession, body: CategoryCreate) -> Catego
                 description=body.description,
                 sort_order=sort_order,
             )
-            async with write.begin_nested():
-                write.add(row)
-                await write.flush()
-            await write.refresh(row)
+            async with session.begin_nested():
+                session.add(row)
+                await session.flush()
+            await session.refresh(row)
             return row
         except DBAPIError as exc:
             _raise_from_db(exc)
 
-    return await _run_category_write(session, once)
+    if session.in_transaction():
+        return await once()
+    return await _run_with_transient_retry(session, once)
 
 
 async def update_category(
@@ -306,28 +292,28 @@ async def update_category(
         next_sort = body.sort_order
     changing_parent = "parent_id" in fields
 
-    async def once(write: AsyncSession) -> Category:
+    async def once() -> Category:
         try:
             parent: Category | None = None
             if changing_parent and body.parent_id is not None:
                 locked = await _lock_categories_ordered(
-                    write, category_id, body.parent_id
+                    session, category_id, body.parent_id
                 )
                 row = locked.get(category_id)
                 parent = locked.get(body.parent_id)
             else:
-                row = await _lock_category(write, category_id)
+                row = await _lock_category(session, category_id)
             if row is None:
                 raise NotFound()
             next_name = row.name if next_name_update is None else next_name_update
             next_parent = row.parent_id
             if changing_parent:
                 if body.parent_id is not None:
-                    if await _has_active_children(write, category_id):
+                    if await _has_active_children(session, category_id):
                         raise Validation(fields=["parentId"])
                     _parent_is_root(parent, category_id)
                 next_parent = body.parent_id
-            if await _name_taken(write, next_name, next_parent, exclude_id=category_id):
+            if await _name_taken(session, next_name, next_parent, exclude_id=category_id):
                 raise CategoryNameTaken()
             if "name" in fields:
                 row.name = next_name
@@ -338,30 +324,35 @@ async def update_category(
                 row.description = body.description
             if next_sort is not None:
                 row.sort_order = next_sort
-            async with write.begin_nested():
-                await write.flush()
-            await write.refresh(row)
+            async with session.begin_nested():
+                await session.flush()
+            await session.refresh(row)
             return row
         except DBAPIError as exc:
             _raise_from_db(exc)
 
-    return await _run_category_write(session, once)
+    if session.in_transaction():
+        return await once()
+    return await _run_with_transient_retry(session, once)
 
 
 async def delete_category(session: AsyncSession, category_id: UUID) -> None:
-    async def once(write: AsyncSession) -> None:
+    async def once() -> None:
         try:
-            row = await _lock_category(write, category_id)
+            row = await _lock_category(session, category_id)
             if row is None:
                 raise NotFound()
-            if await _has_active_children(write, category_id):
+            if await _has_active_children(session, category_id):
                 raise CategoryNotEmpty()
             row.deleted_at = datetime.now(UTC)
-            await write.flush()
+            await session.flush()
         except DBAPIError as exc:
             _raise_from_db(exc)
 
-    await _run_category_write(session, once)
+    if session.in_transaction():
+        await once()
+        return
+    await _run_with_transient_retry(session, once)
 
 
 @dataclass(frozen=True)
