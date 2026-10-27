@@ -276,6 +276,10 @@ def _orphan_role_name(pid: int | None = None) -> str:
     return f"em_prod_tests_{suffix}_t_dead_{secrets.token_hex(2)}"
 
 
+def _unique_lock_role(kind: str) -> str:
+    return f"em_prod_tests_1_{kind}_{os.getpid()}_{secrets.token_hex(3)}"
+
+
 def _unused_pid() -> int:
     return _unused_pids(1)[0]
 
@@ -661,7 +665,7 @@ def test_failed_orphan_drop_keeps_sweep_transaction_healthy(
     dbname = _non_test_probe_database("orphan_owner")
     role = _pg_ident(blocker)
     monkeypatch.setattr(
-        "tests.conftest.PRODUCTION_TEST_USER", "em_prod_tests_1_sp_not_ours"
+        "tests.conftest.PRODUCTION_TEST_USER", _unique_lock_role("sp_not_ours")
     )
     monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", None)
     try:
@@ -833,7 +837,7 @@ from tests.conftest import _SessionAdvisoryLock
 
 lock = _SessionAdvisoryLock(
     RedactedDsn(os.environ["TEST_DATABASE_URL"]),
-    "em_prod_tests_1_l6_norelease",
+    os.environ["EM_SHARED_ROLE"],
 )
 ok = lock.start()
 sys.exit(0 if ok else 2)
@@ -849,7 +853,10 @@ def test_lock_without_release_does_not_hang_interpreter(
     """L6: sin stop()/release el intérprete no puede quedarse colgado al salir."""
 
     result = _run_child_script(
-        tmp_path, require_postgres, _CHILD_LOCK_NO_RELEASE, "unused"
+        tmp_path,
+        require_postgres,
+        _CHILD_LOCK_NO_RELEASE,
+        _unique_lock_role("l6_norelease"),
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -914,7 +921,7 @@ def test_same_pid_peer_role_is_not_dropped_without_life_lock(
 ) -> None:
     """Dos contenedores con el mismo pid no deben borrar el rol vivo ajeno."""
 
-    shared = "em_prod_tests_1_peer_locktest"
+    shared = _unique_lock_role("peer_locktest")
     lock = _SessionAdvisoryLock(require_postgres, shared)
     assert lock.start() is True
     role = _pg_ident(shared)
@@ -956,7 +963,7 @@ def test_ensure_fails_without_sweeping_when_life_lock_is_busy(
 ) -> None:
     """Si no se consigue el lock, ensure falla y no barre el rol del otro."""
 
-    shared = "em_prod_tests_1_peer_ensbusy"
+    shared = _unique_lock_role("peer_ensbusy")
     lock = _SessionAdvisoryLock(require_postgres, shared)
     assert lock.start() is True
     role = _pg_ident(shared)
@@ -1117,7 +1124,7 @@ def test_lock_start_is_false_when_already_held(
 ) -> None:
     """L5: acquired no puede ser True si pg_try_advisory_lock no lo dio."""
 
-    name = "em_prod_tests_1_l5_busy"
+    name = _unique_lock_role("l5_busy")
     holder = _SessionAdvisoryLock(require_postgres, name)
     other = _SessionAdvisoryLock(require_postgres, name)
     assert holder.start() is True
@@ -1136,7 +1143,7 @@ def test_hold_raises_when_life_lock_is_busy(
 ) -> None:
     """L19: si start() es False, ensure/hold debe fallar."""
 
-    name = "em_prod_tests_1_l19_busy"
+    name = _unique_lock_role("l19_busy")
     monkeypatch.setattr("tests.conftest.PRODUCTION_TEST_USER", name)
     monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", None)
     holder = _SessionAdvisoryLock(require_postgres, name)
@@ -1176,7 +1183,7 @@ def test_lock_stop_finishes_quickly_and_reaps_thread(
 
     import time
 
-    lock = _SessionAdvisoryLock(require_postgres, "em_prod_tests_1_stop_quick")
+    lock = _SessionAdvisoryLock(require_postgres, _unique_lock_role("stop_quick"))
     assert lock.start() is True
     started = time.monotonic()
     lock.stop()
@@ -1193,7 +1200,7 @@ def test_killed_lock_connection_fails_teardown(
 
     import time
 
-    name = "em_prod_tests_1_kill_lock"
+    name = _unique_lock_role("kill_lock")
     lock = _SessionAdvisoryLock(require_postgres, name)
     assert lock.start() is True
     monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", lock)
@@ -1241,7 +1248,7 @@ def test_drop_detects_lost_lock_immediately_after_kill(
 ) -> None:
     """A: unlock fallido o false cuenta como pérdida, leída tras stop()/join."""
 
-    name = "em_prod_tests_1_kill_lock_now"
+    name = _unique_lock_role("kill_lock_now")
     lock = _SessionAdvisoryLock(require_postgres, name)
     assert lock.start() is True
     monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", lock)
@@ -1315,7 +1322,7 @@ def test_drop_detects_lost_lock_during_sweep(
 ) -> None:
     """B: el holder muere a mitad del barrido; lost se lee tras stop()."""
 
-    name = "em_prod_tests_1_kill_lock_sweep"
+    name = _unique_lock_role("kill_lock_sweep")
     lock = _SessionAdvisoryLock(require_postgres, name)
     assert lock.start() is True
     monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", lock)
@@ -1392,7 +1399,7 @@ def test_session_lock_holds_with_unix_socket_query_dsn(
         .update_query_dict({"host": directory, "port": port})
         .render_as_string(hide_password=False)
     )
-    lock = _SessionAdvisoryLock(RedactedDsn(socket_url), "em_prod_tests_1_dsn_sock")
+    lock = _SessionAdvisoryLock(RedactedDsn(socket_url), _unique_lock_role("dsn_sock"))
     try:
         assert lock.start() is True
     finally:
@@ -1423,7 +1430,7 @@ def test_session_lock_holds_with_query_user_password(
         .update_query_dict({"user": user, "password": password})
         .render_as_string(hide_password=False)
     )
-    lock = _SessionAdvisoryLock(RedactedDsn(query_url), "em_prod_tests_1_dsn_query")
+    lock = _SessionAdvisoryLock(RedactedDsn(query_url), _unique_lock_role("dsn_query"))
     try:
         assert lock.start() is True
     finally:
