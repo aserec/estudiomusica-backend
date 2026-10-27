@@ -1917,6 +1917,48 @@ def test_retry_inside_session_begin_does_not_break(
         asyncio.run(_cleanup_ids(dsn.secret(), tracked))
 
 
+def test_commit_true_rejects_open_transaction(
+    require_postgres: Any,
+    migrated_test_database: None,
+) -> None:
+    """commit=True con transacción abierta falla (también bajo python -O)."""
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import RedactedDsn
+
+    dsn = require_postgres
+    assert isinstance(dsn, RedactedDsn)
+    suffix = uuid.uuid4().hex[:8]
+    tracked: list[uuid.UUID] = []
+    prior = f"o-prev-{suffix}"
+    extra = f"o-new-{suffix}"
+
+    async def run() -> None:
+        engine = create_async_engine(dsn.secret())
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                first = await create_category(session, CategoryCreate(name=prior))
+                tracked.append(first.id)
+                with pytest.raises(RuntimeError, match="commit=True"):
+                    await create_category(
+                        session, CategoryCreate(name=extra), commit=True
+                    )
+                await session.rollback()
+            async with factory() as check:
+                names = {row.name for row in await list_categories(check)}
+            assert prior not in names
+            assert extra not in names
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(_cleanup_ids(dsn.secret(), tracked))
+
+
 def test_retry_does_not_expire_objects_loaded_before(
     require_postgres: Any,
     migrated_test_database: None,

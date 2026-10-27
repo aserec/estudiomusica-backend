@@ -98,10 +98,11 @@ async def _run_unit[T](
     """
 
     if commit:
-        assert not session.in_transaction(), (
-            "commit=True exige sesión sin transacción "
-            "(el router cierra la lectura de auth antes)"
-        )
+        if session.in_transaction():
+            raise RuntimeError(
+                "commit=True exige sesión sin transacción "
+                "(el router cierra la lectura de auth antes)"
+            )
         return await _run_with_transient_retry(session, operation)
     return await operation()
 
