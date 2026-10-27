@@ -1330,6 +1330,7 @@ def test_killed_lock_connection_fails_teardown(
     name = _unique_lock_role("kill_lock")
     lock = _SessionAdvisoryLock(require_postgres, name)
     assert lock.start() is True
+    monkeypatch.setattr("tests.conftest.PRODUCTION_TEST_USER", name)
     monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", lock)
     key1, key2 = _role_advisory_lock_keys(name)
 
@@ -1378,6 +1379,7 @@ def test_drop_detects_lost_lock_immediately_after_kill(
     name = _unique_lock_role("kill_lock_now")
     lock = _SessionAdvisoryLock(require_postgres, name)
     assert lock.start() is True
+    monkeypatch.setattr("tests.conftest.PRODUCTION_TEST_USER", name)
     monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", lock)
     key1, key2 = _role_advisory_lock_keys(name)
 
@@ -1452,6 +1454,7 @@ def test_drop_detects_lost_lock_during_sweep(
     name = _unique_lock_role("kill_lock_sweep")
     lock = _SessionAdvisoryLock(require_postgres, name)
     assert lock.start() is True
+    monkeypatch.setattr("tests.conftest.PRODUCTION_TEST_USER", name)
     monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", lock)
     key1, key2 = _role_advisory_lock_keys(name)
     original = _drop_production_test_role
