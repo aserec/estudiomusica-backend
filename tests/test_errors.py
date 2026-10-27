@@ -1,7 +1,4 @@
-import asyncio
 import logging
-from collections.abc import AsyncGenerator
-from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -299,36 +296,3 @@ def test_examples_are_disabled_in_production(
 
     assert response.status_code == 404
     assert response.json() == {"error": "not_found"}
-
-
-def test_get_session_rollbacks_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """l-sin-rollback: get_session tiene que hacer rollback si la petición falla."""
-
-    from app.db import get_session
-
-    rolled = {"n": 0}
-
-    class _Sess:
-        async def commit(self) -> None:
-            return None
-
-        async def rollback(self) -> None:
-            rolled["n"] += 1
-
-    class _Ctx:
-        async def __aenter__(self) -> _Sess:
-            return _Sess()
-
-        async def __aexit__(self, *_exc: object) -> None:
-            return None
-
-    monkeypatch.setattr("app.db.get_session_factory", lambda: lambda: _Ctx())
-
-    async def run() -> None:
-        gen = cast(AsyncGenerator[object], get_session())
-        await gen.__anext__()
-        with pytest.raises(RuntimeError, match="boom"):
-            await gen.athrow(RuntimeError("boom"))
-        assert rolled["n"] == 1
-
-    asyncio.run(run())

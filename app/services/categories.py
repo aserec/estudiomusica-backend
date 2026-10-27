@@ -87,20 +87,15 @@ async def _run_with_transient_retry[T](
 ) -> T:
     """Reintenta la unidad de trabajo hasta 2 veces si Postgres aborta.
 
-    Exige ``not session.in_transaction()`` al entrar. Auth carga el User
-    en la sesión de la petición y esa sesión ya está en transacción; un
-    rollback aquí abortaría trabajo previo (p. ej. #97) y expiraría
-    objetos ya cargados (``MissingGreenlet``). Un savepoint no arregla
-    ``40001`` serializable: la instantánea es la misma. El caller debe
-    pasar una sesión nueva, no la de la petición.
+    El router commitea la lectura de auth antes de llamar: esta sesión
+    no tiene transacción abierta. ``create``/``update``/``delete`` no
+    pasan por aquí si el caller ya está en transacción (p. ej. el
+    ``db_session`` de tests); ejecutan ``once()`` sin rollback. Un
+    savepoint no arregla ``40001`` serializable: la instantánea es la
+    misma. El COMMIT de la unidad va dentro del bucle para reintentar
+    un 40001 de serialización.
     """
 
-    if session.in_transaction():
-        raise RuntimeError(
-            "_run_with_transient_retry requiere una sesión sin transacción "
-            "abierta; el rollback de 40P01/40001 no debe tocar la sesión "
-            "de la petición"
-        )
     last: TransientDbConflict | None = None
     for attempt in range(_TRANSIENT_ATTEMPTS):
         try:

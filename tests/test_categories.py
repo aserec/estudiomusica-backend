@@ -1792,21 +1792,6 @@ async def test_get_40001_is_503_not_500(
     assert response.headers.get("retry-after") == "1"
 
 
-async def test_retry_rejects_session_already_in_transaction(
-    db_session: AsyncSession,
-) -> None:
-    from app.services.categories import _run_with_transient_retry
-
-    await db_session.execute(text("SELECT 1"))
-    assert db_session.in_transaction()
-
-    async def noop() -> None:
-        return None
-
-    with pytest.raises(RuntimeError, match="sin transacción"):
-        await _run_with_transient_retry(db_session, noop)
-
-
 def test_retry_keeps_prior_uncommitted_work(
     require_postgres: Any,
     migrated_test_database: None,
