@@ -408,6 +408,87 @@ def test_ping_postgres_normalizes_sslmode(monkeypatch: pytest.MonkeyPatch) -> No
     assert "sslmode" not in query
 
 
+def test_runtest_logreport_redacts_connection_parameters_password() -> None:
+    """asyncpg ConnectionParameters(password='…') no sale en el longrepr."""
+
+    from tests.conftest import pytest_runtest_logreport
+
+    report = pytest.TestReport(
+        nodeid="tests/x.py::test_y",
+        location=("tests/x.py", 1, "test_y"),
+        keywords={},
+        outcome="failed",
+        longrepr=(
+            "params = ConnectionParameters(user='leaky_user', "
+            f"password='{SENTINEL}', database='no_such_db_test')"
+        ),
+        when="call",
+    )
+    pytest_runtest_logreport(report)
+    text = str(report.longrepr)
+    assert SENTINEL not in text
+    assert "password='***'" in text
+
+
+def test_asyncpg_connection_parameters_password_redacted_in_traceback(
+    tmp_path: Path,
+) -> None:
+    """Un fallo real de asyncpg no imprime la contraseña en --tb=long -l."""
+
+    plugin = tmp_path / "hook_only.py"
+    plugin.write_text("from tests.conftest import pytest_runtest_logreport\n")
+    probe = tmp_path / "test_asyncpg_params_leak.py"
+    probe.write_text(
+        "import asyncio\n"
+        "import asyncpg\n"
+        "\n"
+        f"SENTINEL = {SENTINEL!r}\n"
+        "\n"
+        "def test_connect_prints_params():\n"
+        "    async def go() -> None:\n"
+        "        await asyncpg.connect(\n"
+        "            host='127.0.0.1',\n"
+        "            port=1,\n"
+        "            user='leaky_user',\n"
+        "            password=SENTINEL,\n"
+        "            database='no_such_db_test',\n"
+        "            timeout=0.2,\n"
+        "        )\n"
+        "    asyncio.run(go())\n"
+    )
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env["PYTHONPATH"] = (
+        f"{plugin.parent}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    ).rstrip(os.pathsep)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-l",
+            "--showlocals",
+            "--tb=long",
+            "-p",
+            "no:cacheprovider",
+            "-p",
+            plugin.stem,
+            "--noconftest",
+            str(probe),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=90,
+        check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode != 0
+    assert SENTINEL not in output
+    assert "ConnectionParameters" in output or "password=" in output.lower()
+
+
 def test_broken_migration_does_not_leak_password_with_showlocals(
     tmp_path: Path,
 ) -> None:

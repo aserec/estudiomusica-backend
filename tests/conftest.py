@@ -1597,6 +1597,97 @@ async def session_client(
     get_settings.cache_clear()
 
 
+_ASYNC_PG_PASSWORD_RE = re.compile(
+    r"(?i)(password\s*=\s*)(['\"])([^'\"]*)\2"
+)
+
+
+def _known_pytest_dsn_secrets() -> tuple[str, ...]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for name in (
+        "TEST_DATABASE_URL",
+        "ALEMBIC_TEST_DATABASE_URL",
+        "TLS_TEST_DATABASE_URL",
+        "DATABASE_URL",
+    ):
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        try:
+            found = _dsn_secret_values(RedactedDsn(raw))
+        except Exception:
+            continue
+        for item in found:
+            if item in seen:
+                continue
+            seen.add(item)
+            values.append(item)
+    return tuple(values)
+
+
+def _redact_pytest_report_text(text: str) -> str:
+    from urllib.parse import quote
+
+    redacted = _ASYNC_PG_PASSWORD_RE.sub(r"\1\2***\2", text)
+    for secret in _known_pytest_dsn_secrets():
+        redacted = redacted.replace(secret, "***")
+        redacted = redacted.replace(quote(secret, safe=""), "***")
+    return redacted
+
+
+def _redact_pytest_longrepr(value: object) -> object:
+    if isinstance(value, str):
+        return _redact_pytest_report_text(value)
+    if isinstance(value, tuple):
+        return tuple(_redact_pytest_longrepr(item) for item in value)
+    if isinstance(value, list):
+        return [_redact_pytest_longrepr(item) for item in value]
+    lines = getattr(value, "lines", None)
+    if isinstance(lines, list):
+        setattr(
+            value,
+            "lines",
+            [
+                _redact_pytest_report_text(line) if isinstance(line, str) else line
+                for line in lines
+            ],
+        )
+    message = getattr(value, "message", None)
+    if isinstance(message, str):
+        setattr(value, "message", _redact_pytest_report_text(message))
+    extraline = getattr(value, "extraline", None)
+    if isinstance(extraline, str):
+        setattr(value, "extraline", _redact_pytest_report_text(extraline))
+    for attr in (
+        "reprcrash",
+        "reprtraceback",
+        "reprlocals",
+        "reprfuncargs",
+        "reprfileloc",
+        "sections",
+        "chain",
+    ):
+        current = getattr(value, attr, None)
+        if current is None:
+            continue
+        rewritten = _redact_pytest_longrepr(current)
+        try:
+            setattr(value, attr, rewritten)
+        except Exception:
+            pass
+    return value
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Oculta password= de asyncpg ConnectionParameters en cualquier --tb."""
+
+    longrepr = report.longrepr
+    if longrepr is None:
+        return
+    report.longrepr = _redact_pytest_longrepr(longrepr)
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     lock = _ROLE_LIFE_LOCK
     if lock is None or not lock.lost:
