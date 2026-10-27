@@ -266,7 +266,7 @@ def test_signup_request_rejects_control_and_noncharacters() -> None:
         "a\x9fb",
         "a\ufdd0b",
         "a\U0001fffeb",
-        "a\U00010fffeb",
+        "a\U0010fffeb",
     ),
 )
 def test_signup_request_rejects_tab_del_c1_and_plane_noncharacters(raw: str) -> None:
