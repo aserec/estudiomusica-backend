@@ -1653,6 +1653,8 @@ def _redact_pytest_report_text(text: str) -> str:
 
     redacted = _ASYNC_PG_PASSWORD_RE.sub(r"\1\2***\2", text)
     for secret in _known_pytest_dsn_secrets():
+        if len(secret) < 4:
+            continue
         redacted = redacted.replace(secret, "***")
         redacted = redacted.replace(quote(secret, safe=""), "***")
     return redacted
