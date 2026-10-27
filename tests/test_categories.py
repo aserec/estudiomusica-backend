@@ -4382,8 +4382,27 @@ def test_serializable_concurrent_child_posts_never_500(
         finally:
             await engine.dispose()
 
+    async def _cleanup_user(email: str) -> None:
+        engine = create_async_engine(prod_dsn.secret())
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "DELETE FROM auth_sessions WHERE user_id IN "
+                        "(SELECT id FROM users WHERE email = :email)"
+                    ),
+                    {"email": email},
+                )
+                await connection.execute(
+                    text("DELETE FROM users WHERE email = :email"),
+                    {"email": email},
+                )
+        finally:
+            await engine.dispose()
+
     async def run() -> None:
         await _alter_role_isolation("serializable")
+        email = unique_email("ser-cat")
         try:
             for key, value in production_settings_env(prod_dsn).items():
                 monkeypatch.setenv(key, value)
@@ -4393,9 +4412,8 @@ def test_serializable_concurrent_child_posts_never_500(
             await dispose_engine()
             application = create_app()
             transport = ASGITransport(app=application)
-            client_cm = AsyncClient(transport=transport, base_url="http://test")
+            client_cm = AsyncClient(transport=transport, base_url="https://test")
             async with client_cm as client:
-                email = unique_email("ser-cat")
                 signed = await client.post(
                     "/api/v1/auth/signup",
                     json=signup_body(email=email),
@@ -4428,12 +4446,14 @@ def test_serializable_concurrent_child_posts_never_500(
                         assert child.status_code != 500, child.text
                         statuses.append(child.status_code)
                 assert 500 not in statuses
+                assert 201 in statuses
                 listed = await client.get(_LIST)
                 assert listed.status_code != 500, listed.text
         finally:
             await dispose_engine()
             get_settings.cache_clear()
             get_app.cache_clear()
+            await _cleanup_user(email)
             await _alter_role_isolation(None)
 
     try:
