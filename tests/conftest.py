@@ -76,6 +76,17 @@ _PRODUCTION_TEST_EMAIL_PREFIX = "prod-"
 _SWEEP_ADVISORY_LOCK_KEY1 = 0x454D50  # EMP
 _SWEEP_ADVISORY_LOCK_KEY2 = 0x535750  # SWP
 _SWEEP_COMMAND_TIMEOUT = 60.0
+# Peor caso de stop(): connect 5 + unlock 2 + close 2 + dispose 2.
+_ROLE_LIFE_LOCK_CONNECT_TIMEOUT = 5.0
+_ROLE_LIFE_LOCK_UNLOCK_TIMEOUT = 2.0
+_ROLE_LIFE_LOCK_CLOSE_TIMEOUT = 2.0
+_ROLE_LIFE_LOCK_DISPOSE_TIMEOUT = 2.0
+_ROLE_LIFE_LOCK_JOIN_TIMEOUT = (
+    _ROLE_LIFE_LOCK_CONNECT_TIMEOUT
+    + _ROLE_LIFE_LOCK_UNLOCK_TIMEOUT
+    + _ROLE_LIFE_LOCK_CLOSE_TIMEOUT
+    + _ROLE_LIFE_LOCK_DISPOSE_TIMEOUT
+)
 _SAFE_PG_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _log = logging.getLogger(__name__)
 _ORPHAN_OWNED_DB_WARNED: set[tuple[str, str]] = set()
@@ -570,7 +581,7 @@ class _SessionAdvisoryLock:
     def stop(self) -> None:
         self._stop.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=6)
+            self._thread.join(timeout=_ROLE_LIFE_LOCK_JOIN_TIMEOUT)
 
     def _run(self) -> None:
         try:
@@ -583,7 +594,10 @@ class _SessionAdvisoryLock:
         engine = _create_async_engine(
             self._admin.secret(),
             isolation_level="AUTOCOMMIT",
-            connect_args={"timeout": 5, "command_timeout": 5},
+            connect_args={
+                "timeout": _ROLE_LIFE_LOCK_CONNECT_TIMEOUT,
+                "command_timeout": _ROLE_LIFE_LOCK_CONNECT_TIMEOUT,
+            },
         )
         connection = None
         try:
@@ -611,7 +625,7 @@ class _SessionAdvisoryLock:
                         text("SELECT pg_advisory_unlock(:k1, :k2)"),
                         {"k1": key1, "k2": key2},
                     ),
-                    timeout=2,
+                    timeout=_ROLE_LIFE_LOCK_UNLOCK_TIMEOUT,
                 )
             except Exception:
                 self._lost = True
@@ -621,9 +635,13 @@ class _SessionAdvisoryLock:
         finally:
             if connection is not None:
                 with suppress(Exception):
-                    await asyncio.wait_for(connection.close(), timeout=2)
+                    await asyncio.wait_for(
+                        connection.close(), timeout=_ROLE_LIFE_LOCK_CLOSE_TIMEOUT
+                    )
             with suppress(Exception):
-                await asyncio.wait_for(engine.dispose(), timeout=2)
+                await asyncio.wait_for(
+                    engine.dispose(), timeout=_ROLE_LIFE_LOCK_DISPOSE_TIMEOUT
+                )
 
 
 _ROLE_LIFE_LOCK: _SessionAdvisoryLock | None = None

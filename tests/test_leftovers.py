@@ -30,6 +30,7 @@ from tests.conftest import (
     _hold_production_role_life_lock,
     _holds_own_life_lock,
     _release_production_role_life_lock,
+    _ROLE_LIFE_LOCK_JOIN_TIMEOUT,
     _orphan_production_test_role,
     _pg_ident,
     _pg_literal,
@@ -1416,8 +1417,7 @@ def test_lock_stop_joins_with_cleanup_timeout(
     assert lock.start() is True
     lock.stop()
     assert seen
-    assert seen[0] is not None
-    assert seen[0] >= 6
+    assert seen[0] == _ROLE_LIFE_LOCK_JOIN_TIMEOUT
 
 
 @pytest.mark.db
