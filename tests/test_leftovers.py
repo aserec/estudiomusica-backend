@@ -1451,6 +1451,25 @@ def test_drop_detects_lost_lock_immediately_after_kill(
         lock.stop()
 
 
+def test_drop_own_role_non_connection_error_is_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LOST10: un fallo del DROP propio que no es de conexión no se traga."""
+
+    async def boom(_admin: RedactedDsn) -> None:
+        raise RuntimeError("permission denied to drop role")
+
+    async def noop_cleanup(_admin: RedactedDsn) -> None:
+        return None
+
+    monkeypatch.setattr("tests.conftest._drop_production_test_role", boom)
+    monkeypatch.setattr("tests.conftest._cleanup_production_test_rows", noop_cleanup)
+    monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", None)
+    dummy = RedactedDsn("postgresql+asyncpg://u:p@127.0.0.1:1/app_test")
+    with pytest.raises(RuntimeError, match="No se pudo borrar el rol"):
+        drop_production_test_role(dummy)
+
+
 def test_sessionfinish_fails_when_life_lock_was_lost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
