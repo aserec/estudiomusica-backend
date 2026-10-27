@@ -2,6 +2,7 @@
 
 import asyncio
 import errno
+import logging
 import os
 import secrets
 import subprocess
@@ -645,6 +646,60 @@ def test_orphan_owning_database_does_not_abort_sweep(
     finally:
         _drop_probe_database(require_postgres, dbname)
         _cleanup_named_roles(require_postgres, [orphan])
+
+
+@pytest.mark.db
+def test_failed_orphan_drop_keeps_sweep_transaction_healthy(
+    require_postgres: RedactedDsn,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """SP1/SP2: un DROP de huérfano fallido no aborta el resto del barrido."""
+
+    blocker = _orphan_role_name()
+    victim = _orphan_role_name()
+    dbname = _non_test_probe_database("orphan_owner")
+    role = _pg_ident(blocker)
+    monkeypatch.setattr(
+        "tests.conftest.PRODUCTION_TEST_USER", "em_prod_tests_1_sp_not_ours"
+    )
+    monkeypatch.setattr("tests.conftest._ROLE_LIFE_LOCK", None)
+    try:
+
+        async def plant() -> None:
+            engine = _admin_engine(require_postgres)
+            try:
+                async with engine.connect() as connection:
+                    await connection.execute(
+                        text(
+                            f"CREATE ROLE {role} LOGIN NOSUPERUSER "
+                            f"PASSWORD {_pg_literal('orphan-sp-blocker')}"
+                        )
+                    )
+                    victim_ident = _pg_ident(victim)
+                    await connection.execute(
+                        text(
+                            f"CREATE ROLE {victim_ident} LOGIN NOSUPERUSER "
+                            f"PASSWORD {_pg_literal('orphan-sp-victim')}"
+                        )
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(plant())
+        _create_probe_database(require_postgres, dbname, owner=blocker)
+        caplog.set_level(logging.WARNING, logger="tests.conftest")
+        asyncio.run(_drop_production_test_role(require_postgres))
+        assert asyncio.run(_role_exists(require_postgres, blocker)) == 1
+        assert asyncio.run(_role_exists(require_postgres, victim)) is None
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "dueño de la base" in message and dbname in message
+            for message in messages
+        )
+    finally:
+        _drop_probe_database(require_postgres, dbname)
+        _cleanup_named_roles(require_postgres, [blocker, victim])
 
 
 @pytest.mark.db
