@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 from sqlalchemy.engine.url import make_url
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.db import RedactedDsn
 from tests.conftest import (
@@ -548,7 +549,7 @@ def _is_allowed_probe_database(name: str) -> bool:
     return name.startswith(prefixes) and name.endswith("_probe")
 
 
-def _maintenance_engine(admin: RedactedDsn):
+def _maintenance_engine(admin: RedactedDsn) -> AsyncEngine:
     parsed = make_url(admin.secret())
     return _create_async_engine(
         parsed.set(database="postgres").render_as_string(hide_password=False),

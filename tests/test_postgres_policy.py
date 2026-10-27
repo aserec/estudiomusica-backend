@@ -5,7 +5,9 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -382,8 +384,12 @@ def test_tls_postgres_call_site_fails_when_docker_missing(
     monkeypatch.delenv("TLS_TEST_CAFILE", raising=False)
     monkeypatch.setattr("shutil.which", lambda *_args, **_kwargs: None)
     dummy = RedactedDsn("postgresql+asyncpg://u:p@127.0.0.1/db_test")
+    wrapped = cast(
+        Callable[[pytest.TempPathFactory, RedactedDsn], Iterator[object]],
+        getattr(tls_postgres, "__wrapped__"),
+    )
     with pytest.raises(BaseException, match="docker no está en PATH") as caught:
-        next(tls_postgres.__wrapped__(tmp_path_factory, dummy))
+        next(wrapped(tmp_path_factory, dummy))
     assert type(caught.value) is pytest.fail.Exception
 
 
@@ -398,7 +404,9 @@ def test_start_tls_postgres_run_call_site_fails_when_required(
 
     real_run = subprocess_mod.run
 
-    def fake_run(cmd: object, *args: object, **kwargs: object) -> object:
+    def fake_run(
+        cmd: Any, *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[Any]:
         argv = list(cmd) if isinstance(cmd, (list, tuple)) else []
         if argv and argv[0] == "docker" and "run" in argv:
             return subprocess_mod.CompletedProcess(
@@ -428,7 +436,9 @@ def test_start_tls_postgres_ping_call_site_fails_when_required(
 
     real_run = subprocess_mod.run
 
-    def fake_run(cmd: object, *args: object, **kwargs: object) -> object:
+    def fake_run(
+        cmd: Any, *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[Any]:
         argv = list(cmd) if isinstance(cmd, (list, tuple)) else []
         if argv and argv[0] == "docker":
             return subprocess_mod.CompletedProcess(argv, 0, stdout="cid\n", stderr="")
