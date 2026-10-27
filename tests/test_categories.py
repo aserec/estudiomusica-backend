@@ -4483,12 +4483,6 @@ def test_serializable_concurrent_child_posts_never_500(
                     )
                 await connection.execute(
                     text(
-                        "DELETE FROM categories WHERE name LIKE 'SP-%' "
-                        "OR name LIKE 'SC-%'"
-                    )
-                )
-                await connection.execute(
-                    text(
                         "DELETE FROM auth_sessions WHERE user_id IN "
                         "(SELECT id FROM users WHERE email = :email)"
                     ),
