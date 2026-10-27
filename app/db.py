@@ -40,10 +40,25 @@ _TLS_QUERY_KEYS = frozenset(
 _SSL_CONTEXT_MODES = frozenset(
     {"", "allow", "prefer", "require", "verify-ca", "verify-full", "true", "1"}
 )
+_SSL_KNOWN_MODES = frozenset(
+    {
+        "disable",
+        "allow",
+        "prefer",
+        "require",
+        "verify-ca",
+        "verify-full",
+        "false",
+        "true",
+        "0",
+        "1",
+    }
+)
 _SSL_CONFLICT_MSG = "DATABASE_URL no puede mezclar ni repetir ssl y sslmode"
 _SSL_BLANK_MSG = (
     "DATABASE_URL no admite claves TLS vacías ni una query percent-encoded entera"
 )
+_SSL_UNKNOWN_MSG = "DATABASE_URL no admite un valor de ssl/sslmode desconocido"
 
 
 _QUERY_SECRET_KEYS = frozenset({"password", "sslpassword"})
@@ -137,6 +152,14 @@ def _reject_blank_and_encoded_query(url: str, database: str | None) -> None:
         raise ValueError(_SSL_CONFLICT_MSG)
 
 
+def _reject_unknown_ssl_mode(ssl_value: object) -> None:
+    if ssl_value is None or isinstance(ssl_value, (bool, ssl.SSLContext)):
+        return
+    if isinstance(ssl_value, str) and ssl_value.lower() in _SSL_KNOWN_MODES:
+        return
+    raise ValueError(_SSL_UNKNOWN_MSG)
+
+
 def normalize_asyncpg_ssl_url(url: str) -> str:
     """Una sola regla para ``ssl`` / ``sslmode`` (Settings, engine, Alembic).
 
@@ -148,7 +171,8 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
     ``SSL`` / ``Ssl`` pasan a ``ssl``. ``sslmode`` pasa a ``ssl``.
     ``parse_qsl(..., keep_blank_values=True)`` sobre la query cruda
     rechaza claves TLS vacías y una query percent-encoded entera
-    (clave decodificada con ``=`` o ``&``).
+    (clave decodificada con ``=`` o ``&``). Un valor de ``ssl`` /
+    ``sslmode`` desconocido levanta ``ValueError``.
     """
 
     try:
@@ -188,6 +212,7 @@ def normalize_asyncpg_ssl_url(url: str) -> str:
             continue
         new_query[key] = value
     if ssl_value is not None:
+        _reject_unknown_ssl_mode(ssl_value)
         new_query["ssl"] = str(ssl_value)
     return parsed.set(query=new_query).render_as_string(hide_password=False)
 
@@ -290,6 +315,8 @@ def prepare_asyncpg_connect_kwargs(opts: Mapping[str, Any]) -> dict[str, Any]:
         kwargs[key] = value
     if sslmode is not None and "ssl" not in kwargs:
         kwargs["ssl"] = sslmode
+    if "ssl" in kwargs:
+        _reject_unknown_ssl_mode(kwargs["ssl"])
     if sslrootcert or "ssl" in kwargs:
         kwargs["ssl"] = asyncpg_ssl_connect_arg(kwargs.get("ssl"), sslrootcert)
     return kwargs

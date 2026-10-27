@@ -2239,6 +2239,108 @@ def test_ssl_zero_with_sslrootcert_matches_ssl_zero(tmp_path: Any) -> None:
     assert not isinstance(ca_args.get("ssl"), ssl_mod.SSLContext)
 
 
+@pytest.mark.parametrize(
+    "mode",
+    (
+        "allow",
+        "prefer",
+        "require",
+        "verify-ca",
+        "verify-full",
+        "ALLOW",
+        "PREFER",
+        "REQUIRE",
+        "Verify-CA",
+        "Verify-Full",
+    ),
+)
+def test_ssl_mode_with_sslrootcert_builds_context_and_stays_off_cleartext(
+    mode: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MEDIA: allow/prefer/require + CA crean SSLContext; el N no ve startup."""
+
+    import ssl as ssl_mod
+    from pathlib import Path
+
+    from alembic import command
+    from sqlalchemy import text
+
+    from app.config import get_settings
+    from app.db import (
+        asyncpg_url_and_connect_args,
+        clear_engine,
+        dispose_engine,
+        get_engine,
+        prepare_asyncpg_connect_kwargs,
+    )
+    from app.migrations.config import make_alembic_config
+
+    cafile = _write_unrelated_ca(Path(str(tmp_path)) / "unit-ca.pem")
+    kwargs = prepare_asyncpg_connect_kwargs(
+        {"host": "127.0.0.1", "ssl": mode, "sslrootcert": str(cafile)}
+    )
+    assert isinstance(kwargs.get("ssl"), ssl_mod.SSLContext)
+    _url, args = asyncpg_url_and_connect_args(
+        f"postgresql+asyncpg://u:p@127.0.0.1:1/db_test?ssl={mode}&sslrootcert={cafile}"
+    )
+    assert isinstance(args.get("ssl"), ssl_mod.SSLContext)
+
+    with _sslrequest_n_server() as server:
+        raw = (
+            "postgresql+asyncpg://u:p@127.0.0.1:"
+            f"{server['port']}/db_test?ssl={mode}&sslrootcert={cafile}"
+        )
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.setenv("DATABASE_URL", raw)
+        get_settings.cache_clear()
+        clear_engine()
+        health_service.clear_health_probe()
+        try:
+
+            async def _connect() -> None:
+                engine = get_engine()
+                async with engine.connect() as connection:
+                    await connection.execute(text("SELECT 1"))
+
+            with suppress(Exception):
+                asyncio.run(_connect())
+            with suppress(Exception):
+                command.current(make_alembic_config(raw))
+            with suppress(Exception):
+                command.current(make_alembic_config())
+
+            async def _probe() -> DatabaseHealthResponse:
+                return await health_service.check_database()
+
+            result = asyncio.run(_probe())
+            assert result.db == "down"
+        finally:
+            health_service.clear_health_probe()
+            with suppress(Exception):
+                asyncio.run(dispose_engine())
+            get_settings.cache_clear()
+        assert server["ssl_requests"] >= 1
+        assert server["cleartext_startups"] == 0
+
+
+def test_unknown_ssl_or_sslmode_raises_value_error() -> None:
+    """MEDIA: un ssl/sslmode desconocido no acaba en prefer."""
+
+    from app.db import (
+        _SSL_UNKNOWN_MSG,
+        normalize_asyncpg_ssl_url,
+        prepare_asyncpg_connect_kwargs,
+    )
+
+    for query in ("ssl=bogus", "sslmode=whatever", "ssl=2", "SSL=maybe"):
+        url = f"postgresql+asyncpg://u:p@127.0.0.1:5432/db_test?{query}"
+        with pytest.raises(ValueError, match="desconocido") as caught:
+            normalize_asyncpg_ssl_url(url)
+        assert str(caught.value) == _SSL_UNKNOWN_MSG
+    with pytest.raises(ValueError, match="desconocido"):
+        prepare_asyncpg_connect_kwargs({"host": "127.0.0.1", "ssl": "bogus"})
+
+
 def test_normalize_accepts_unencoded_brackets_in_password() -> None:
     """``[`` / ``]`` en la contraseña siguen siendo un DSN válido."""
 
