@@ -10,7 +10,7 @@ import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from alembic import command
@@ -1621,9 +1621,7 @@ async def session_client(
     get_settings.cache_clear()
 
 
-_ASYNC_PG_PASSWORD_RE = re.compile(
-    r"(?i)(password\s*=\s*)(['\"])([^'\"]*)\2"
-)
+_ASYNC_PG_PASSWORD_RE = re.compile(r"(?i)(password\s*=\s*)(['\"])([^'\"]*)\2")
 
 
 def _known_pytest_dsn_secrets() -> tuple[str, ...]:
@@ -1660,6 +1658,11 @@ def _redact_pytest_report_text(text: str) -> str:
     return redacted
 
 
+def _set_longrepr_attr(value: object, name: str, rewritten: object) -> None:
+    with suppress(Exception):
+        setattr(value, name, rewritten)
+
+
 def _redact_pytest_longrepr(value: object) -> object:
     if isinstance(value, str):
         return _redact_pytest_report_text(value)
@@ -1669,7 +1672,7 @@ def _redact_pytest_longrepr(value: object) -> object:
         return [_redact_pytest_longrepr(item) for item in value]
     lines = getattr(value, "lines", None)
     if isinstance(lines, list):
-        setattr(
+        _set_longrepr_attr(
             value,
             "lines",
             [
@@ -1679,10 +1682,10 @@ def _redact_pytest_longrepr(value: object) -> object:
         )
     message = getattr(value, "message", None)
     if isinstance(message, str):
-        setattr(value, "message", _redact_pytest_report_text(message))
+        _set_longrepr_attr(value, "message", _redact_pytest_report_text(message))
     extraline = getattr(value, "extraline", None)
     if isinstance(extraline, str):
-        setattr(value, "extraline", _redact_pytest_report_text(extraline))
+        _set_longrepr_attr(value, "extraline", _redact_pytest_report_text(extraline))
     for attr in (
         "reprcrash",
         "reprtraceback",
@@ -1695,11 +1698,7 @@ def _redact_pytest_longrepr(value: object) -> object:
         current = getattr(value, attr, None)
         if current is None:
             continue
-        rewritten = _redact_pytest_longrepr(current)
-        try:
-            setattr(value, attr, rewritten)
-        except Exception:
-            pass
+        _set_longrepr_attr(value, attr, _redact_pytest_longrepr(current))
     return value
 
 
@@ -1709,7 +1708,7 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     longrepr = report.longrepr
     if longrepr is None:
         return
-    report.longrepr = _redact_pytest_longrepr(longrepr)
+    report.longrepr = cast(Any, _redact_pytest_longrepr(longrepr))
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:

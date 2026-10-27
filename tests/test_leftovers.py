@@ -19,6 +19,9 @@ from app.db import RedactedDsn
 from tests.conftest import (
     _LEFTOVER_TEST_DATABASES,
     _LEFTOVER_TEST_TABLES,
+    _ROLE_LIFE_LOCK_JOIN_TIMEOUT,
+    _SWEEP_ADVISORY_LOCK_KEY1,
+    _SWEEP_ADVISORY_LOCK_KEY2,
     PRODUCTION_TEST_USER,
     ROOT,
     _admin_engine,
@@ -29,14 +32,11 @@ from tests.conftest import (
     _drop_production_test_role,
     _hold_production_role_life_lock,
     _holds_own_life_lock,
-    _release_production_role_life_lock,
-    _ROLE_LIFE_LOCK_JOIN_TIMEOUT,
     _orphan_production_test_role,
     _pg_ident,
     _pg_literal,
+    _release_production_role_life_lock,
     _role_advisory_lock_keys,
-    _SWEEP_ADVISORY_LOCK_KEY1,
-    _SWEEP_ADVISORY_LOCK_KEY2,
     _SessionAdvisoryLock,
     _skip_or_fail_unix_socket_lock,
     drop_database_if_exists,
@@ -826,7 +826,8 @@ def test_owned_database_warning_is_logged_once(
         messages = [
             record.getMessage()
             for record in caplog.records
-            if "dueño de la base" in record.getMessage() and dbname in record.getMessage()
+            if "dueño de la base" in record.getMessage()
+            and dbname in record.getMessage()
         ]
         assert len(messages) == 1
         assert asyncio.run(_role_exists(require_postgres, blocker)) == 1
