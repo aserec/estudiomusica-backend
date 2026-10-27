@@ -817,7 +817,8 @@ async def _drop_production_test_role(admin: RedactedDsn) -> None:
                     text(
                         "SELECT rolname FROM pg_roles "
                         "WHERE rolname LIKE 'em_prod_tests\\_%' ESCAPE '\\' "
-                        "OR rolname = :own"
+                        "OR rolname = :own "
+                        "ORDER BY rolname"
                     ),
                     {"own": PRODUCTION_TEST_USER},
                 )
