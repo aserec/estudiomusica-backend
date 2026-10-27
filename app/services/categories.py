@@ -275,6 +275,7 @@ async def create_category(
     reintenta y COMMITEA; el rollback del caller no deshace la fila
     (sonda P10). Relevante para #97.
     """
+
     async def once() -> Category:
         try:
             parent_id = body.parent_id
