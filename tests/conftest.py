@@ -643,10 +643,13 @@ def _hold_production_role_life_lock(admin: RedactedDsn) -> None:
     _ROLE_LIFE_LOCK = lock
 
 
-def _release_production_role_life_lock() -> None:
+def _release_production_role_life_lock() -> _SessionAdvisoryLock | None:
+    global _ROLE_LIFE_LOCK
     lock = _ROLE_LIFE_LOCK
     if lock is not None:
         lock.stop()
+        _ROLE_LIFE_LOCK = None
+    return lock
 
 
 async def _role_life_lock_is_free(connection: Any, name: str) -> bool:
@@ -859,8 +862,7 @@ def drop_production_test_role(admin_url: str | RedactedDsn) -> None:
     except Exception as exc:
         drop_error = exc
     finally:
-        _release_production_role_life_lock()
-    lock = _ROLE_LIFE_LOCK
+        lock = _release_production_role_life_lock()
     lost = lock is not None and lock.lost
     if lost:
         raise RuntimeError(

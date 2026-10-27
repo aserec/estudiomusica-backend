@@ -29,6 +29,7 @@ from tests.conftest import (
     _drop_production_test_role,
     _hold_production_role_life_lock,
     _holds_own_life_lock,
+    _release_production_role_life_lock,
     _orphan_production_test_role,
     _pg_ident,
     _pg_literal,
