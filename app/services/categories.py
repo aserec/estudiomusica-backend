@@ -268,6 +268,13 @@ async def list_categories(session: AsyncSession) -> list[Category]:
 async def create_category(
     session: AsyncSession, body: CategoryCreate, *, commit: bool = False
 ) -> Category:
+    """Crea una categoría.
+
+    ``commit=False`` (UoW / tests): no commitea ni reintenta; un
+    ``rollback`` del caller deshace la fila. ``commit=True`` (HTTP):
+    reintenta y COMMITEA; el rollback del caller no deshace la fila
+    (sonda P10). Relevante para #97.
+    """
     async def once() -> Category:
         try:
             parent_id = body.parent_id
@@ -306,6 +313,8 @@ async def update_category(
     *,
     commit: bool = False,
 ) -> Category:
+    """Actualiza una categoría. Mismo contrato dual que ``create_category``."""
+
     fields = body.model_fields_set
     next_name_update = body.name
     next_sort: int | None = None
@@ -364,6 +373,8 @@ async def update_category(
 async def delete_category(
     session: AsyncSession, category_id: UUID, *, commit: bool = False
 ) -> None:
+    """Borra una categoría. Mismo contrato dual que ``create_category``."""
+
     async def once() -> None:
         try:
             row = await _lock_category(session, category_id)
